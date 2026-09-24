@@ -14,12 +14,14 @@
     "build": "npm run build --workspace web",
     "start": "npm run start --workspace server",
     "db:reset": "npm run db:reset --workspace server",
-    "test": "vitest run",
+    "test": "npm run test:server && npm run test:firm",
     "test:security": "vitest run tests/security",
     "test:e2e": "vitest run tests/e2e",
     "build:firm": "npm run build:demo --workspace firm",
     "dev:firm": "npm run dev --workspace firm",
-    "build:all": "npm run build --workspace web && npm run build:demo --workspace firm"
+    "build:all": "npm run build --workspace web && npm run build:demo --workspace firm",
+    "test:server": "vitest run",
+    "test:firm": "npm run test --workspace firm"
   },
   "engines": {
     "node": ">=20.11"

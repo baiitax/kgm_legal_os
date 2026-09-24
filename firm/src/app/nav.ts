@@ -69,6 +69,12 @@ export interface NavGroup {
   readonly leaves: readonly NavLeaf[];
   /** A group with no leaves is itself a leaf in the rail. */
   readonly to?: string;
+  /**
+   * Renders inert: present in the §12 structure, claiming no access, routing
+   * nowhere. Used where a module has no permission code to gate on yet, so
+   * showing it live would promise a destination the server cannot authorize.
+   */
+  readonly planned?: boolean;
 }
 
 /**
@@ -117,7 +123,10 @@ const GROUP_DEFS: ReadonlyArray<NavGroupDef> = [
     labelKey: 'nav.clients',
     icon: IconClients,
     to: '/clients',
-    permissions: [],
+    // A standalone group still needs a gate. `permissions: []` would mean every
+    // authenticated member sees Clients, including one whose first click fires a
+    // request the server refuses.
+    permissions: ['clients.read'],
     leaves: [],
   },
   {
@@ -125,7 +134,9 @@ const GROUP_DEFS: ReadonlyArray<NavGroupDef> = [
     labelKey: 'nav.matters',
     icon: IconMatters,
     to: '/matters',
-    permissions: [],
+    // matters.read is practice-scoped; matters.read_all is firm-wide. Either
+    // entitles the member to the list, and the server narrows the rows.
+    permissions: ['matters.read', 'matters.read_all'],
     leaves: [],
   },
   {
@@ -170,8 +181,12 @@ const GROUP_DEFS: ReadonlyArray<NavGroupDef> = [
     labelKey: 'nav.communication',
     icon: IconMessages,
     to: '/messages',
+    // No `messages.*` permission exists in the server catalogue, so there is
+    // nothing to gate this on and it cannot honestly claim the member may open
+    // it. Rendered inert until the module and its permission both exist.
     permissions: [],
     leaves: [],
+    planned: true,
   },
   {
     id: 'admin',
@@ -241,7 +256,13 @@ export function visibleNav(permissions: readonly string[]): VisibleNav {
     if (group.leaves.length === 0) {
       // A standalone entry (dashboard, clients, matters, messages).
       if (!canSee(set, group.permissions)) continue;
-      if (group.to) allowed.add(group.to);
+      /*
+        A planned group is shown but is NOT a permitted path. Adding its `to` to
+        allowedPaths would let the router guard pass a route that has no screen
+        and no server authorization behind it — the guard would say "allowed" and
+        the member would land on nothing.
+      */
+      if (group.to && !group.planned) allowed.add(group.to);
       groups.push({ group, leaves: [] });
       continue;
     }

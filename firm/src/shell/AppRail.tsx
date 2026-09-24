@@ -163,7 +163,14 @@ function RailGroup({ group, leaves, collapsed, path, labelId, onNavigate }: Rail
 
   // A group with no children routes directly.
   if (group.to) {
-    const active = isPathAllowed(new Set([group.to]), path);
+    /*
+      A planned group reuses the same RailLink inert path a planned leaf takes,
+      rather than growing a second rendering of "unavailable". Its path was
+      deliberately kept out of allowedPaths in nav.ts, so an active link here
+      would hand the router a route the guard then rejects — the member clicks a
+      module the interface just offered and lands on Denied.
+    */
+    const active = !group.planned && isPathAllowed(new Set([group.to]), path);
     return (
       <div className="kgm-rail__group" role="group" aria-label={t(group.labelKey)}>
         <RailLink
@@ -172,6 +179,7 @@ function RailGroup({ group, leaves, collapsed, path, labelId, onNavigate }: Rail
           icon={<Icon size={18} />}
           active={active}
           collapsed={collapsed}
+          planned={group.planned}
           onNavigate={onNavigate}
         />
       </div>
