@@ -194,10 +194,10 @@ const GROUP_DEFS: ReadonlyArray<NavGroupDef> = [
     icon: IconAdmin,
     permissions: [],
     leaves: [
-      { id: 'users', to: '/admin/users', labelKey: 'nav.users', icon: IconUsers, permissions: ['users.read'], planned: true },
+      { id: 'users', to: '/admin/users', labelKey: 'nav.users', icon: IconUsers, permissions: ['users.read'] },
       { id: 'teams', to: '/admin/teams', labelKey: 'nav.teams', icon: IconTeams, permissions: ['departments.manage', 'roles.read'], planned: true },
-      { id: 'settings', to: '/admin/settings', labelKey: 'nav.settings', icon: IconAdmin, permissions: ['settings.read', 'settings.manage'], planned: true },
-      { id: 'audit', to: '/admin/audit', labelKey: 'nav.audit', icon: IconAudit, permissions: ['audit.read'], planned: true },
+      { id: 'settings', to: '/admin/settings', labelKey: 'nav.settings', icon: IconAdmin, permissions: ['settings.read', 'settings.manage'] },
+      { id: 'audit', to: '/admin/audit', labelKey: 'nav.audit', icon: IconAudit, permissions: ['audit.read'] },
     ],
   },
 ];

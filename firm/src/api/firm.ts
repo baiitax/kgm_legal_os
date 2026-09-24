@@ -338,7 +338,14 @@ export const firmApi = {
 
   // ---- administration (§49-§51) -----------------------------------------
 
-  async members(): Promise<{ members: FirmMemberRow[] }> {
+  /**
+   * Members and the tenant's role catalogue in one call.
+   *
+   * `roles` is not an optional extra: the assign-role picker needs it, and
+   * fetching it separately would allow the picker and the member row to disagree
+   * about what is assignable.
+   */
+  async members(): Promise<{ count: number; members: FirmMemberRow[]; roles: FirmRoleRow[] }> {
     return request('/admin/members');
   },
 
@@ -350,8 +357,54 @@ export const firmApi = {
     return request(`/admin/audit${suffix}`);
   },
 
-  async settings(): Promise<FirmSessionPayload['settings']> {
-    return request('/admin/settings');
+  /**
+   * Full tenant settings (§49).
+   *
+   * NOT the same shape as the session payload's `settings` field, which carries
+   * only the seven values the shell needs to render branding and session policy.
+   * This returns all fifteen, including support contacts, VAT, fiscal year and
+   * password policy. Typing it as the session subset would silently discard
+   * eight real fields at compile time while still sending them over the wire.
+   */
+  async settings(): Promise<TenantSettings> {
+    return request<TenantSettings>('/admin/settings');
+  },
+
+  // ---- administration mutations (§49, §72) --------------------------------
+
+  /**
+   * Changes a membership's status. Suspended sessions die with the change, so
+   * the authorization graph and any live browser tab cannot disagree.
+   *
+   * The server refuses to let an admin change their OWN status, and requires MFA
+   * when the tenant does. Both surface as ordinary errors here — the UI must not
+   * pre-empt them by disabling controls, because the rules live server-side and
+   * a stale client-side guess is how people learn the interface lies.
+   */
+  async setMemberStatus(
+    membershipId: string,
+    status: 'active' | 'suspended' | 'deactivated' | 'left',
+  ): Promise<{ membershipId: string; status: string }> {
+    return request(`/admin/members/${encodeURIComponent(membershipId)}/status`, {
+      method: 'POST',
+      body: { status },
+    });
+  },
+
+  /**
+   * Grants or revokes a role. This is THE privilege-escalation endpoint, so it is
+   * gated on permission + MFA + same-tenant target + the role existing in this
+   * tenant. Nothing about the caller's own roles is taken from the request.
+   */
+  async setMemberRole(
+    membershipId: string,
+    roleCode: string,
+    revoke = false,
+  ): Promise<{ membershipId: string; roleCode: string; revoked: boolean }> {
+    return request(`/admin/members/${encodeURIComponent(membershipId)}/roles`, {
+      method: 'POST',
+      body: { roleCode, revoke },
+    });
   },
 };
 
@@ -447,19 +500,87 @@ export interface FirmDevice {
   current: boolean;
 }
 
+/**
+ * One row of the administration member list (§49).
+ *
+ * CORRECTED AGAINST A LIVE RESPONSE, NOT INFERRED.
+ *
+ * The first draft of this interface declared `roles`, `departments`,
+ * `practiceAreas` and `mfaEnabled`. The endpoint sends none of them: those
+ * belong to the SESSION payload, which describes the caller's own resolved
+ * authority, whereas this list describes other people's membership records. The
+ * two look similar enough to conflate, and nothing fails loudly when you do —
+ * a table renders, and four columns are permanently empty.
+ *
+ * The endpoint does send `staffId`, `internalRole`, `jobTitleAr` and
+ * `clientVisible`, which the draft omitted entirely.
+ *
+ * Note what is deliberately ABSENT rather than nullable: there is no
+ * `permissions` array here. Member-level authority is resolved per request on
+ * the server; a cached copy in a list response would be a second source of
+ * truth that could disagree with it.
+ */
 export interface FirmMemberRow {
   membershipId: string;
   userId: string;
+  staffId: string;
   email: string;
   displayName: string;
   displayNameAr: string | null;
+  /** Directory role, e.g. PARTNER / LAWYER. Distinct from the RBAC roles table. */
+  internalRole: string | null;
   jobTitle: string | null;
+  jobTitleAr: string | null;
+  /** active | suspended | deactivated | left */
   status: string;
-  roles: PrincipalRole[];
-  departments: PrincipalDepartment[];
-  practiceAreas: string[];
+  /** Whether this member may appear in the client portal's team projection. */
+  clientVisible: boolean;
   ceilings: AuthorityCeilings;
-  mfaEnabled: boolean;
+}
+
+/**
+ * A role definition in the tenant's RBAC catalogue.
+ *
+ * Returned ALONGSIDE the member list by `/admin/members` rather than by a second
+ * call: assigning a role needs the set of assignable codes, and fetching it
+ * separately would leave a window where the picker and the member row disagree.
+ */
+export interface FirmRoleRow {
+  id: string;
+  code: string;
+  name: string;
+  nameAr: string;
+  description: string | null;
+  /** System roles cannot be deleted or have their permissions edited. */
+  isSystem: boolean;
+  isActive: boolean;
+}
+
+/**
+ * Tenant settings as returned by `/admin/settings` (§49).
+ *
+ * Transcribed from a live response. The seven fields that overlap with the
+ * session payload's `settings` are a deliberate subset of these fifteen — the
+ * shell needs branding and session policy, an administrator needs all of it.
+ */
+export interface TenantSettings {
+  tenantId: string;
+  displayName: string | null;
+  displayNameAr: string | null;
+  brandKey: string | null;
+  supportEmail: string | null;
+  supportPhone: string | null;
+  timezone: string;
+  currency: string;
+  /** Stored as a fraction: 0.15, not 15. */
+  vatRate: number;
+  /** 1-12. Saudi firms commonly run a non-January fiscal year. */
+  fiscalYearStartMonth: number;
+  notificationChannels: string[];
+  mfaRequired: boolean;
+  passwordMinLength: number;
+  sessionAbsoluteMinutes: number;
+  sessionIdleMinutes: number;
 }
 
 /**

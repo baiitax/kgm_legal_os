@@ -28,6 +28,7 @@ import {
 } from '@kgm/ui';
 import { bootstrapCsrf, firmApi } from '../api/firm.js';
 import { useFirmSession } from '../auth/FirmSession.js';
+import { LanguageToggle } from '../components/LanguageToggle.js';
 import '../shell/shell.css';
 
 /**
@@ -203,6 +204,21 @@ export function SignIn() {
 
       {/* ---- form side ---- */}
       <main className="firm-auth__form">
+        {/*
+          The language toggle is placed OUTSIDE the card, at the top of the form
+          column, so it is reachable before any credential is entered — and stays
+          reachable when the card is showing an error, an MFA step or the demo
+          account list.
+
+          This matters most here rather than anywhere else in the app: a member
+          who lands on an interface in a language they cannot read has no other
+          way in. Inside the shell they could at least find the topbar control by
+          position; on a sign-in screen they have nothing but this.
+        */}
+        <div className="firm-auth__langbar">
+          <LanguageToggle />
+        </div>
+
         <div className="firm-auth__card">
           <div className="firm-auth__cardhead">
             <h2 className="firm-auth__cardtitle">{inMfa ? t('auth.mfaTitle') : t('auth.signInTitle')}</h2>

@@ -1386,3 +1386,144 @@
    at that firm, so switching is an informed choice rather than a guess. */
 .kgm-profile__tenant { display: flex; flex-direction: column; gap: 3px; inline-size: 100%; }
 .kgm-profile__tenantrole { padding-inline-start: var(--sp-2); color: var(--text-dim); font-size: var(--fs-meta); }
+
+/* --------------------------------------------------------------------------
+   LANGUAGE TOGGLE · §Arabic-first, §40
+   --------------------------------------------------------------------------
+   Two labelled options rather than an icon that cycles. The control must state
+   which language is active and which a press selects, because it is the one
+   control a member needs when they cannot read the interface they are looking at.
+
+   Glass treatment matches the topbar's other controls (§03): a translucent track
+   with a solid pill on the active option, so "selected" reads as raised rather
+   than merely recoloured. Colour alone would fail §31.
+   -------------------------------------------------------------------------- */
+
+.kgm-langtoggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-full);
+  background: var(--glass-1);
+  backdrop-filter: blur(var(--blur-bar));
+  -webkit-backdrop-filter: blur(var(--blur-bar));
+}
+
+.kgm-langtoggle__opt {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: var(--fs-meta);
+  font-weight: var(--fw-medium);
+  line-height: 1;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color var(--dur-fast) var(--ease-standard),
+              background-color var(--dur-fast) var(--ease-standard);
+}
+
+.kgm-langtoggle__opt:hover:not([aria-pressed='true']) {
+  color: var(--text-hi);
+  background: var(--kgm-green-500-07);
+}
+
+/*
+  The active option gets a solid pill and a raised colour, not just a tint.
+  `aria-pressed` is the selector rather than a data attribute so the visual state
+  and the announced state cannot diverge — a class applied separately from the
+  ARIA state is how a toggle ends up looking on while reading off.
+*/
+.kgm-langtoggle__opt[aria-pressed='true'] {
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: var(--fw-semibold);
+}
+
+.kgm-langtoggle__opt:focus-visible {
+  outline: 2px solid var(--focus-ring-color);
+  outline-offset: 2px;
+}
+
+/* Compact variant for the topbar's 60px icon row. */
+.kgm-langtoggle--compact .kgm-langtoggle__opt {
+  padding: var(--sp-1) var(--sp-2);
+  font-size: var(--fs-caption);
+  min-inline-size: 30px;
+  text-align: center;
+}
+
+/* Pre-authentication placement on the sign-in screen (§40). */
+.firm-auth__langbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-block-end: var(--sp-4);
+}
+
+@media (max-width: 899px) {
+  /* Full-width row above the card on a phone: easier to hit, and it does not
+     compete with the card's own alignment. */
+  .firm-auth__langbar { justify-content: center; }
+}
+
+/* Mobile parity in the More sheet (§17). */
+.kgm-morelist__prefs {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-3) 0 var(--sp-4);
+  margin-block-end: var(--sp-2);
+  border-block-end: 1px solid var(--line-soft);
+}
+
+.kgm-morelist__prefs .kgm-morelist__grouplabel { margin: 0; }
+
+/* The new administration pages reuse the shared page chrome. */
+.firm-cellperson { display: flex; flex-direction: column; gap: 2px; min-inline-size: 0; }
+.firm-cellperson__name { color: var(--text-hi); font-weight: var(--fw-medium); overflow: hidden; text-overflow: ellipsis; }
+.firm-cellperson__role { color: var(--text-dim); font-size: var(--fs-caption); }
+.firm-cellmono { font-family: var(--font-mono); font-size: var(--fs-caption); color: var(--text-md); }
+.firm-cellstrong { font-weight: var(--fw-semibold); color: var(--text-hi); }
+.firm-celltime { display: flex; flex-direction: column; gap: 2px; }
+.firm-celltime__abs { color: var(--text-md); font-size: var(--fs-body-sm); }
+.firm-celltime__rel { color: var(--text-dim); font-size: var(--fs-caption); }
+.firm-cellresource { display: flex; flex-direction: column; gap: 2px; }
+.firm-cellresource__id { color: var(--text-dim); font-family: var(--font-mono); font-size: var(--fs-caption); }
+.firm-currency { color: var(--text-dim); font-size: var(--fs-caption); }
+.firm-rowactions { display: flex; align-items: center; justify-content: flex-end; gap: var(--sp-2); }
+.firm-rowactions__self { color: var(--text-faint); font-size: var(--fs-caption); cursor: help; }
+.firm-toolbar__stat { color: var(--text-dim); font-size: var(--fs-caption); font-variant-numeric: tabular-nums; }
+.firm-footnote { margin: var(--sp-4) 0 0; color: var(--text-dim); font-size: var(--fs-caption); line-height: var(--lh-relaxed); max-inline-size: 78ch; }
+
+/* Definition list for the settings screen. */
+.firm-settingsgrid { display: grid; gap: var(--sp-4); grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); align-items: start; }
+.firm-deflist { margin: 0; display: flex; flex-direction: column; }
+.firm-deflist__row {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: var(--sp-4); padding: var(--sp-3) 0;
+  border-block-end: 1px solid var(--line-soft);
+}
+.firm-deflist__row:last-child { border-block-end: 0; }
+.firm-deflist__label { color: var(--text-dim); font-size: var(--fs-body-sm); margin: 0; }
+.firm-deflist__value { color: var(--text-hi); font-size: var(--fs-body-sm); margin: 0; text-align: end; }
+
+/* Sub-section (role catalogue) beneath a table. */
+.firm-subsection { margin-block-start: var(--sp-6); }
+.firm-subsection__head { margin-block-end: var(--sp-3); }
+.firm-subsection__title { margin: 0; font-size: var(--fs-h3); font-weight: var(--fw-semibold); color: var(--text-hi); }
+.firm-subsection__sub { margin: var(--sp-1) 0 0; color: var(--text-dim); font-size: var(--fs-caption); }
+.firm-rolelist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
+.firm-rolelist__item {
+  display: flex; align-items: center; gap: var(--sp-3);
+  padding: var(--sp-3); border: 1px solid var(--line-soft);
+  border-radius: var(--radius-md); background: var(--glass-1);
+}
+.firm-rolelist__item[data-inactive='true'] { opacity: 0.6; }
+.firm-rolelist__code { font-family: var(--font-mono); font-size: var(--fs-caption); color: var(--gold-400); min-inline-size: 8ch; }
+.firm-rolelist__name { color: var(--text-md); font-size: var(--fs-body-sm); flex: 1; }

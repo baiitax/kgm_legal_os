@@ -31,6 +31,10 @@ import { ThemeProvider } from './app/theme.js';
 import { AppRail } from './shell/AppRail.js';
 import { Topbar } from './shell/Topbar.js';
 import { BottomNav } from './shell/BottomNav.js';
+import { LanguageToggle } from './components/LanguageToggle.js';
+import { Users } from './pages/Users.js';
+import { Audit } from './pages/Audit.js';
+import { Settings } from './pages/Settings.js';
 import { Denied, navigate, useGuard, useRoute } from './app/routes.js';
 import { FIRM_I18N } from './i18n/dictionary.js';
 import { SignIn } from './pages/SignIn.js';
@@ -159,7 +163,7 @@ function Shell() {
 /**
  * The route table.
  *
- * A switch rather than a router library: there are four real screens, and a
+ * A switch rather than a router library: there are seven real screens, and a
  * declarative route table would be more code than the routes it describes. If the
  * module count grows past a dozen this is the piece to replace — and it is the
  * only piece, because the guard and the nav are already separate from it.
@@ -175,6 +179,12 @@ function Routed({ basePath, onNavigate }: { basePath: string; onNavigate: (to: s
       return <Dashboard onNavigate={onNavigate} />;
     case '/matters':
       return <Matters onNavigate={onNavigate} />;
+    case '/admin/users':
+      return <Users />;
+    case '/admin/audit':
+      return <Audit />;
+    case '/admin/settings':
+      return <Settings />;
     default:
       return <PlannedScreen onNavigate={onNavigate} />;
   }
@@ -225,6 +235,17 @@ function MoreSheetBody({ onNavigate }: { onNavigate: (to: string) => void }) {
 
   return (
     <div className="kgm-morelist">
+      {/*
+        Mobile parity for the language control. The topbar's compact toggle is
+        present on phones too, but the More sheet is where a mobile member looks
+        for settings-shaped controls, and omitting it there would make the toggle
+        discoverable on desktop and effectively hidden on a phone.
+      */}
+      <div className="kgm-morelist__prefs">
+        <p className="kgm-morelist__grouplabel">{t('topbar.language')}</p>
+        <LanguageToggle />
+      </div>
+
       {nav.groups.map(({ group, leaves }) => {
         const tiles = group.to
           ? [{ id: group.id, to: group.to, labelKey: group.labelKey, icon: group.icon, planned: false }]

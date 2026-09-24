@@ -20,13 +20,14 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  Badge, BottomSheet, Button, Drawer, IconButton, IconBell, IconCheck, IconGlobe,
+  Badge, BottomSheet, Button, Drawer, IconButton, IconBell, IconCheck,
   IconLogout, IconMenu, IconMoon, IconSearch, IconShield, IconSun, IconMonitor,
   IconUsers, Tooltip, useI18n, useFmt,
 } from '@kgm/ui';
 import { useFirmSession } from '../auth/FirmSession.js';
 import { useTheme } from '../app/theme.js';
 import { CommandPalette } from './CommandPalette.js';
+import { LanguageToggle } from '../components/LanguageToggle.js';
 import './shell.css';
 
 interface TopbarProps {
@@ -35,7 +36,7 @@ interface TopbarProps {
 }
 
 export function Topbar({ onNavigate, onSignOut }: TopbarProps) {
-  const { t, lang, setLang } = useI18n();
+  const { t, lang } = useI18n();
   const { mode, cycle } = useTheme();
   const {
     displayName, displayNameAr, member, tenants, activeTenantId,
@@ -285,13 +286,13 @@ export function Topbar({ onNavigate, onSignOut }: TopbarProps) {
             />
           </Tooltip>
 
-          <Tooltip label={`${t('topbar.language')} — ${t('topbar.switchLanguage')}`}>
-            <IconButton
-              label={t('topbar.language')}
-              icon={<IconGlobe size={18} />}
-              onClick={() => setLang(lang === 'ar' ? 'en' : 'ar')}
-            />
-          </Tooltip>
+          {/*
+            Was an icon-only globe that cycled ar→en→ar. Replaced with the
+            labelled toggle: a globe says "another language exists" without saying
+            which is active or which a press selects. Compact variant, because the
+            topbar is a 60px row shared with notifications, theme and profile.
+          */}
+          <LanguageToggle variant="compact" />
 
           <Tooltip label={`${t('topbar.theme')} — ${themeLabel}`}>
             <IconButton
