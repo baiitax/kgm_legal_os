@@ -1,0 +1,60 @@
+# ---------------------------------------------------------------------------
+# Dependencies & build output
+# ---------------------------------------------------------------------------
+node_modules/
+web/dist/
+firm/dist/
+packages/*/dist/
+*.tsbuildinfo
+
+# ---------------------------------------------------------------------------
+# Runtime data — NEVER commit these.
+#
+# server/data holds the SQLite database and the local private storage volume.
+# The database contains scrypt password hashes, session token hashes, TOTP
+# secrets and recovery codes for the demo accounts, and the storage volume holds
+# the materialized document bytes. Both are regenerated from the seed on boot
+# (`npm run db:reset`), so nothing is lost by ignoring them — and committing
+# credential material, even synthetic, normalizes the wrong habit.
+# ---------------------------------------------------------------------------
+server/data/
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.db-journal
+
+# ---------------------------------------------------------------------------
+# Secrets & environment
+#
+# The server refuses to boot in production without KGM_MASTER_KEY,
+# KGM_HASH_PEPPER and KGM_SIGNED_URL_SECRET, and has no hardcoded defaults —
+# there is nothing to recover from a committed .env, and a great deal to lose.
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+service-account*.json
+
+# ---------------------------------------------------------------------------
+# Test & tooling artifacts
+# ---------------------------------------------------------------------------
+coverage/
+.nyc_output/
+*.log
+npm-debug.log*
+.vitest-cache/
+
+# ---------------------------------------------------------------------------
+# Editors & OS
+# ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp

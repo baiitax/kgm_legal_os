@@ -1,0 +1,119 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import Database from 'better-sqlite3';
+import type {
+  Db, Param, Queryable, RequestContext, Row, RunResult, Scope,
+} from './types.js';
+import { SQLITE_SCHEMA } from './schema.sqlite.js';
+import { FIRM_RBAC_SCHEMA } from './schema.firm.sqlite.js';
+
+/**
+ * SQLite driver (demo / development / test).
+ *
+ * better-sqlite3 is synchronous; we expose the async Queryable interface so the
+ * repository is driver-agnostic. Parameters are coerced: JS booleans become
+ * 0/1 because better-sqlite3 rejects boolean binds.
+ *
+ * SQLite has no Row Level Security and no roles, so the auth/portal phase
+ * distinction is inert here. The application-layer authorization in
+ * server/src/domain is the enforcement point for the demo — and that is exactly
+ * the layer tests/security exercises. Production gets RLS and column grants as
+ * a second, independent line of defence.
+ */
+export class SqliteDb implements Db {
+  readonly driver = 'sqlite' as const;
+  private readonly db: Database.Database;
+
+  constructor(file: string) {
+    if (file !== ':memory:') {
+      fs.mkdirSync(path.dirname(path.resolve(file)), { recursive: true });
+    }
+    this.db = new Database(file);
+    this.db.pragma('foreign_keys = ON');
+    this.db.pragma('journal_mode = WAL');
+  }
+
+  static createInMemory(): SqliteDb {
+    return new SqliteDb(':memory:');
+  }
+
+  migrate(): void {
+    // Portal schema first: the Firm OS tables reference matters/staff/users, so
+    // order matters. Applying them separately keeps the portal schema file
+    // byte-identical to the version its 185 tests were written against.
+    this.db.exec(SQLITE_SCHEMA);
+    this.db.exec(FIRM_RBAC_SCHEMA);
+  }
+
+  private coerce(params: Param[] = []): (string | number | null | Buffer)[] {
+    return params.map((p) => {
+      if (p === undefined || p === null) return null;
+      if (typeof p === 'boolean') return p ? 1 : 0;
+      if (p instanceof Date) return p.toISOString();
+      return p as string | number | Buffer;
+    });
+  }
+
+  async all<T = Row>(sql: string, params: Param[] = []): Promise<T[]> {
+    return this.db.prepare(sql).all(...this.coerce(params)) as T[];
+  }
+
+  async get<T = Row>(sql: string, params: Param[] = []): Promise<T | undefined> {
+    return this.db.prepare(sql).get(...this.coerce(params)) as T | undefined;
+  }
+
+  async run(sql: string, params: Param[] = []): Promise<RunResult> {
+    const info = this.db.prepare(sql).run(...this.coerce(params));
+    return { changes: Number(info.changes) };
+  }
+
+  async acquire(): Promise<Scope> {
+    let depth = 0;
+    const q: Queryable = {
+      all: <T = Row>(sql: string, params: Param[] = []) => this.all<T>(sql, params),
+      get: <T = Row>(sql: string, params: Param[] = []) => this.get<T>(sql, params),
+      run: (sql: string, params: Param[] = []) => this.run(sql, params),
+    };
+    return {
+      q,
+      setContext: async (_ctx: RequestContext) => {
+        /* no RLS in SQLite; authorization is enforced in the domain layer */
+      },
+      tx: async <T>(fn: () => Promise<T>): Promise<T> => {
+        if (depth > 0) {
+          depth++;
+          try {
+            return await fn();
+          } finally {
+            depth--;
+          }
+        }
+        // Deferred: a read-only request never takes the write lock, so
+        // concurrent reads are not serialized. Writes upgrade automatically.
+        this.db.exec('BEGIN');
+        depth = 1;
+        try {
+          const result = await fn();
+          this.db.exec('COMMIT');
+          return result;
+        } catch (err) {
+          try {
+            this.db.exec('ROLLBACK');
+          } catch {
+            /* already unwound */
+          }
+          throw err;
+        } finally {
+          depth = 0;
+        }
+      },
+      end: async () => {
+        /* nothing to release: the connection is process-wide */
+      },
+    };
+  }
+
+  async close(): Promise<void> {
+    this.db.close();
+  }
+}

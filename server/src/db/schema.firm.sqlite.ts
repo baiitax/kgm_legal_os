@@ -1,0 +1,330 @@
+/**
+ * Internal Firm OS — identity, RBAC and matter-scoping schema (SQLite mirror).
+ *
+ * Production source of truth: supabase/migrations/0006_firm_rbac.sql. This file
+ * is the SQLite equivalent, kept column-for-column compatible for every column
+ * the application reads. SQLite has no RLS and no roles, so the authorization
+ * enforcement point for the demo is `server/src/domain/permissions.ts` — which
+ * is the same resolver production uses, sitting behind the same RLS policies.
+ *
+ * Deliberate structural choices:
+ *
+ *  · `users` stays the single authentication identity for BOTH audiences. A
+ *    person is a `users` row; what they are allowed to do is decided by
+ *    `client_users` (portal) or `firm_memberships` (internal). There is no
+ *    conversion path between the two, and no shared session table.
+ *
+ *  · `permissions` is a GLOBAL catalogue with no tenant_id. Permission codes are
+ *    part of the product's contract with itself — a tenant may grant or withhold
+ *    them, but cannot invent new ones at runtime, which keeps `assertCan()`
+ *    call sites auditable.
+ *
+ *  · `roles` is tenant-scoped. System roles are seeded per tenant and marked
+ *    `is_system` so they cannot be deleted; a firm may add its own.
+ *
+ *  · Matter scoping lives in `matter_controls` and `matter_permissions`, NOT in
+ *    new columns on `matters`. The portal's `matters` table is untouched, which
+ *    is what keeps its 185 tests meaningful as a regression gate.
+ *
+ *  · Financial ceilings (§10) are per-membership nullable columns. NULL means
+ *    "no authority", never "unlimited" — the resolver treats an absent ceiling
+ *    as a refusal, not as a pass.
+ */
+export const FIRM_RBAC_SCHEMA = `
+-- ============================ PERMISSION CATALOGUE =========================
+create table if not exists permissions (
+  code text primary key,
+  module text not null,
+  description text,
+  description_ar text,
+  sensitivity text not null default 'normal',
+  created_at text not null
+);
+create index if not exists permissions_module_idx on permissions(module);
+
+-- ============================ ROLES ========================================
+create table if not exists roles (
+  id text primary key,
+  tenant_id text references tenants(id),
+  code text not null,
+  name text not null,
+  name_ar text not null,
+  description text,
+  description_ar text,
+  is_system integer not null default 0,
+  is_active integer not null default 1,
+  created_at text not null,
+  updated_at text not null,
+  unique (tenant_id, code)
+);
+
+create table if not exists role_permissions (
+  role_id text not null references roles(id) on delete cascade,
+  permission_code text not null references permissions(code) on delete cascade,
+  granted_at text not null,
+  primary key (role_id, permission_code)
+);
+create index if not exists role_permissions_perm_idx on role_permissions(permission_code);
+
+-- ============================ FIRM MEMBERSHIP ==============================
+create table if not exists firm_memberships (
+  id text primary key,
+  tenant_id text not null references tenants(id),
+  user_id text not null references users(id),
+  staff_id text not null references staff(id),
+  job_title text,
+  job_title_ar text,
+  status text not null default 'invited',
+  -- Financial authority (§10). NULL = no authority. Never read NULL as unlimited.
+  financial_authority_sar real,
+  writeoff_authority_sar real,
+  discount_authority_pct real,
+  joined_at text,
+  left_at text,
+  invited_by_membership_id text,
+  created_at text not null,
+  updated_at text not null,
+  unique (tenant_id, user_id),
+  check (status in ('invited','active','suspended','left','deactivated')),
+  check (financial_authority_sar is null or financial_authority_sar >= 0),
+  check (writeoff_authority_sar is null or writeoff_authority_sar >= 0),
+  check (discount_authority_pct is null or (discount_authority_pct >= 0 and discount_authority_pct <= 100))
+);
+create index if not exists firm_memberships_user_idx on firm_memberships(user_id);
+create index if not exists firm_memberships_staff_idx on firm_memberships(staff_id);
+create index if not exists firm_memberships_status_idx on firm_memberships(tenant_id, status);
+
+create table if not exists membership_roles (
+  membership_id text not null references firm_memberships(id) on delete cascade,
+  role_id text not null references roles(id) on delete cascade,
+  granted_by_membership_id text,
+  -- See migration 0006: attribution is mandatory unless the origin provably has
+  -- no membership actor (the tenant's first grant, or an invitation).
+  grant_origin text not null default 'admin',
+  granted_at text not null,
+  revoked_at text,
+  primary key (membership_id, role_id),
+  check (grant_origin in ('admin','bootstrap','invitation','system'))
+);
+
+-- ============================ DEPARTMENTS (§5) =============================
+create table if not exists departments (
+  id text primary key,
+  tenant_id text not null references tenants(id),
+  code text not null,
+  name text not null,
+  name_ar text not null,
+  parent_id text references departments(id),
+  is_active integer not null default 1,
+  created_at text not null,
+  updated_at text not null,
+  unique (tenant_id, code)
+);
+
+create table if not exists department_members (
+  department_id text not null references departments(id) on delete cascade,
+  membership_id text not null references firm_memberships(id) on delete cascade,
+  is_lead integer not null default 0,
+  joined_at text not null,
+  primary key (department_id, membership_id)
+);
+
+-- Practice-area scoping (the chosen model): departments stay the org tree, and
+-- a member's legal reach is the set of practice areas they may see. An empty set
+-- means "assigned matters only"; the sentinel '*' means unrestricted within the
+-- tenant, which is what a Managing Partner holds.
+create table if not exists membership_practice_areas (
+  membership_id text not null references firm_memberships(id) on delete cascade,
+  practice_area text not null,
+  granted_at text not null,
+  primary key (membership_id, practice_area)
+);
+
+-- ============================ MATTER SCOPING (§17, §27) ====================
+create table if not exists matter_controls (
+  matter_id text primary key references matters(id) on delete cascade,
+  tenant_id text not null references tenants(id),
+  department_id text references departments(id),
+  owner_membership_id text references firm_memberships(id),
+  lead_staff_id text references staff(id),
+  supervising_partner_staff_id text references staff(id),
+  is_restricted integer not null default 0,
+  restriction_reason text,
+  restriction_reason_ar text,
+  restricted_at text,
+  restricted_by_membership_id text,
+  created_at text not null,
+  updated_at text not null
+);
+create index if not exists matter_controls_tenant_idx on matter_controls(tenant_id, is_restricted);
+
+create table if not exists matter_permissions (
+  id text primary key,
+  matter_id text not null references matters(id) on delete cascade,
+  tenant_id text not null references tenants(id),
+  membership_id text not null references firm_memberships(id) on delete cascade,
+  access_level text not null,
+  reason text,
+  granted_by_membership_id text,
+  granted_at text not null,
+  revoked_at text,
+  unique (matter_id, membership_id),
+  check (access_level in ('full','edit','operational','view','financial','compliance','none'))
+);
+create index if not exists matter_permissions_member_idx on matter_permissions(membership_id, revoked_at);
+
+-- ============================ FIRM AUTH ====================================
+create table if not exists firm_sessions (
+  id text primary key,
+  membership_id text not null references firm_memberships(id) on delete cascade,
+  user_id text not null references users(id) on delete cascade,
+  tenant_id text not null references tenants(id),
+  token_hash text not null unique,
+  created_at text not null,
+  last_activity text not null,
+  expires_at text not null,
+  idle_expires_at text not null,
+  ip_hash text,
+  ip_country text,
+  user_agent text,
+  device_label text,
+  browser text,
+  os text,
+  mfa_verified_at text,
+  trusted_device_id text,
+  -- Permissions are re-resolved every request; this is only a cache hint and is
+  -- never consulted for an authorization decision.
+  role_snapshot text,
+  revoked_at text,
+  revoke_reason text
+);
+create index if not exists firm_sessions_membership_idx on firm_sessions(membership_id, revoked_at);
+create index if not exists firm_sessions_expiry_idx on firm_sessions(expires_at, idle_expires_at);
+
+create table if not exists firm_invitations (
+  id text primary key,
+  tenant_id text not null references tenants(id),
+  staff_id text references staff(id),
+  email text not null collate nocase,
+  full_name text not null,
+  full_name_ar text,
+  token_hash text not null unique,
+  token_hint text not null,
+  expires_at text not null,
+  accepted_at text,
+  revoked_at text,
+  created_by_membership_id text,
+  accept_ip_hash text,
+  created_at text not null
+);
+create index if not exists firm_invitations_email_idx on firm_invitations(tenant_id, email);
+
+create table if not exists firm_invitation_roles (
+  invitation_id text not null references firm_invitations(id) on delete cascade,
+  role_id text not null references roles(id) on delete cascade,
+  primary key (invitation_id, role_id)
+);
+
+create table if not exists firm_devices (
+  id text primary key,
+  user_id text not null references users(id) on delete cascade,
+  fingerprint_hash text not null,
+  label text,
+  trusted_until text,
+  mfa_trusted integer not null default 0,
+  last_seen_at text not null,
+  revoked_at text,
+  created_at text not null,
+  unique (user_id, fingerprint_hash)
+);
+
+-- ============================ TENANT CONFIG (multi-firm) ===================
+create table if not exists tenant_settings (
+  tenant_id text primary key references tenants(id) on delete cascade,
+  display_name text,
+  display_name_ar text,
+  brand_key text,
+  support_email text,
+  support_phone text,
+  timezone text not null default 'Asia/Riyadh',
+  currency text not null default 'SAR',
+  vat_rate real not null default 0.15,
+  fiscal_year_start_month integer not null default 1,
+  notification_channels text not null default '["in_app","email"]',
+  mfa_required integer not null default 0,
+  password_min_length integer not null default 12,
+  session_absolute_minutes integer not null default 720,
+  session_idle_minutes integer not null default 60,
+  updated_at text not null,
+  check (vat_rate >= 0 and vat_rate <= 1),
+  check (password_min_length >= 8 and password_min_length <= 128)
+);
+
+-- ============================ INTEGRITY TRIGGERS ===========================
+-- System role templates are the product's definition of each role (section 7).
+-- A firm may copy and tune one, but the copy stays marked is_system, and a
+-- marked role can neither be deleted nor quietly unmarked -- because unmarking
+-- is how an administrator would delete it on the next request. Migration 0006
+-- carries the same pair of guards as roles_system_guard.
+create trigger if not exists roles_system_no_delete
+  before delete on roles
+  for each row when (old.is_system = 1)
+  begin select raise(ABORT, 'a system role template cannot be deleted'); end;
+
+create trigger if not exists roles_system_no_unmark
+  before update of is_system on roles
+  for each row when (old.is_system = 1 and new.is_system <> 1)
+  begin select raise(ABORT, 'a system role cannot be unmarked'); end;
+
+-- A membership cannot be moved between firms: tenant_id is fixed at creation.
+create trigger if not exists firm_membership_tenant_immutable
+  before update of tenant_id on firm_memberships
+  begin select raise(ABORT, 'firm_memberships.tenant_id is immutable'); end;
+
+-- A matter's tenant cannot drift from the matter it controls.
+create trigger if not exists matter_controls_tenant_matches
+  before insert on matter_controls
+  for each row when (
+    (select tenant_id from matters where id = new.matter_id) is not new.tenant_id
+  )
+  begin select raise(ABORT, 'matter_controls.tenant_id must match the matter'); end;
+
+-- Restricting a matter must record why and by whom (§27, §83).
+create trigger if not exists matter_controls_restriction_needs_reason
+  before update of is_restricted on matter_controls
+  for each row when (new.is_restricted = 1 and old.is_restricted = 0)
+  begin
+    select case
+      when new.restriction_reason is null or new.restricted_by_membership_id is null
+      then raise(ABORT, 'restricting a matter requires a reason and an actor')
+    end;
+  end;
+
+-- An explicit 'none' grant is a denial record, not a grant: it may not be
+-- silently turned into access by clearing the row.
+create trigger if not exists matter_permissions_level_not_empty
+  before insert on matter_permissions
+  for each row when (new.access_level is null or length(trim(new.access_level)) = 0)
+  begin select raise(ABORT, 'matter_permissions.access_level is required'); end;
+
+-- Role grants are attributed, unless the origin explains why there is no actor.
+create trigger if not exists membership_roles_needs_actor
+  before insert on membership_roles
+  for each row when (new.grant_origin = 'admin' and new.granted_by_membership_id is null)
+  begin select raise(ABORT, 'a role grant must record who granted it'); end;
+
+create trigger if not exists membership_roles_needs_actor_update
+  before update of grant_origin, granted_by_membership_id on membership_roles
+  for each row when (new.grant_origin = 'admin' and new.granted_by_membership_id is null)
+  begin select raise(ABORT, 'a role grant must record who granted it'); end;
+
+-- Left/deactivated memberships may not hold a live session: revocation is
+-- enforced by the resolver too, but the database should not be able to hold a
+-- contradictory state.
+create trigger if not exists firm_sessions_no_active_after_left
+  before insert on firm_sessions
+  for each row when (
+    (select status from firm_memberships where id = new.membership_id) not in ('active')
+  )
+  begin select raise(ABORT, 'only an active membership may hold a session'); end;
+`;
