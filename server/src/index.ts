@@ -13,6 +13,7 @@ import { createApp } from './app.js';
 import { getDb, closeDb } from './db/index.js';
 import { seedDemoData } from './db/seed.js';
 import { SqliteDb } from './db/sqlite.js';
+import { PostgresDb } from './db/postgres.js';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -33,6 +34,16 @@ async function main() {
       verbose: process.env.QUIET_SEED !== '1',
       storage: container.storage,
     });
+  }
+
+  /*
+    Run the isolation check BEFORE binding the port.
+    Ordering is the whole point: a server that has already started accepting
+    requests has to be noticed and stopped, which in practice means it is not.
+    One that refuses to boot cannot be missed.
+  */
+  if (db instanceof PostgresDb) {
+    await db.assertSafeRole();
   }
 
   const app = createApp(container);

@@ -2,6 +2,9 @@ import pg from 'pg';
 import type {
   Db, Param, Queryable, RequestContext, Row, RunResult, Scope,
 } from './types.js';
+import {
+  judgeRole, shouldRefuseToStart, EXPECTED_ROLE_HINT, type RoleFacts,
+} from './role-guard.js';
 
 const { Pool } = pg;
 
@@ -17,7 +20,14 @@ const { Pool } = pg;
  *   (b) has NO grant whatsoever on internal_notes,
  *   (c) has INSERT-only access to audit_events,
  *   (d) cannot INSERT into client_users, and
- *   (e) is subject to FORCED Row Level Security.
+ *   (e) is a plain non-owner role, so RLS and the column grants apply to it.
+ *
+ *   NOTE ON (e): the isolation comes from the ROLE, not from FORCE ROW LEVEL
+ *   SECURITY — this repository enables RLS on 64 tables and forces it on none.
+ *   The distinction matters because RLS does not constrain a superuser, a role
+ *   with BYPASSRLS, or the table owner. `assertSafeRole()` below refuses to start
+ *   if any of those is what actually connected, rather than trusting that it did
+ *   not happen.
  *
  * So even a repository bug that selects too much, or forgets a WHERE clause,
  * fails closed at the database. That is the §49 guarantee: the browser is not
@@ -51,6 +61,56 @@ export class PostgresDb implements Db {
     this.pool.on('error', (err) => {
       console.error('[db] idle client error', err.message);
     });
+  }
+
+  /**
+   * Refuses to run when the connection can bypass Row Level Security.
+   *
+   * Called during boot, before the first request is served, so a dangerous
+   * connection is a startup failure rather than a silent loss of the database
+   * boundary. See role-guard.ts for why each condition matters.
+   */
+  async assertSafeRole(): Promise<void> {
+    const res = await this.pool.query<{
+      rolname: string; rolsuper: boolean; rolbypassrls: boolean; owned_tables: string;
+    }>(
+      `select current_user as rolname,
+              r.rolsuper,
+              r.rolbypassrls,
+              (select count(*)
+                 from pg_class c
+                 join pg_namespace n on n.oid = c.relnamespace
+                where n.nspname = 'public'
+                  and c.relkind = 'r'
+                  and pg_get_userbyid(c.relowner) = current_user)::text as owned_tables
+         from pg_roles r
+        where r.rolname = current_user`,
+    );
+
+    const row = res.rows[0];
+    if (!row) {
+      // Cannot establish the identity of the connection => cannot clear it.
+      throw new Error(
+        'FATAL: could not determine the database role identity. Refusing to start ' +
+          'without confirming that Row Level Security applies.',
+      );
+    }
+
+    const facts: RoleFacts = {
+      roleName: row.rolname,
+      isSuperuser: row.rolsuper,
+      bypassesRls: row.rolbypassrls,
+      ownedTables: Number.parseInt(row.owned_tables, 10) || 0,
+    };
+
+    const verdict = judgeRole(facts);
+    if (shouldRefuseToStart(verdict)) {
+      throw new Error(
+        `FATAL: refusing to start — ${verdict.detail}\n        ${EXPECTED_ROLE_HINT}`,
+      );
+    }
+
+    console.log(`  db role    ${verdict.detail}`);
   }
 
   /** Rewrites `?` placeholders to $1..$n, ignoring quoted literals. */
