@@ -101,10 +101,24 @@ export class Repo {
 
   async createUser(row: Record<string, Param>) {
     await this.q().run(
+      /*
+        `mfa_enabled` is written as the literal FALSE, not 0.
+
+        SQLite stores booleans as integers and accepts either; Postgres has a real
+        boolean type and refuses `0` for it outright:
+
+          column "mfa_enabled" is of type boolean but expression is of type integer
+
+        This is the same class as `is_active = 1` and `coalesce(bool, 0)`, and the
+        reason the repository's SQL conventions say booleans are written as the
+        literals TRUE/FALSE. It surfaced on the invitation flow, because accepting
+        an invitation is the one path that CREATES a user — every other flow reads
+        an existing row, so a fresh account could not be provisioned at all.
+      */
       `insert into users (id, email, password_hash, password_updated_at, email_verified_at,
                           status, failed_login_count, mfa_enabled, preferred_language,
                           preferred_calendar, created_at, updated_at)
-       values (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?)`,
+       values (?, ?, ?, ?, ?, ?, 0, FALSE, ?, ?, ?, ?)`,
       [row.id, row.email, row.password_hash ?? null, row.password_updated_at ?? null,
        row.email_verified_at ?? null, row.status ?? 'invited', row.preferred_language ?? 'ar',
        row.preferred_calendar ?? 'islamic-umalqura', row.created_at, row.updated_at],
