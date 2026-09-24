@@ -32,7 +32,7 @@ import { clientIp, geoHint, parseUserAgent } from '../lib/http.js';
 import { PortalError, unauthorized } from '../lib/errors.js';
 import { issueCsrfToken, clearCsrfToken } from './csrf.js';
 import { PermissionEngine, type FirmPrincipal } from '../domain/permissions.js';
-import type { Row } from '../db/types.js';
+import type { Row, Scope } from '../db/types.js';
 
 /** The firm principal as the request layer sees it: principal + session facts. */
 export interface FirmSession {
@@ -167,6 +167,37 @@ export class FirmSessionManager {
       await this.firm.revokeFirmSession(String(session.id), 'expired');
       this.clearCookies(res);
       return null;
+    }
+
+    /*
+      SWITCH TO THE FIRM ROLE BEFORE RE-RESOLVING THE GRAPH.
+
+      `resolveByMembershipId` reads `firm_memberships` — including the §73
+      authority ceilings — plus roles, permissions and practice areas. Those are
+      `firm_api`'s tables, and until this point the connection is `portal_api`,
+      which holds only the seven narrow columns the LOGIN lookup needs (0011).
+
+      The right moment to switch is here rather than by widening the auth-phase
+      grant, because here the identity is no longer in question: the caller
+      presented the 256-bit session token, it hashed to a live, unrevoked,
+      unexpired row, and that row names the membership and tenant. Nothing is
+      inferred. Moving the switch any earlier is impossible (the token has not been
+      checked yet); moving it later means the graph is read by the wrong role.
+
+      Widening `portal_api` at the auth phase instead would have handed an
+      unauthenticated read path the firm's financial-authority ceilings — the least
+      appropriate columns in the schema for that path, and the exact trade this
+      avoids.
+    */
+    const scope = (req as { scope?: Scope }).scope;
+    if (scope) {
+      await scope.setContext({
+        phase: 'firm',
+        tenantId: String(session.tenant_id),
+        userId: String(session.user_id),
+        clientIds: [],
+        membershipId: String(session.membership_id),
+      });
     }
 
     // Re-resolve the whole authorization graph. This is the line that makes

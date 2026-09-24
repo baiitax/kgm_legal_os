@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "start": "tsx src/index.ts",
+    "dev": "node --env-file-if-exists=.env --import tsx --watch src/index.ts",
+    "start": "node --env-file-if-exists=.env --import tsx src/index.ts",
     "db:reset": "tsx src/db/reset.ts",
     "test": "vitest run",
     "test:security": "vitest run ../tests/security",

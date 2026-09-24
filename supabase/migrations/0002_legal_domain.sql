@@ -295,16 +295,6 @@ create table if not exists public.message_reads (
   primary key (message_id, reader_kind, reader_id)
 );
 
-create table if not exists public.message_attachments (
-  id          uuid primary key default gen_random_uuid(),
-  message_id  uuid not null references public.messages(id) on delete cascade,
-  tenant_id   uuid not null references public.tenants(id) on delete restrict,
-  document_id uuid references public.documents(id) on delete set null,
-  file_name   text not null,
-  size_bytes  bigint,
-  created_at  timestamptz not null default now()
-);
-
 -- ----------------------------------------------------------------------------
 -- DOCUMENTS  (§17, §18, §19)
 -- ----------------------------------------------------------------------------
@@ -374,6 +364,26 @@ create trigger document_readable_guard
   before insert or update on public.documents
   for each row execute function public.assert_document_readable();
 
+-- ----------------------------------------------------------------------------
+-- MESSAGE ATTACHMENTS
+-- ----------------------------------------------------------------------------
+-- Defined HERE, after `documents`, rather than beside the other message tables
+-- above. It carries a foreign key to public.documents(id), and PostgreSQL
+-- requires the referenced table to already exist — placing it with its
+-- siblings made the whole migration fail with
+--   "relation public.documents does not exist".
+--
+-- The dependency, not the topic, decides the position.
+create table if not exists public.message_attachments (
+  id          uuid primary key default gen_random_uuid(),
+  message_id  uuid not null references public.messages(id) on delete cascade,
+  tenant_id   uuid not null references public.tenants(id) on delete restrict,
+  document_id uuid references public.documents(id) on delete set null,
+  file_name   text not null,
+  size_bytes  bigint,
+  created_at  timestamptz not null default now()
+);
+
 create table if not exists public.document_access_log (
   id            bigint generated always as identity primary key,
   document_id   uuid not null references public.documents(id) on delete cascade,
@@ -409,7 +419,19 @@ create table if not exists public.invoices (
                     ('draft','pending_internal_approval','approved','sent',
                      'partially_paid','paid','overdue','cancelled','written_off')),
   -- CLIENT-SAFE lifecycle (§20). The portal reads this column only.
-  client_status     text not null default 'awaiting_payment' check (client_status in
+  --
+  -- NULLABLE AND NO DEFAULT, deliberately. `derive_invoice_client_status`
+  -- returns NULL for 'draft' and 'pending_internal_approval' -- an unapproved
+  -- invoice has no client-facing state and is "not projected at all".
+  --
+  -- This column was first written `not null default 'awaiting_payment'`, which
+  -- contradicted both that function and the SQLite schema (`client_status text`).
+  -- The contradiction fails loudly on an explicit NULL insert, but it has a
+  -- worse silent mode: an INSERT that omits the column takes the DEFAULT, so a
+  -- DRAFT invoice would be shown to the client as "awaiting payment" -- a demand
+  -- for money on an invoice the firm never released. A CHECK passes on NULL, so
+  -- the constraint below still holds for every non-null value.
+  client_status     text check (client_status in
                     ('awaiting_payment','partially_paid','paid','overdue','cancelled')),
   storage_key       text,                     -- rendered PDF, private bucket
   approved_by_staff uuid references public.staff(id),
@@ -442,16 +464,32 @@ create table if not exists public.invoice_lines (
 create or replace function public.guard_invoice_state()
 returns trigger language plpgsql as $$
 begin
-  -- Financial state may only move forward through defined transitions, and
-  -- amount_paid may only increase via a recorded payment.
-  if new.amount_paid < old.amount_paid then
-    raise exception 'invoice amount_paid cannot decrease outside a refund record';
+  -- TG_OP is branched explicitly. OLD is unassigned on INSERT, so the UPDATE-only
+  -- rules (monotonicity, overpayment) cannot be evaluated on the insert path --
+  -- referencing OLD fields there is undefined rather than merely null.
+  if tg_op = 'UPDATE' then
+    -- Financial state may only move forward through defined transitions, and
+    -- amount_paid may only increase via a recorded payment.
+    if new.amount_paid < old.amount_paid then
+      raise exception 'invoice amount_paid cannot decrease outside a refund record';
+    end if;
+    if new.amount_paid > new.total then
+      raise exception 'invoice cannot be overpaid without a credit record';
+    end if;
+  elsif tg_op = 'INSERT' then
+    if new.amount_paid > new.total then
+      raise exception 'invoice cannot be overpaid without a credit record';
+    end if;
+    if new.amount_paid < 0 then
+      raise exception 'invoice amount_paid cannot be negative';
+    end if;
   end if;
-  if new.amount_paid > new.total then
-    raise exception 'invoice cannot be overpaid without a credit record';
-  end if;
-  -- client_status must be derived, never independently asserted.
-  if new.client_status <> public.derive_invoice_client_status(new.internal_status, new.amount_paid, new.total, new.due_date) then
+
+  -- client_status must be derived, never independently asserted. Applies to both
+  -- INSERT and UPDATE, so an insert cannot back-door a draft invoice into the
+  -- client's list by pushing a plausible-looking status.
+  if new.client_status is distinct from
+     public.derive_invoice_client_status(new.internal_status, new.amount_paid, new.total, new.due_date) then
     raise exception 'client_status must be derived from internal_status, not set directly';
   end if;
   return new;
@@ -472,8 +510,11 @@ create or replace function public.derive_invoice_client_status(
 $$;
 
 drop trigger if exists invoice_state_guard on public.invoices;
+-- INSERT as well as UPDATE. On UPDATE the guard enforces monotonic amount_paid
+-- and forward-only transitions; on INSERT there is no old row to compare, so
+-- only the derivation rule applies (handled inside the function).
 create trigger invoice_state_guard
-  before update on public.invoices
+  before insert or update on public.invoices
   for each row execute function public.guard_invoice_state();
 
 create table if not exists public.payments (

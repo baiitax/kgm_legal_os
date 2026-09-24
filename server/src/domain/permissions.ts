@@ -337,6 +337,37 @@ export class PermissionEngine {
   }
 
   /**
+   * May this member LIFT the restriction on this matter (§27)?
+   *
+   * Without this, a restriction is a one-way door. `levelFromFacts` puts
+   * `isRestricted` above every derived level, so the member who restricts a
+   * matter with anything but an explicit grant immediately resolves to 'none' —
+   * and the route, which requires MATTER_MANAGE ('full') to call
+   * setMatterRestriction at all, then refuses them. The same rule that makes a
+   * restriction strong makes it irreversible: a write that changes the state
+   * cannot be judged by the state it changes, which is the 0019 lesson in
+   * another layer.
+   *
+   * The right is narrow on purpose. It is not a widening of visibility: the
+   * holder sees nothing new, and §27's precedence for everyone else is
+   * untouched. It reverts exactly one action — the recorded actor's own — and
+   * `restricted_by_membership_id` is the audit trail that proves it. A member
+   * who did not apply the restriction still needs 'full' through the normal
+   * precedence (an explicit grant, since a restricted matter grants nothing
+   * else), so an unrelated member cannot unlock a matter they cannot see.
+   *
+   * Both `matters.restrict` (checked by the route) and this must hold.
+   */
+  canLiftRestriction(
+    p: FirmPrincipal,
+    facts: Pick<MatterAuthFacts, 'isRestricted' | 'restrictedByMembershipId'>,
+  ): boolean {
+    if (!facts.isRestricted) return false;
+    return facts.restrictedByMembershipId !== null
+      && facts.restrictedByMembershipId === p.membershipId;
+  }
+
+  /**
    * Practice scope, including the two widening permissions.
    *
    * `'*'` is the Managing Partner's sentinel. `matters.read_all` is what lets

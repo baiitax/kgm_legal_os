@@ -38,6 +38,7 @@ import {
   resetLimit, sleep,
 } from './ratelimit.js';
 import { sendEmail, templates } from './email.js';
+import type { Scope } from '../db/types.js';
 import { toBool } from '../db/types.js';
 import type { Param } from '../db/types.js';
 
@@ -170,6 +171,42 @@ export class FirmAuthService {
     // Deterministic tenant: the first active membership. `listActiveMemberships`
     // orders by tenant name, so this is stable across requests.
     const target = memberships[0];
+
+    /*
+      SWITCH THE DATABASE CONTEXT TO 'firm' BEFORE RESOLVING PERMISSIONS.
+
+      `engine.resolve` reads `firm_memberships` — including the
+      `financial_authority_sar`, `writeoff_authority_sar` and
+      `discount_authority_pct` ceilings that determine whether this principal may
+      approve a given amount (§73). Those are the firm's own data, granted to
+      `firm_api` and deliberately NOT to `portal_api`, which holds only the seven
+      narrow columns the membership lookup itself needs (migration 0011).
+
+      Until this point the request is still in the pre-session 'auth' phase, so the
+      connection is `portal_api` and that read is refused. Moving the switch here
+      is not an escalation: the password has already been verified and the active
+      membership already established, so the request genuinely IS a firm request
+      and the previous context was simply describing the state before
+      authentication. Doing it the other way — widening `portal_api` at the auth
+      phase to cover the authority ceilings — would have handed an unauthenticated
+      read path the least appropriate columns in the schema.
+
+      `setContext` is documented as callable more than once on a scope (that is how
+      `attachFirmPrincipal` re-sets it for every subsequent firm request); this is
+      the same operation, performed once at the moment the identity becomes known.
+      The scope's `end()` resets the role and the GUCs on release either way.
+    */
+    const scope = (req as { scope?: Scope }).scope;
+    if (scope) {
+      await scope.setContext({
+        phase: 'firm',
+        tenantId: target.tenantId,
+        userId,
+        clientIds: [],
+        membershipId: target.membershipId,
+      });
+    }
+
     const principal = await this.engine.resolve(userId, target.tenantId);
     if (!principal) {
       // Race: the membership was suspended between the two reads. Refuse.
@@ -431,13 +468,37 @@ export class FirmAuthService {
     email: string,
     userId: string | null,
   ): Promise<void> {
-    await this.firm.recordLoginAttempt({
-      email: email || null,
-      userId,
-      ipHash: ctx.ipHash ?? 'unknown',
-      userAgent: ctx.userAgent,
-      outcome,
-    });
+    /*
+      Best-effort, deliberately.
+
+      `outcome` is constrained by `login_attempts_outcome_check`. When that
+      vocabulary and this code fall out of step, a plain `await` propagates the
+      rejection out of the login handler and the response becomes a 500 — which
+      is not merely a wrong status code but a disclosure: an unknown account
+      returns 401 while a valid password on a non-member account returns 500, so
+      the failure mode itself tells an unauthenticated caller that the address
+      exists and the password is right.
+
+      That is exactly what `firm_no_membership` did (fixed in migration 0025).
+      The check still is the contract — a missing row here is a real defect and
+      is logged loudly — but a defect in the telemetry must never be observable
+      to the caller. Compare the audit logger's `tryWrite`, which makes the same
+      choice for the same reason.
+    */
+    try {
+      await this.firm.recordLoginAttempt({
+        email: email || null,
+        userId,
+        ipHash: ctx.ipHash ?? 'unknown',
+        userAgent: ctx.userAgent,
+        outcome,
+      });
+    } catch (err) {
+      console.warn(
+        `[auth] login attempt not recorded (outcome "${outcome}" rejected by the database):`,
+        err instanceof Error ? err.message : err,
+      );
+    }
   }
 }
 

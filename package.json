@@ -21,7 +21,8 @@
     "dev:firm": "npm run dev --workspace firm",
     "build:all": "npm run build --workspace web && npm run build:demo --workspace firm",
     "test:server": "vitest run",
-    "test:firm": "npm run test --workspace firm"
+    "test:firm": "npm run test --workspace firm",
+    "build:vercel": "node scripts/build-vercel.mjs"
   },
   "engines": {
     "node": ">=20.11"

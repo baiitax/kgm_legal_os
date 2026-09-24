@@ -1,10 +1,144 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import pg from 'pg';
 import type {
   Db, Param, Queryable, RequestContext, Row, RunResult, Scope,
 } from './types.js';
 import {
-  judgeRole, shouldRefuseToStart, EXPECTED_ROLE_HINT, type RoleFacts,
+  judgeRole, judgeAssumedRoles, shouldRefuseToStart, EXPECTED_ROLE_HINT, FIRM_ROLE,
+  type RoleFacts, type AssumedRoleFacts,
 } from './role-guard.js';
+
+/**
+ * TLS, PINNED RATHER THAN DISABLED.
+ *
+ * Supabase signs its pooler with a private root — `*.pooler.supabase.com` <-
+ * Supabase Intermediate 2021 CA <- Supabase Root 2021 CA — which is published but
+ * absent from Node's bundled store (that store carries public roots only). So
+ * `ssl: { rejectUnauthorized: true }` against a Supabase host fails the handshake
+ * with SELF_SIGNED_CERT_IN_CHAIN, before any authentication happens.
+ *
+ * The common reaction is `rejectUnauthorized: false`, which is worse than it
+ * looks: it stops verifying the certificate chain entirely, so the connection is
+ * encrypted but anonymous, and any host presenting any certificate is accepted.
+ * On a database holding privileged legal data that is a real exposure.
+ *
+ * Pinning the root keeps full verification. The certificate that ships here was
+ * checked two ways before being trusted:
+ *   - SHA-256 80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:
+ *     F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA, matching Supabase's published
+ *     prod-ca-2021.crt and the copy the Supabase CLI embeds.
+ *   - Byte-identical to the self-signed root the live session pooler presents in
+ *     its own chain, so it is the certificate that actually signs these
+ *     connections and not merely one that resembles it.
+ *
+ * Verification stays ON (`rejectUnauthorized: true`). If the CA file is missing
+ * the process refuses to start rather than falling back to an unverified
+ * connection — a missing file is a deployment error, and silently downgrading
+ * transport security is the wrong way to report it.
+ */
+/**
+ * Where the pinned root is looked for, when `PG_SSL_CA` names a path.
+ *
+ * Resolved from `process.cwd()` rather than from `import.meta.url`, because this
+ * module is also bundled into a serverless function where `import.meta.url` does
+ * not describe a real file location. The candidate list covers the two shapes the
+ * repository is run in: the server package root (local, `npm start`) and the
+ * repository root (a bundle, a container image, a function).
+ */
+function caPathCandidates(): string[] {
+  const rel = ['server/certs/supabase-root-2021.crt', 'certs/supabase-root-2021.crt'];
+  const roots = [process.cwd(), path.resolve(process.cwd(), '..'), path.resolve(process.cwd(), '..', '..')];
+  const out: string[] = [];
+  for (const r of roots) for (const f of rel) out.push(path.resolve(r, f));
+  return out;
+}
+
+/**
+ * Resolves the pinned CA from `PG_SSL_CA`, which may be EITHER a path to the
+ * certificate OR its PEM contents.
+ *
+ * Accepting the PEM directly is what makes the pinned-CA approach usable on a
+ * serverless host, where a `.crt` file sitting next to the source is not traced
+ * into the function bundle and would be absent at runtime. Embedding the
+ * certificate in an environment variable keeps verification ON — the alternative,
+ * reached for too often, is `rejectUnauthorized: false`, which abandons
+ * verification entirely.
+ *
+ * Detected by content, not by filename, so either form works under one name.
+ */
+function resolvePinnedCa(): string {
+  const configured = process.env.PG_SSL_CA?.trim();
+  if (configured && configured.includes('BEGIN CERTIFICATE')) return configured;
+
+  const candidates = configured ? [configured, ...caPathCandidates()] : caPathCandidates();
+  for (const candidate of candidates) {
+    try {
+      const text = fs.readFileSync(candidate, 'utf8');
+      if (text.includes('BEGIN CERTIFICATE')) return text;
+    } catch {
+      /* try the next candidate */
+    }
+  }
+
+  throw new Error(
+    'FATAL: cannot find the pinned Supabase CA. Refusing to connect without ' +
+      'certificate verification. Set PG_SSL_CA to the PEM contents of Supabase\'s ' +
+      'root (or to a path containing it), or restore server/certs/supabase-root-2021.crt. ' +
+      `Looked at: ${candidates.join(', ')}`,
+  );
+}
+
+/** True for both `*.supabase.com` (pooler) and `*.supabase.co` (direct). */
+function isSupabaseHost(connectionString: string): boolean {
+  try {
+    const h = new URL(connectionString).hostname;
+    return h.endsWith('.supabase.com') || h.endsWith('.supabase.co') || h === 'supabase.com';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Builds the pg SSL option for a connection string.
+ *
+ * `PG_SSL_CA` points at a different pinned root, for a self-hosted Postgres or a
+ * Supabase project on a different CA. There is deliberately no
+ * "disable verification" switch.
+ */
+function sslFor(connectionString: string): pg.PoolConfig['ssl'] {
+  if (connectionString.includes('localhost') || connectionString.includes('127.0.0.1')) {
+    return undefined;
+  }
+  if (!isSupabaseHost(connectionString)) {
+    // A non-Supabase host: verify against Node's public roots.
+    return { rejectUnauthorized: true };
+  }
+
+  return { rejectUnauthorized: true, ca: resolvePinnedCa() };
+}
+
+/**
+ * Removes SSL parameters from a connection string.
+ *
+ * node-postgres parses the URL OVER the config object, so an `sslmode` in the
+ * string silently replaces whatever `ssl` option the code passed. A Supabase
+ * "copy connection string" includes `?sslmode=require`, which would therefore
+ * discard the pinned CA and reintroduce SELF_SIGNED_CERT_IN_CHAIN — a failure
+ * that looks like a certificate problem and is actually an option-precedence
+ * problem. Stripping them makes the explicit option the one that applies.
+ */
+function withoutSslParams(connectionString: string): string {
+  try {
+    const u = new URL(connectionString);
+    for (const k of ['sslmode', 'sslrootcert', 'sslcert', 'sslkey', 'sslnegotiation']) {
+      u.searchParams.delete(k);
+    }
+    return u.toString();
+  } catch {
+    return connectionString;
+  }
+}
 
 const { Pool } = pg;
 
@@ -38,6 +172,13 @@ const { Pool } = pg;
  * returns to the pool. A pooled connection can never carry one caller's
  * identity into another's request.
  */
+/**
+ * `RoleFacts` with `assumedRoles` writable. The interface keeps it readonly so
+ * callers cannot mutate the facts a verdict was derived from; the boot check
+ * fills it in after the connection has already been judged.
+ */
+type MutableRoleFacts = Omit<RoleFacts, 'assumedRoles'> & { assumedRoles?: readonly AssumedRoleFacts[] };
+
 export class PostgresDb implements Db {
   readonly driver = 'postgres' as const;
   private readonly pool: pg.Pool;
@@ -51,12 +192,12 @@ export class PostgresDb implements Db {
       );
     }
     this.pool = new Pool({
-      connectionString,
+      connectionString: withoutSslParams(connectionString),
       max,
       connectionTimeoutMillis: 8_000,
       idleTimeoutMillis: 60_000,
       allowExitOnIdle: false,
-      ssl: connectionString.includes('localhost') ? undefined : { rejectUnauthorized: true },
+      ssl: sslFor(connectionString),
     });
     this.pool.on('error', (err) => {
       console.error('[db] idle client error', err.message);
@@ -96,7 +237,7 @@ export class PostgresDb implements Db {
       );
     }
 
-    const facts: RoleFacts = {
+    const facts: MutableRoleFacts = {
       roleName: row.rolname,
       isSuperuser: row.rolsuper,
       bypassesRls: row.rolbypassrls,
@@ -110,7 +251,61 @@ export class PostgresDb implements Db {
       );
     }
 
+    /*
+      A clean `current_user` is not enough once requests can switch roles. The
+      roles reachable by SET ROLE are enumerated and judged by the same rules —
+      an unvetted `firm_api` would exempt the whole firm half of the product
+      from RLS while the guard printed `ok` for the connection.
+    */
+    facts.assumedRoles = await this.setReachableRoles();
+
+    const assumedVerdict = judgeAssumedRoles(facts);
+    if (assumedVerdict && shouldRefuseToStart(assumedVerdict)) {
+      throw new Error(
+        `FATAL: refusing to start — ${assumedVerdict.detail}\n        ${EXPECTED_ROLE_HINT}`,
+      );
+    }
+
     console.log(`  db role    ${verdict.detail}`);
+    const names = (facts.assumedRoles ?? []).map((r) => r.roleName).filter((n) => n !== facts.roleName);
+    if (names.length) {
+      console.log(`  db roles   may SET ROLE into ${names.map((n) => `"${n}"`).join(', ')} — checked, all safe`);
+    }
+  }
+
+  /**
+   * Every role this connection may `SET ROLE` into, with the same three flags the
+   * connection itself is judged on.
+   *
+   * `pg_has_role(..., 'SET')` is the right predicate rather than membership:
+   * membership can be granted WITH INHERIT FALSE, which is exactly the state
+   * migration 0008 creates. Such a role grants no privileges until it is
+   * explicitly assumed, so it is reachable — and therefore in scope here — even
+   * though `has_table_privilege` reports nothing on the connection.
+   */
+  private async setReachableRoles(): Promise<AssumedRoleFacts[]> {
+    const res = await this.pool.query<{
+      rolname: string; rolsuper: boolean; rolbypassrls: boolean; owned_tables: string;
+    }>(
+      `select r.rolname,
+              r.rolsuper,
+              r.rolbypassrls,
+              (select count(*)
+                 from pg_class c
+                 join pg_namespace n on n.oid = c.relnamespace
+                where n.nspname = 'public'
+                  and c.relkind = 'r'
+                  and pg_get_userbyid(c.relowner) = r.rolname)::text as owned_tables
+         from pg_roles r
+        where pg_has_role(current_user, r.oid, 'SET')
+        order by r.rolname`,
+    );
+    return res.rows.map((r) => ({
+      roleName: r.rolname,
+      isSuperuser: r.rolsuper,
+      bypassesRls: r.rolbypassrls,
+      ownedTables: Number.parseInt(r.owned_tables, 10) || 0,
+    }));
   }
 
   /** Rewrites `?` placeholders to $1..$n, ignoring quoted literals. */
@@ -193,6 +388,31 @@ export class PostgresDb implements Db {
         // which makes kgm_membership() return null and closes every firm_*
         // table by RLS.
         await client.query("select set_config('kgm.membership_id', $1, false)", [ctx.membershipId ?? '']);
+
+        /*
+          ROLE MATCHES AUDIENCE (§57, migration 0008).
+
+          The connection authenticates as `portal_api` and does NOT inherit
+          `firm_api` — that inheritance is what silently handed the portal
+          table-level SELECT on 22 tables and defeated every column-level grant
+          0004 wrote. A firm request therefore has to become firm_api for real.
+
+          `SET ROLE` (not `SET LOCAL ROLE`): this is not inside a transaction.
+          `SET LOCAL` outside a transaction block emits a warning and does
+          nothing, which would leave firm requests running as portal_api and
+          failing RLS closed — an empty firm OS with no error. The reset is in
+          `scope.end()`, which the middleware already must call.
+
+          Not switching roles for 'auth' keeps the pre-session window on the
+          narrowest role there is: an unauthenticated request cannot reach a
+          firm policy even if it could set the phase GUC, because it is not
+          firm_api and inherits nothing from it.
+        */
+        if (ctx.phase === 'firm') {
+          await client.query(`set role ${FIRM_ROLE}`);
+        } else {
+          await client.query('reset role');
+        }
       },
 
       async tx<T>(fn: () => Promise<T>): Promise<T> {
@@ -234,8 +454,20 @@ export class PostgresDb implements Db {
         ended = true;
         try {
           if (txDepth > 0) await client.query('ROLLBACK');
+          /*
+            RESET ROLE FIRST, and it is not optional.
+
+            `RESET ALL` resets GUCs; it does NOT reset the role. A connection
+            returned to the pool still holding `firm_api` would serve the next
+            request — plausibly a client-portal request — with the firm role's
+            policies and its unrestricted view of the internal columns. That is
+            the §57 failure this whole change removes, reintroduced through the
+            pool instead of through grants. RESET ROLE runs first so that even if
+            RESET ALL throws, the privilege drop has already happened.
+          */
+          await client.query('RESET ROLE');
           // Wipe every GUC so the connection cannot leak identity back to the
-          // pool. DISCARD ALL also resets prepared statements and search_path.
+          // pool.
           await client.query('RESET ALL');
         } catch {
           /* the client is broken; release() will destroy it */

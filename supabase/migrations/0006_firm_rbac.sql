@@ -386,6 +386,37 @@ $$;
 --      level, 'view' — how a partner sees their group's work without joining
 --      every team
 --   5. 'none'
+
+-- NOTE ON ORDER: this function is defined BEFORE matter_access_level(), which
+-- calls it. PostgreSQL validates `language sql` bodies at CREATE time, so a
+-- forward reference fails with
+--   "function public.kgm_holds(unknown) does not exist"
+-- The dependency, not the topic, decides the position.
+-- Permission lookup for a membership. SECURITY DEFINER over three leaf tables
+-- (membership_roles, role_permissions, roles) whose own policies never call
+-- back, so this is safe to use inside a matter-scoped policy. It is deliberately
+-- NOT used to authorize rows in firm_* tables — only to widen matter visibility
+-- for the two scope-bypassing read permissions.
+create or replace function public.kgm_holds(p_permission text)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1
+    from public.membership_roles mr
+    join public.roles r            on r.id = mr.role_id and r.is_active
+    join public.role_permissions rp on rp.role_id = r.id
+    where mr.membership_id   = public.kgm_membership()
+      and mr.revoked_at      is null
+      and rp.permission_code = p_permission
+  );
+$$;
+
+comment on function public.kgm_holds(text) is
+  'True when the calling membership holds a permission through any active, non-revoked role.';
 create or replace function public.matter_access_level(p_matter uuid)
 returns text
 language sql
@@ -436,31 +467,6 @@ $$;
 comment on function public.matter_access_level(uuid) is
   'full | edit | operational | view | financial | compliance | none. §17 + §27.';
 
--- Permission lookup for a membership. SECURITY DEFINER over three leaf tables
--- (membership_roles, role_permissions, roles) whose own policies never call
--- back, so this is safe to use inside a matter-scoped policy. It is deliberately
--- NOT used to authorize rows in firm_* tables — only to widen matter visibility
--- for the two scope-bypassing read permissions.
-create or replace function public.kgm_holds(p_permission text)
-returns boolean
-language sql
-stable
-security definer
-set search_path = public
-as $$
-  select exists (
-    select 1
-    from public.membership_roles mr
-    join public.roles r            on r.id = mr.role_id and r.is_active
-    join public.role_permissions rp on rp.role_id = r.id
-    where mr.membership_id   = public.kgm_membership()
-      and mr.revoked_at      is null
-      and rp.permission_code = p_permission
-  );
-$$;
-
-comment on function public.kgm_holds(text) is
-  'True when the calling membership holds a permission through any active, non-revoked role.';
 
 -- Row visibility: the gate the RLS policies actually use. Deliberately thin —
 -- every rule lives in matter_access_level() so there is exactly one place where

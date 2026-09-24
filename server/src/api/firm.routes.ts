@@ -307,7 +307,23 @@ export function firmRouter(c: Container): Router {
     // 'full' access on the matter itself. A partner from another practice group
     // cannot lock a matter they cannot see.
     c.permissions.assertCan(p, 'matters.restrict', { type: 'matter', id: matterId });
-    await c.permissions.requireMatter(p, matterId, MATTER_MANAGE);
+
+    if (body.restricted) {
+      await c.permissions.requireMatter(p, matterId, MATTER_MANAGE);
+    } else {
+      /*
+        Lifting a restriction cannot require a level the restriction itself
+        removed. See FirmPermissions.canLiftRestriction: the member who applied
+        the restriction may reverse it, and anyone else must still reach 'full'
+        through the normal precedence (an explicit grant).
+      */
+      const control = await c.firm.getRestrictionOwner(p.tenantId, matterId);
+      const mine = control !== null
+        && c.permissions.canLiftRestriction(p, control);
+      if (!mine) {
+        await c.permissions.requireMatter(p, matterId, MATTER_MANAGE);
+      }
+    }
 
     if (body.restricted && !body.reason) {
       throw badRequest('validation_failed', 'a restriction requires a recorded reason');

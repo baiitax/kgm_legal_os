@@ -5,6 +5,10 @@ node_modules/
 web/dist/
 firm/dist/
 packages/*/dist/
+
+# The assembled single-site output (scripts/build-vercel.mjs regenerates it).
+public/
+
 *.tsbuildinfo
 
 # ---------------------------------------------------------------------------

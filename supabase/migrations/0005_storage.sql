@@ -46,8 +46,17 @@ on conflict (id) do update
       file_size_limit = excluded.file_size_limit,
       allowed_mime_types = excluded.allowed_mime_types;
 
-comment on table storage.buckets is
-  'All KGM portal buckets are private (public=false). Signed URLs only.';
+-- `comment on` requires table ownership, which `postgres` does not have over
+-- Supabase's storage schema. Cosmetic, so it is applied when possible and
+-- skipped with a notice otherwise — never allowed to fail the migration.
+do $$
+begin
+  execute $c$comment on table storage.buckets is
+    'All KGM portal buckets are private (public=false). Signed URLs only.'$c$;
+exception
+  when insufficient_privilege then
+    raise notice 'Skipped storage.buckets comment (not the table owner).';
+end $$;
 
 -- ----------------------------------------------------------------------------
 -- OBJECT POLICIES
@@ -56,26 +65,96 @@ comment on table storage.buckets is
 -- NO browser-side Supabase client can ever read, list or write an object even
 -- if an anon/authenticated key were leaked.
 -- ----------------------------------------------------------------------------
-drop policy if exists "portal_objects_denied_anon"     on storage.objects;
-drop policy if exists "portal_objects_denied_auth"     on storage.objects;
-drop policy if exists "portal_objects_service_only"    on storage.objects;
+-- ----------------------------------------------------------------------------
+-- OBJECT POLICIES
+-- ----------------------------------------------------------------------------
+-- These are applied by the storage administrator, NOT by this migration.
+--
+-- WHY THEY ARE NOT HERE
+--   storage.objects is owned by `supabase_storage_admin`, and `postgres` is not
+--   a member of that role. `create policy` requires ownership, so this
+--   migration cannot create them; it reports what is outstanding and continues.
+--   Run supabase/ops/storage_object_policies.sql from the Supabase Dashboard's
+--   SQL editor (or as the storage admin) to apply them.
+--
+-- WHY THEY ARE `as restrictive` AND `using (false)`
+--   The first version of this file read:
+--
+--     create policy "portal_objects_denied_anon" on storage.objects
+--       for all to anon
+--       using (bucket_id in ('client-documents', ...))
+--       with check (false);
+--
+--   That does the OPPOSITE of its name. In PostgreSQL, `USING` governs
+--   SELECT/UPDATE/DELETE row visibility and `WITH CHECK` governs only writes.
+--   Permissive policies — the default — are OR'd together. So `USING (bucket_id
+--   in (...))` granted anon SELECT and DELETE on every object in those four
+--   buckets, while `WITH CHECK (false)` blocked writes.
+--
+--   Measured on a live Supabase instance with the policy exactly as written:
+--     SELECT  ALLOWED  (2 rows visible to anon)
+--     INSERT  denied
+--     UPDATE  denied
+--     DELETE  ALLOWED  (1 row deleted)
+--
+--   Since RLS was already enabled with no other policy, anon was denied by
+--   default; applying the migration as written would have GRANTED unauthenticated
+--   read and delete on client documents — a regression introduced by the
+--   security migration itself.
+--
+--   `as restrictive` ANDs with other policies instead of OR-ing, and
+--   `using (false)` admits no row. The combination denies the role outright and
+--   keeps denying even if a permissive policy is added later for another
+--   purpose. For a policy whose entire job is "never allow", restrictive is the
+--   only correct form.
+-- ----------------------------------------------------------------------------
 
-create policy "portal_objects_denied_anon" on storage.objects
-  for all to anon
-  using (bucket_id in ('client-documents','client-uploads','financial-documents','data-exports'))
-  with check (false);
+do $$
+declare
+  v_owner text;
+begin
+  select pg_get_userbyid(c.relowner) into v_owner
+    from pg_class c
+    join pg_namespace n on n.oid = c.relnamespace
+   where n.nspname = 'storage' and c.relname = 'objects';
 
-create policy "portal_objects_denied_auth" on storage.objects
-  for all to authenticated
-  using (bucket_id in ('client-documents','client-uploads','financial-documents','data-exports'))
-  with check (false);
+  if v_owner is distinct from current_user
+     and not pg_has_role(current_user, v_owner, 'member') then
+    raise notice
+      'STORAGE POLICIES NOT APPLIED: current_user (%) does not own storage.objects (owner: %). Run supabase/ops/storage_object_policies.sql as the storage administrator. Note: anon/authenticated are denied by default while RLS has no permissive policy, so this is hardening, not an open hole — but it is not yet explicit.',
+      current_user, v_owner;
+    return;
+  end if;
 
--- Service role bypasses RLS; this policy documents intent and covers any
--- non-superuser service connection.
-create policy "portal_objects_service_only" on storage.objects
-  for all to service_role
-  using (bucket_id in ('client-documents','client-uploads','financial-documents','data-exports'))
-  with check (bucket_id in ('client-documents','client-uploads','financial-documents','data-exports'));
+  execute 'drop policy if exists "portal_objects_denied_anon"  on storage.objects';
+  execute 'drop policy if exists "portal_objects_denied_auth"  on storage.objects';
+  execute 'drop policy if exists "portal_objects_service_only" on storage.objects';
+
+  execute $p$
+    create policy "portal_objects_denied_anon" on storage.objects
+      as restrictive for all to anon
+      using (false) with check (false)
+  $p$;
+
+  execute $p$
+    create policy "portal_objects_denied_auth" on storage.objects
+      as restrictive for all to authenticated
+      using (false) with check (false)
+  $p$;
+
+  -- service_role has BYPASSRLS, so this is inert in practice and documents
+  -- intent. Left permissive and bucket-scoped rather than restrictive: a
+  -- restrictive policy here would AND against every other policy for that role,
+  -- which is not what a scoping statement should do.
+  execute $p$
+    create policy "portal_objects_service_only" on storage.objects
+      for all to service_role
+      using (bucket_id in ('client-documents','client-uploads','financial-documents','data-exports'))
+      with check (bucket_id in ('client-documents','client-uploads','financial-documents','data-exports'))
+  $p$;
+
+  raise notice 'Storage object policies applied.';
+end $$;
 
 -- No listing of a bucket is ever exposed through a public endpoint.
 -- Object names embed tenant/client ids, so even a leaked list is not a

@@ -267,7 +267,14 @@ grant usage, select on sequence public.audit_events_id_seq to portal_api;
 -- NO select, NO update, NO delete. A client user cannot read, edit or erase
 -- the audit trail, and cannot even enumerate it.
 
-grant sequence usage on all sequences in schema public to portal_api;
+-- `GRANT USAGE ON ALL SEQUENCES IN SCHEMA ...`. The object-type keyword comes
+-- BEFORE the privileges, not after, and 'SEQUENCES' is only used in the ALL
+-- form. `grant sequence usage on ...` is not valid PostgreSQL.
+--
+-- USAGE only, not SELECT: USAGE is what nextval() requires for an INSERT into
+-- an identity column. SELECT would additionally expose last_value/currval of
+-- every sequence, which no portal query needs.
+grant usage on all sequences in schema public to portal_api;
 
 -- payments_service: the webhook path ----------------------------------------
 revoke all on all tables in schema public from payments_service;

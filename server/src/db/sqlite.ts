@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import Database from 'better-sqlite3';
+import { createRequire } from 'node:module';
+import type BetterSqlite3 from 'better-sqlite3';
 import type {
   Db, Param, Queryable, RequestContext, Row, RunResult, Scope,
 } from './types.js';
@@ -20,15 +21,39 @@ import { FIRM_RBAC_SCHEMA } from './schema.firm.sqlite.js';
  * the layer tests/security exercises. Production gets RLS and column grants as
  * a second, independent line of defence.
  */
+/**
+ * better-sqlite3 is a *native* module, so it is loaded lazily, on first use.
+ * Two reasons:
+ *
+ *   1. A Postgres deployment must not need a native SQLite binding to boot.
+ *      Serverless bundlers trace static imports, which would put the .node
+ *      binary on the critical path of every production request.
+ *   2. Native addons are built by postinstall scripts, and some CI and
+ *      serverless installers sandbox those scripts. Deferring the failure to
+ *      the moment the SQLite driver is actually selected keeps it off the
+ *      Postgres path entirely.
+ */
+let driver: typeof BetterSqlite3 | null = null;
+
+function loadDriver(): typeof BetterSqlite3 {
+  if (!driver) {
+    // createRequire from the process working directory resolves the ordinary
+    // node_modules layout and, unlike import.meta.url, survives bundling.
+    const req = createRequire(path.join(process.cwd(), 'index.js'));
+    driver = req('better-sqlite3') as typeof BetterSqlite3;
+  }
+  return driver;
+}
+
 export class SqliteDb implements Db {
   readonly driver = 'sqlite' as const;
-  private readonly db: Database.Database;
+  private readonly db: BetterSqlite3.Database;
 
   constructor(file: string) {
     if (file !== ':memory:') {
       fs.mkdirSync(path.dirname(path.resolve(file)), { recursive: true });
     }
-    this.db = new Database(file);
+    this.db = new (loadDriver())(file);
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('journal_mode = WAL');
   }

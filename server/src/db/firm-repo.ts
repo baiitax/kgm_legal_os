@@ -64,6 +64,10 @@ export interface MatterAuthFacts {
   teamRole: string | null;
   departmentCode: string | null;
   ownerMembershipId: string | null;
+  /** Who applied the current restriction, from matter_controls. Null when the
+   *  matter is unrestricted. This is what makes the restriction reversible by
+   *  the member who set it — see the lift rule in permissions.ts. */
+  restrictedByMembershipId: string | null;
 }
 
 export class FirmRepo {
@@ -244,12 +248,27 @@ export class FirmRepo {
   // THE AUTHORIZATION GRAPH
   // ==========================================================================
 
+  /*
+    PORTABILITY NOTE — `is_active = true`, NOT `is_active = 1`.
+
+    SQLite stores booleans as INTEGER 0/1, so `= 1` is accepted there and this
+    repository was written against SQLite. Postgres has a real boolean type and
+    rejects the comparison outright:
+
+        operator does not exist: boolean = integer
+
+    which fails the whole query — here, a firm sign-in, because `getRoles` is on
+    the permission-resolution path. `= true` is valid in both engines (SQLite has
+    had the TRUE literal since 3.23), so it is the form to use for any new
+    boolean predicate. The SQLite-only DDL in `schema.firm.sqlite.ts` keeps `= 1`,
+    which is correct there and never runs against Postgres.
+  */
   async getRoles(membershipId: string) {
     const rows = await this.q().all<Row>(
       `select r.id, r.code, r.name, r.name_ar, r.is_system
          from membership_roles mr
          join roles r on r.id = mr.role_id
-        where mr.membership_id = ? and mr.revoked_at is null and r.is_active = 1
+        where mr.membership_id = ? and mr.revoked_at is null and r.is_active = true
         order by r.code`,
       [membershipId],
     );
@@ -274,7 +293,7 @@ export class FirmRepo {
     const rows = await this.q().all<Row>(
       `select distinct rp.permission_code as code
          from membership_roles mr
-         join roles r on r.id = mr.role_id and r.is_active = 1
+         join roles r on r.id = mr.role_id and r.is_active = true
          join role_permissions rp on rp.role_id = r.id
         where mr.membership_id = ? and mr.revoked_at is null
         order by 1`,
@@ -288,7 +307,7 @@ export class FirmRepo {
       `select d.id, d.code, d.name, d.name_ar, dm.is_lead
          from department_members dm
          join departments d on d.id = dm.department_id
-        where dm.membership_id = ? and d.is_active = 1
+        where dm.membership_id = ? and d.is_active = true
         order by d.code`,
       [membershipId],
     );
@@ -334,14 +353,18 @@ export class FirmRepo {
   ): Promise<MatterAuthFacts | null> {
     const r = await this.q().get<Row>(
       `select m.id, m.tenant_id, m.practice_area, m.matter_number, m.client_id, m.internal_status,
-              coalesce(mc.is_restricted, 0) as is_restricted,
+              -- false, not 0: SQLite matches a boolean column against an
+              -- integer, Postgres refuses ("COALESCE types boolean and integer
+              -- cannot be matched"). Same portability rule as "is_active = true".
+              coalesce(mc.is_restricted, false) as is_restricted,
               mc.restriction_reason, mc.restriction_reason_ar,
               mc.department_id, mc.owner_membership_id,
+              mc.restricted_by_membership_id,
               (select mp.access_level from matter_permissions mp
                 where mp.matter_id = m.id and mp.membership_id = ? and mp.revoked_at is null
                 order by mp.granted_at desc limit 1) as explicit_level,
               (select mt.matter_role from matter_team mt
-                where mt.matter_id = m.id and mt.staff_id = ? and mt.is_active = 1
+                where mt.matter_id = m.id and mt.staff_id = ? and mt.is_active = true
                 limit 1) as team_role
          from matters m
          left join matter_controls mc on mc.matter_id = m.id
@@ -366,6 +389,7 @@ export class FirmRepo {
       teamRole,
       departmentCode: deptId ? await this.departmentCode(deptId) : null,
       ownerMembershipId: toStr(r.owner_membership_id),
+      restrictedByMembershipId: toStr(r.restricted_by_membership_id),
     };
   }
 
@@ -456,12 +480,12 @@ export class FirmRepo {
               m.practice_area, m.practice_area_ar, m.internal_status, m.client_status,
               m.risk_rating, m.opened_at, m.last_client_update_at,
               c.name as client_name, c.name_ar as client_name_ar,
-              coalesce(mc.is_restricted, 0) as is_restricted,
+              coalesce(mc.is_restricted, false) as is_restricted,
               (select mp.access_level from matter_permissions mp
                 where mp.matter_id = m.id and mp.membership_id = ? and mp.revoked_at is null
                 order by mp.granted_at desc limit 1) as explicit_level,
               (select mt.matter_role from matter_team mt
-                where mt.matter_id = m.id and mt.staff_id = ? and mt.is_active = 1
+                where mt.matter_id = m.id and mt.staff_id = ? and mt.is_active = true
                 limit 1) as team_role
          from matters m
          left join clients c on c.id = m.client_id
@@ -477,11 +501,11 @@ export class FirmRepo {
                        and mp2.access_level <> 'none')
             -- Everything else requires the matter to be unrestricted, then
             -- either team membership or practice-area scope.
-            or (coalesce(mc.is_restricted, 0) = 0 and (
+            or (coalesce(mc.is_restricted, false) = false and (
                   exists (select 1 from matter_team mt2
                            where mt2.matter_id = m.id
                              and mt2.staff_id = ?
-                             and mt2.is_active = 1)
+                             and mt2.is_active = true)
                   or ${practiceClause}
                ))
           )
@@ -579,16 +603,41 @@ export class FirmRepo {
     expectedStatuses: readonly string[];
   }): Promise<number> {
     const now = new Date().toISOString();
+    /*
+      client_status is set here, not left alone.
+
+      `guard_invoice_state` (0002_legal_domain.sql) refuses any write where
+      client_status is not exactly derive_invoice_client_status(internal_status,
+      amount_paid, total, due_date). Approving moves the invoice out of
+      `pending_internal_approval`, whose derived client_status is NULL (not
+      projected to the client at all) and into `approved`, whose derived value is
+      a real status — so the old NULL is now wrong and the trigger rejects the
+      UPDATE with "client_status must be derived from internal_status, not set
+      directly". This is a Postgres-only trigger; SQLite has no counterpart, so
+      only the real database can catch it.
+
+      The CASE mirrors the function: approved is neither draft/pending (null) nor
+      cancelled/written_off (cancelled), so it resolves on amount and due date.
+      Written out rather than calling the function, because the function is
+      PostgreSQL-only and this repository runs the same statement on SQLite.
+    */
+    const today = now.slice(0, 10);
     const r = await this.q().run(
       `update invoices
           set internal_status = 'approved',
+              client_status = case
+                when amount_paid >= total and total > 0 then 'paid'
+                when amount_paid > 0 then 'partially_paid'
+                when due_date < ? then 'overdue'
+                else 'awaiting_payment'
+              end,
               approved_by_staff = ?,
               approved_at = ?,
               updated_at = ?
         where id = ? and tenant_id = ?
           and internal_status in (${opts.expectedStatuses.map(() => '?').join(', ')})
           and (approved_at is null)`,
-      [opts.approvedByStaff, now, now, opts.invoiceId, opts.tenantId, ...opts.expectedStatuses],
+      [today, opts.approvedByStaff, now, now, opts.invoiceId, opts.tenantId, ...opts.expectedStatuses],
     );
     return r.changes;
   }
@@ -705,6 +754,36 @@ export class FirmRepo {
     return r.changes;
   }
 
+  /**
+   * Who applied a matter's current restriction (§27).
+   *
+   * Read from `matter_controls`, NOT through `getMatterAuthFacts`: that query
+   * joins `matters`, and the RLS policy on `matters` hides a restricted matter
+   * from everyone without an explicit grant — so the member who applied the
+   * restriction cannot see the row that records their own restriction, and the
+   * read comes back empty. `matter_controls` is readable at tenant scope
+   * precisely because the restriction flag is a fact about the tenant's
+   * matters, not about any one member's access to them.
+   *
+   * Returns null when the matter has no control row (unrestricted).
+   */
+  async getRestrictionOwner(
+    tenantId: string,
+    matterId: string,
+  ): Promise<{ isRestricted: boolean; restrictedByMembershipId: string | null } | null> {
+    const r = await this.q().get<Row>(
+      `select coalesce(is_restricted, false) as is_restricted, restricted_by_membership_id
+         from matter_controls
+        where matter_id = ? and tenant_id = ?`,
+      [matterId, tenantId],
+    );
+    if (!r) return null;
+    return {
+      isRestricted: toBool(r.is_restricted),
+      restrictedByMembershipId: toStr(r.restricted_by_membership_id),
+    };
+  }
+
   /** Restricts or unrestricts a matter (§27). */
   async setMatterRestriction(opts: {
     tenantId: string;
@@ -715,19 +794,54 @@ export class FirmRepo {
     actorMembershipId: string;
   }): Promise<number> {
     const now = new Date().toISOString();
+
+    /*
+      Two statements, not one branchy update.
+
+      The previous version wrote:
+
+        restricted_at = case when ? = 1 then ? else null end
+
+      Both branches are untyped parameters, so Postgres has no anchor from which
+      to infer the expression's type, resolves it to `text`, and then refuses the
+      assignment to a timestamptz column:
+
+        column "restricted_at" is of type timestamp with time zone
+        but expression is of type text
+
+      A CASE whose ELSE is the column itself (`else left_at`) does resolve,
+      because the column anchors it — which is why the first failure looked
+      arbitrary. Written out branch by branch, the target column types the
+      parameter and the statement is dialect-neutral: no cast, which SQLite
+      would not accept anyway. SQLite never saw the bug: `?` in a timestamp
+      position there is simply a string.
+    */
+    if (opts.restricted) {
+      const r = await this.q().run(
+        `update matter_controls
+            set is_restricted = TRUE,
+                restriction_reason = ?,
+                restriction_reason_ar = ?,
+                restricted_at = ?,
+                restricted_by_membership_id = ?,
+                updated_at = ?
+          where matter_id = ? and tenant_id = ?`,
+        [opts.reason, opts.reasonAr, now, opts.actorMembershipId,
+         now, opts.matterId, opts.tenantId],
+      );
+      return r.changes;
+    }
+
     const r = await this.q().run(
       `update matter_controls
-          set is_restricted = ?,
-              restriction_reason = ?,
-              restriction_reason_ar = ?,
-              restricted_at = case when ? = 1 then ? else null end,
-              restricted_by_membership_id = case when ? = 1 then ? else null end,
+          set is_restricted = FALSE,
+              restriction_reason = null,
+              restriction_reason_ar = null,
+              restricted_at = null,
+              restricted_by_membership_id = null,
               updated_at = ?
         where matter_id = ? and tenant_id = ?`,
-      [opts.restricted ? 1 : 0, opts.reason, opts.reasonAr,
-       opts.restricted ? 1 : 0, now,
-       opts.restricted ? 1 : 0, opts.actorMembershipId,
-       now, opts.matterId, opts.tenantId],
+      [now, opts.matterId, opts.tenantId],
     );
     return r.changes;
   }

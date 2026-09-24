@@ -18,7 +18,8 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import {
-  judgeRole, shouldRefuseToStart, EXPECTED_ROLE_HINT, type RoleFacts,
+  judgeRole, judgeAssumedRoles, shouldRefuseToStart, EXPECTED_ROLE_HINT, FIRM_ROLE,
+  type RoleFacts, type AssumedRoleFacts,
 } from '../../server/src/db/role-guard.js';
 
 const facts = (over: Partial<RoleFacts> = {}): RoleFacts => ({
@@ -95,6 +96,85 @@ describe('§49 · judgeRole', () => {
     expect(EXPECTED_ROLE_HINT).toContain('create_api_login.sql');
     // The two strings an operator is most likely to have pasted wrongly.
     expect(EXPECTED_ROLE_HINT).toContain('superuser');
+  });
+});
+
+// ==========================================================================
+// 1b · THE POLICY FOR ROLES THE CONNECTION CAN SWITCH INTO
+// ==========================================================================
+/*
+  Why this section exists at all.
+
+  Until migration 0008, one role served both audiences and the guard only ever had
+  to judge `current_user`. That is no longer true: a firm-audience request runs
+  under `SET ROLE firm_api`, so the role that acts on the request is not the role
+  the connection authenticated as.
+
+  A guard that inspected only `current_user` would clear `portal_api` at boot,
+  print `ok`, and then let every firm request run as a role nobody vetted. If
+  `firm_api` were a superuser or had BYPASSRLS, the entire firm half of the
+  product would run with no row security — and the startup check would have said
+  everything was fine. That is the same failure mode this file was written to
+  prevent, one indirection further out.
+*/
+
+const assumed = (over: Partial<AssumedRoleFacts> = {}): AssumedRoleFacts => ({
+  roleName: 'firm_api',
+  isSuperuser: false,
+  bypassesRls: false,
+  ownedTables: 0,
+  ...over,
+});
+
+describe('§49 · judgeAssumedRoles', () => {
+  it('passes when every reachable role is as safe as the connection', () => {
+    const v = judgeAssumedRoles(facts({ assumedRoles: [assumed()] }));
+    expect(v).toBeNull();
+  });
+
+  it('refuses a reachable role with BYPASSRLS', () => {
+    // The exact hole: current_user is clean, so judgeRole alone would pass.
+    const f = facts({ assumedRoles: [assumed({ bypassesRls: true })] });
+    expect(judgeRole(f).safe).toBe(true);
+    const v = judgeAssumedRoles(f);
+    expect(v?.safe).toBe(false);
+    expect(v?.code).toBe('assumed_role_bypasses_rls');
+    // The message must say the role is REACHABLE, or an operator will reasonably
+    // ask why a role the server never logs in as stops the server.
+    expect(v?.detail).toContain('firm_api');
+    expect(v?.detail).toMatch(/SET ROLE/i);
+  });
+
+  it('refuses a reachable superuser', () => {
+    const v = judgeAssumedRoles(facts({ assumedRoles: [assumed({ isSuperuser: true })] }));
+    expect(v?.code).toBe('assumed_role_is_superuser');
+  });
+
+  it('refuses a reachable role that owns tables', () => {
+    const v = judgeAssumedRoles(facts({ assumedRoles: [assumed({ roleName: 'firm_os', ownedTables: 3 })] }));
+    expect(v?.code).toBe('assumed_role_owns_tables');
+  });
+
+  it('does not re-judge the connection itself when it appears in the reachable set', () => {
+    // `pg_has_role(current_user, oid, 'SET')` includes the connection's own role.
+    // Judging it twice would report a role name in the "may SET ROLE into" line
+    // that the connection never switches out to.
+    const v = judgeAssumedRoles(facts({
+      assumedRoles: [assumed({ roleName: 'portal_api' })],
+    }));
+    expect(v).toBeNull();
+  });
+
+  it('is inert when the connection can switch into nothing', () => {
+    expect(judgeAssumedRoles(facts())).toBeNull();
+    expect(judgeAssumedRoles(facts({ assumedRoles: [] }))).toBeNull();
+  });
+
+  it('names FIRM_ROLE as the role the driver switches into', () => {
+    // postgres.ts imports this constant rather than hardcoding 'firm_api', so the
+    // role the driver assumes and the role this file vets cannot drift apart.
+    // A drift would mean vetting one role and running as another.
+    expect(FIRM_ROLE).toBe('firm_api');
   });
 });
 

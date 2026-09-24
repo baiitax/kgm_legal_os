@@ -38,6 +38,33 @@ export interface RoleFacts {
   /** Count of public-schema tables this role owns. Owners bypass RLS unless the
    *  table has FORCE ROW LEVEL SECURITY, which no migration in this repo applies. */
   readonly ownedTables: number;
+  /**
+   * Roles this connection may `SET ROLE` into, checked with the same three
+   * questions as the connection itself.
+   *
+   * WHY THE GUARD HAS TO LOOK THROUGH THESE
+   *   Migration 0008 makes firm requests run under `SET ROLE firm_api`, because a
+   *   single role cannot carry two audiences' column reach (§57). That opens a
+   *   gap in a guard that only inspects `current_user`: at boot the connection is
+   *   `portal_api`, which is clean — and the request then switches into a role
+   *   nobody ever vetted. If `firm_api` were a superuser, owned a table, or had
+   *   BYPASSRLS, every policy in 0004 and 0006 would be inert for the whole firm
+   *   half of the product and the guard would still have printed `ok`.
+   *
+   *   The assumption that privileged roles are safe is precisely the assumption
+   *   this file exists to refuse to make, so it is not made here either: the
+   *   reachable set is enumerated from `pg_has_role(..., 'SET')` and each member
+   *   is judged by the same rules. A role the connection cannot reach is not the
+   *   guard's business; a role it can reach is.
+   */
+  readonly assumedRoles?: readonly AssumedRoleFacts[];
+}
+
+export interface AssumedRoleFacts {
+  readonly roleName: string;
+  readonly isSuperuser: boolean;
+  readonly bypassesRls: boolean;
+  readonly ownedTables: number;
 }
 
 export interface RoleVerdict {
@@ -47,12 +74,25 @@ export interface RoleVerdict {
     | 'ok'
     | 'role_is_superuser'
     | 'role_bypasses_rls'
-    | 'role_owns_tables';
+    | 'role_owns_tables'
+    | 'assumed_role_is_superuser'
+    | 'assumed_role_bypasses_rls'
+    | 'assumed_role_owns_tables';
   /** One line naming the consequence, not the rule. */
   readonly detail: string;
 }
 
 const SAFE_ROLE = 'portal_api';
+
+/**
+ * The role a firm-audience request runs as (migration 0008).
+ *
+ * Exported so `postgres.ts` switches into exactly the role this file vets, rather
+ * than the two drifting apart. Reached by `SET ROLE`, not by inheritance: the
+ * connection must NOT inherit this role's privileges, or the portal's column
+ * grants stop being its column reach — which is the defect 0008 exists to undo.
+ */
+export const FIRM_ROLE = 'firm_api';
 
 export function judgeRole(facts: RoleFacts): RoleVerdict {
   /*
@@ -103,6 +143,47 @@ export function judgeRole(facts: RoleFacts): RoleVerdict {
     code: 'ok',
     detail: `connected as "${facts.roleName}" — not a superuser, no BYPASSRLS, owns no tables. RLS applies.`,
   };
+}
+
+/**
+ * Judges the roles reachable by `SET ROLE` during a request.
+ *
+ * Returns a verdict only for a role that would be UNSAFE, so a clean set yields
+ * `null` and the caller prints one line rather than one line per role. The
+ * asymmetry is deliberate: safe assumed roles are an implementation detail,
+ * unsafe ones are a startup failure and deserve to be named.
+ */
+export function judgeAssumedRoles(facts: RoleFacts): RoleVerdict | null {
+  for (const assumed of facts.assumedRoles ?? []) {
+    if (assumed.roleName === facts.roleName) continue;
+
+    const shared = {
+      roleName: assumed.roleName,
+      isSuperuser: assumed.isSuperuser,
+      bypassesRls: assumed.bypassesRls,
+      ownedTables: assumed.ownedTables,
+    };
+
+    const inner = judgeRole(shared);
+    if (inner.safe) continue;
+
+    /*
+      The detail is rewritten to say which role is at fault and why it matters
+      that it is reachable rather than merely present. An operator reading
+      "connected as firm_api, which has BYPASSRLS" would reasonably ask why a
+      role the connection never authenticates as stops the server — the answer is
+      the `SET ROLE` on the firm request path, and it belongs in the message.
+    */
+    return {
+      safe: false,
+      code: `assumed_role_${inner.code.replace(/^role_/, '')}` as RoleVerdict['code'],
+      detail:
+        `the connection may SET ROLE into "${assumed.roleName}", ${inner.detail.replace(/^connected as "[^"]*", /, '')} ` +
+        `That role is assumed for every firm-audience request (migration 0008), so its ` +
+        `exemptions would apply to the whole firm half of the product.`,
+    };
+  }
+  return null;
 }
 
 /**
