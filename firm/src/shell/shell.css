@@ -1527,3 +1527,47 @@
 .firm-rolelist__item[data-inactive='true'] { opacity: 0.6; }
 .firm-rolelist__code { font-family: var(--font-mono); font-size: var(--fs-caption); color: var(--gold-400); min-inline-size: 8ch; }
 .firm-rolelist__name { color: var(--text-md); font-size: var(--fs-body-sm); flex: 1; }
+
+/* --------------------------------------------------------------------------
+   ROLE PICKER · §49, §10
+   --------------------------------------------------------------------------
+   The grant-role panel. Two notices sit above the list rather than in tooltips:
+   what the picker cannot know, and the fact that granting signs the member out.
+   -------------------------------------------------------------------------- */
+
+.firm-rolepicker { display: flex; flex-direction: column; gap: var(--sp-3); }
+
+.firm-rolepicker__current {
+  margin: 0; color: var(--text-dim); font-size: var(--fs-body-sm);
+}
+.firm-rolepicker__current strong { color: var(--text-hi); font-family: var(--font-mono); }
+
+.firm-rolepicker__list {
+  list-style: none; margin: var(--sp-2) 0 0; padding: 0;
+  display: flex; flex-direction: column; gap: var(--sp-2);
+  /* The tenant can hold a dozen roles; the sheet scrolls rather than growing
+     past the viewport on a phone. */
+  max-block-size: 46vh; overflow-y: auto;
+}
+
+.firm-rolepicker__item {
+  display: flex; align-items: center; gap: var(--sp-3);
+  padding: var(--sp-3);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-md);
+  background: var(--glass-1);
+}
+
+/* The member's current standing role, marked so an administrator does not
+   grant the role the member already carries and expect something to change. */
+.firm-rolepicker__item[data-current] {
+  border-color: var(--border-brand);
+  background: var(--kgm-green-500-07);
+}
+
+.firm-rolepicker__code {
+  font-family: var(--font-mono); font-size: var(--fs-caption);
+  color: var(--gold-400); min-inline-size: 12ch;
+}
+.firm-rolepicker__name { flex: 1 1 auto; min-inline-size: 0; color: var(--text-md); font-size: var(--fs-body-sm); }
+.firm-rolepicker__currenttag { color: var(--text-dim); font-size: var(--fs-caption); }

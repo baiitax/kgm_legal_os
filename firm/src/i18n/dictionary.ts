@@ -384,6 +384,20 @@ const ar = {
   'users.selfNotice': 'لا يمكنك تغيير حالة عضويتك أنت. يمنع الخادم ذلك صيانةً لصلاحياتك أثناء الجلسة.',
   'users.mutation.done': 'تم تحديث العضو',
   'users.mutation.failed': 'تعذّر تنفيذ الإجراء',
+  'users.grant.title': 'إسناد دور',
+  'users.grant.sub': 'إسناد دور إلى {{name}}',
+  'users.grant.current': 'الدور الحالي',
+  'users.grant.action': 'إسناد',
+  'users.grant.done': 'تم إسناد الدور {{role}}',
+  'users.grant.failed': 'تعذّر إسناد الدور',
+  'users.grant.empty': 'لا توجد أدوار فعّالة في هذا الكيان.',
+  // القائمة لا تُظهر ما يحمله العضو فعلاً من أدوار متعددة: نقطة النهاية لا تُرجع
+  // مجموعة الأدوار الممنوحة، بل الدور الداخلي فقط. عرض علامات «ممنوح» هنا سيكون
+  // اختلاقاً لحالة لا يعرفها العميل.
+  'users.grant.partialNotice': 'تُعرض لك الأدوار المتاحة في الكيان. القائمة لا تُبيّن كل ما يحمله العضو من أدوار سابقة، لأن الخادم لا يُرجع مجموعة الأدوار الممنوحة، بل يُرجع الدور الداخلي المسجّل أعلاه فقط.',
+  // أثر جانبي جوهري: أي تغيير في الأدوار يُبطل كل جلسات العضو الحيّة.
+  'users.grant.sessionNotice': 'تنبيه: إسناد الدور يُنهي جميع جلسات هذا العضو فوراً. سيُطرد من الأجهزة التي سجّل الدخول منها، ويجب عليه تسجيل الدخول من جديد. هذا مقصود: صلاحيات الجلسة القديمة تصبح لاغية بعد تغيّر الأدوار.',
+  'users.grant.alreadyCurrent': 'دوره الحالي',
 
   // ---- administration · audit (§51) -------------------------------------
   'audit.title': 'سجل التدقيق',
@@ -791,6 +805,20 @@ const en = {
   'users.selfNotice': 'You cannot change your own membership status. The server refuses it so you cannot lock yourself out mid-session.',
   'users.mutation.done': 'Member updated',
   'users.mutation.failed': 'Action could not be completed',
+  'users.grant.title': 'Assign role',
+  'users.grant.sub': 'Grant a role to {{name}}',
+  'users.grant.current': 'Current role',
+  'users.grant.action': 'Grant',
+  'users.grant.done': 'Role {{role}} granted',
+  'users.grant.failed': 'Role could not be granted',
+  'users.grant.empty': 'This firm has no active roles.',
+  // The picker cannot show what the member already holds: the endpoint projects
+  // only `internalRole`, not the granted set. Rendering "granted" ticks here would
+  // be inventing state the client has no way to know.
+  'users.grant.partialNotice': 'This shows the roles available in the firm. It does not show every role the member already holds, because the server returns only the internal role shown above — not the full granted set.',
+  // The consequential side effect: the server calls revokeAll on any role change.
+  'users.grant.sessionNotice': 'Note: granting a role ends all of this member\'s live sessions immediately. They are signed out everywhere and must sign in again. That is deliberate — authority cached in an old session would otherwise outlive the change.',
+  'users.grant.alreadyCurrent': 'Their current role',
 
   // ---- administration · audit (§51) -------------------------------------
   'audit.title': 'Audit log',

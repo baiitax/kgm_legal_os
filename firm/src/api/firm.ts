@@ -488,15 +488,44 @@ export interface MatterDetail {
   withheld: string[];
 }
 
+/**
+ * One live session, as returned by `/session/devices`.
+ *
+ * CORRECTED AGAINST A LIVE RESPONSE — THE THIRD INSTANCE OF THE SAME BUG.
+ *
+ * The draft declared `lastSeenAt`, `sessionExpiresAt` and `mfaVerified`. The wire
+ * sends `lastActivity`, `expiresAt` and `mfaVerifiedAt`, and additionally sends
+ * `browser`, `os` and `revokedAt`, which were omitted entirely.
+ *
+ * The names are close enough to look plausible and different enough that nothing
+ * renders: a sessions panel built on the draft would show a permanently empty
+ * "last seen" column and a permanently false MFA badge, with no error anywhere.
+ * That is the failure mode this interface exists to prevent, so it is worth
+ * naming rather than quietly fixing.
+ *
+ * `mfaVerifiedAt` is a TIMESTAMP, not a boolean. Rendering it as one loses the
+ * answer to "when did this session prove its second factor", which is the
+ * question a security review actually asks.
+ */
 export interface FirmDevice {
   id: string;
   deviceLabel: string | null;
+  /** Parsed browser, e.g. "Chrome". Separate from the raw agent string. */
+  browser: string | null;
+  /** Parsed operating system, e.g. "macOS". */
+  os: string | null;
   userAgent: string | null;
+  /** Country only. The server never projects a raw IP to the client. */
   ipCountry: string | null;
   createdAt: string;
-  lastSeenAt: string | null;
-  sessionExpiresAt: string | null;
-  mfaVerified: boolean;
+  lastActivity: string | null;
+  expiresAt: string | null;
+  /** When this session verified its second factor; null if it never did. */
+  mfaVerifiedAt: string | null;
+  /** Set once revoked. A revoked session is listed, not hidden, so the member
+   *  can see that a revocation happened rather than wondering where it went. */
+  revokedAt: string | null;
+  /** True for the session making this request. */
   current: boolean;
 }
 

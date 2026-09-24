@@ -21,17 +21,32 @@
  *   that governs money. It renders as "no ceiling set — every amount refused".
  *
  * MUTATIONS ARE OFFERED, NOT GUARANTEED
- *   Suspend and assign-role are rendered from the permission codes, but the
- *   server independently enforces MFA-when-required, same-tenant target, and a
+ *   Suspend and grant-role are rendered from the permission codes, but the server
+ *   independently enforces MFA-when-required, same-tenant target, and a
  *   self-change refusal. This page does not pre-empt those rules by disabling
  *   controls: a client-side guess about a server-side rule goes stale, and the
  *   member then learns that the interface does not tell the truth. The refusal is
  *   surfaced instead, with the reason.
+ *
+ * WHY THE ROLE PICKER DOES NOT SHOW "ALREADY GRANTED"
+ *   It cannot honestly do so. `/admin/members` projects `internalRole` — a single
+ *   value — and does not return the set of roles a member holds. There is no
+ *   member-detail endpoint either. A tick-box list would therefore be inventing
+ *   state that the client has no way to know, which is worse than an incomplete
+ *   control: it would read as authoritative. The picker states this limit on the
+ *   panel rather than implying a completeness it does not have.
+ *
+ * THE CONSEQUENCE THAT MUST BE STATED
+ *   A role change calls `revokeAll` on the target's sessions — they are signed out
+ *   of every device immediately. An administrator assigning a role would not
+ *   expect to log a colleague out, so the panel says it plainly before the press,
+ *   not in a toast after it.
  */
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
-  Badge, Button, EmptyState, IconRefresh, PageSkeleton, Table, TextField,
-  useFmt, useI18n, useToast, type BadgeTone, type Column, type SortState,
+  Alert, Badge, BottomSheet, Button, EmptyState, IconRefresh, PageSkeleton,
+  Table, TextField, useFmt, useI18n, useToast,
+  type BadgeTone, type Column, type SortState,
 } from '@kgm/ui';
 import { useFirmSession } from '../auth/FirmSession.js';
 import {
@@ -64,6 +79,10 @@ export function Users() {
   const [sort, setSort] = useState<SortState | null>({ key: 'name', direction: 'asc' });
   /** The membership whose mutation is in flight, so one row can spin alone. */
   const [busyId, setBusyId] = useState<string | null>(null);
+  /** The member whose role picker is open, or null. */
+  const [roleTarget, setRoleTarget] = useState<FirmMemberRow | null>(null);
+  /** The role code being granted, so only that option spins. */
+  const [roleBusy, setRoleBusy] = useState<string | null>(null);
 
   const load = () => {
     setLoading(true);
@@ -144,6 +163,48 @@ export function Users() {
     }
   };
 
+  /**
+   * Grants one role to one member.
+   *
+   * `revoke` is always false rather than offered as a choice. The client is not
+   * told which roles a member already holds, so a "revoke" option would be a
+   * guess — and a revoke against a role the member never had is a request the
+   * server should not have to field from an interface that looked confident.
+   *
+   * The success toast names the role instead of saying "done": the panel closes
+   * on success, so the message is the only record of which press landed.
+   */
+  const grantRole = async (row: FirmMemberRow, roleCode: string) => {
+    setRoleBusy(roleCode);
+    try {
+      await firmApi.setMemberRole(row.membershipId, roleCode, false);
+      toast.success(t('users.grant.done', { role: roleCode }), pick(row.displayName, row.displayNameAr));
+      setRoleTarget(null);
+      load();
+    } catch (err) {
+      /*
+        Carries the MFA-required refusal and the self-change refusal. Both are
+        server decisions and both are worth reading verbatim: collapsing them to
+        "something went wrong" would hide the one instruction the administrator
+        needs to act on.
+      */
+      const e = err instanceof FirmApiError ? err : new FirmApiError(0, 'network_error', 'unreachable');
+      toast.error(t('users.grant.failed'), messageFor(e, t));
+    } finally {
+      setRoleBusy(null);
+    }
+  };
+
+  /**
+   * Only ACTIVE roles are offered. An inactive role cannot be granted — the server
+   * looks the code up in the tenant's active set and refuses otherwise — so listing
+   * one would be advertising an action that cannot succeed.
+   */
+  const rolesActive = useMemo(
+    () => (data?.roles ?? []).filter((r) => r.isActive),
+    [data],
+  );
+
   const columns = useMemo<Array<Column<FirmMemberRow>>>(() => [
     {
       key: 'name',
@@ -212,7 +273,19 @@ export function Users() {
       align: 'end',
       cell: (m) => {
         const isSelf = member?.membershipId === m.membershipId;
-        if (!canChangeStatus) return <span className="firm-muted">—</span>;
+        /*
+          Each control is gated on ITS OWN permission, and the em dash appears only
+          when neither applies.
+          
+          The first version returned early on `canChangeStatus`, which conflated two
+          independent grants: `users.deactivate` governs status, `users.assign_role`
+          governs roles, and the server checks them separately. A member holding
+          assign_role but not deactivate therefore saw "—" and could not grant a role
+          at all — the control was present in the code and unreachable in the
+          product, with nothing to indicate why.
+        */
+        const canAct = canChangeStatus || canAssignRole;
+        if (!canAct) return <span className="firm-muted">—</span>;
         return (
           <div className="firm-rowactions">
             {isSelf ? (
@@ -227,7 +300,7 @@ export function Users() {
               </span>
             ) : (
               <>
-                {m.status === 'active' ? (
+                {canChangeStatus && (m.status === 'active' ? (
                   <Button
                     variant="ghost" size="xs" loading={busyId === m.membershipId}
                     onClick={() => void changeStatus(m, 'suspended')}
@@ -241,9 +314,15 @@ export function Users() {
                   >
                     {t('users.action.activate')}
                   </Button>
-                )}
+                ))}
                 {canAssignRole && (
-                  <Badge tone="neutral">{t('users.action.assignRole')}</Badge>
+                  <Button
+                    variant="ghost" size="xs"
+                    onClick={() => setRoleTarget(m)}
+                    aria-haspopup="dialog"
+                  >
+                    {t('users.action.assignRole')}
+                  </Button>
                 )}
               </>
             )}
@@ -354,7 +433,103 @@ export function Users() {
           )}
         </>
       )}
+
+      <RolePicker
+        target={roleTarget}
+        roles={rolesActive}
+        busy={roleBusy}
+        lang={ar}
+        onClose={() => setRoleTarget(null)}
+        onGrant={grantRole}
+      />
     </div>
+  );
+}
+
+/**
+ * The grant-role panel (§49, §10).
+ *
+ * A BottomSheet rather than a Drawer: it is the same overlay the rest of the app
+ * uses for a short decision list, and it behaves identically on a phone and a
+ * desktop instead of needing two layouts.
+ *
+ * TWO LIMITS ARE STATED ON THE PANEL, NOT HIDDEN IN A TOOLTIP:
+ *
+ *   1. It cannot show which roles the member already holds. The endpoint projects
+ *      `internalRole` and nothing else, so "already granted" ticks would be
+ *      invented. Presenting an incomplete list as complete is the same failure as
+ *      presenting a null ceiling as unlimited.
+ *
+ *   2. Granting a role signs the member out everywhere. The server calls
+ *      `revokeAll` on any role change, which is correct — authority cached in an
+ *      old session would otherwise outlive the change — but an administrator
+ *      would not predict it, so it is said before the press.
+ */
+function RolePicker({ target, roles, busy, lang, onClose, onGrant }: {
+  readonly target: FirmMemberRow | null;
+  readonly roles: readonly FirmRoleRow[];
+  readonly busy: string | null;
+  readonly lang: 'ar' | 'en';
+  readonly onClose: () => void;
+  readonly onGrant: (row: FirmMemberRow, roleCode: string) => void | Promise<void>;
+}) {
+  const { t } = useI18n();
+  const name = target ? (lang === 'ar' && target.displayNameAr ? target.displayNameAr : target.displayName) : '';
+
+  return (
+    <BottomSheet
+      open={target !== null}
+      onClose={onClose}
+      title={target ? t('users.grant.sub', { name }) : t('users.grant.title')}
+    >
+      {target && (
+        <div className="firm-rolepicker">
+          {target.internalRole && (
+            <p className="firm-rolepicker__current">
+              {t('users.grant.current')}: <strong dir="ltr">{target.internalRole}</strong>
+            </p>
+          )}
+
+          <Alert tone="notice">{t('users.grant.partialNotice')}</Alert>
+          {/* The consequence, before the press rather than after it. */}
+          <Alert tone="warning">{t('users.grant.sessionNotice')}</Alert>
+
+          {roles.length === 0 ? (
+            <p className="firm-muted">{t('users.grant.empty')}</p>
+          ) : (
+            <ul className="firm-rolepicker__list">
+              {roles.map((role) => {
+                /*
+                  Case-insensitive on purpose. `internalRole` arrives lowercase
+                  ('managing_partner') while role codes are uppercase
+                  ('MANAGING_PARTNER'), so a direct === is false for every member —
+                  verified against all five in the demo tenant. The marker would
+                  never render, and nothing would say why.
+                */
+                const isCurrent = isSameRole(target.internalRole, role.code);
+                return (
+                  <li key={role.code} className="firm-rolepicker__item" data-current={isCurrent || undefined}>
+                    <span className="firm-rolepicker__code" dir="ltr">{role.code}</span>
+                    <span className="firm-rolepicker__name">
+                      {lang === 'ar' && role.nameAr ? role.nameAr : role.name}
+                      {isCurrent && <span className="firm-rolepicker__currenttag"> · {t('users.grant.alreadyCurrent')}</span>}
+                    </span>
+                    <Button
+                      variant="secondary" size="xs"
+                      loading={busy === role.code}
+                      disabled={busy !== null}
+                      onClick={() => void onGrant(target, role.code)}
+                    >
+                      {t('users.grant.action')}
+                    </Button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+      )}
+    </BottomSheet>
   );
 }
 
@@ -418,6 +593,23 @@ export function PageHead({ eyebrow, title, sub, actions }: {
 
 // ==========================================================================
 // helpers
+
+/**
+ * Compares a member's `internalRole` with a role-catalogue code.
+ *
+ * The two are cased differently on the wire — `internalRole` is lowercase
+ * ('paralegal'), catalogue codes are uppercase ('PARALEGAL') — so this normalizes
+ * before comparing. A direct comparison fails SILENTLY: the "current role" marker
+ * is simply absent, which reads as a member holding no standing role rather than
+ * as a broken check. That is the failure mode worth a named function.
+ *
+ * A missing value on either side is false, never true. An unanswered question must
+ * not mark a role as current.
+ */
+function isSameRole(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (!a || !b) return false;
+  return a.toUpperCase() === b.toUpperCase();
+}
 
 function toneForStatus(status: string): BadgeTone {
   switch (status) {
