@@ -13,6 +13,14 @@ import { createApp } from './app.js';
 import { getDb, closeDb } from './db/index.js';
 import { seedDemoData } from './db/seed.js';
 import { SqliteDb } from './db/sqlite.js';
+import fs from 'node:fs';
+import path from 'node:path';
+
+/** Reports whether a built SPA bundle is present to mount. */
+function mountState(rel: string): string {
+  const dir = path.resolve(process.cwd(), rel);
+  return fs.existsSync(path.join(dir, 'index.html')) ? 'mounted ' : 'NOT BUILT';
+}
 
 async function main() {
   const db = getDb();
@@ -32,13 +40,23 @@ async function main() {
   const server = app.listen(config.port, config.host, () => {
     const shown = config.host === '0.0.0.0' ? 'localhost' : config.host;
     console.log('');
-    console.log('  KGM LEGAL OS — Client Portal');
+    console.log('  KGM LEGAL OS');
     console.log('  ────────────────────────────────────────────────');
     console.log(`  env        ${config.env}`);
     console.log(`  listening  http://${shown}:${config.port}`);
     console.log(`  database   ${config.db.driver}`);
     console.log(`  storage    ${container.storage.name}`);
     console.log(`  dev routes ${isProd ? 'DISABLED' : 'enabled (/api/dev)'}`);
+    console.log('  ────────────────────────────────────────────────');
+    /*
+      Both product surfaces, with their actual mount state.
+      A missing bundle is reported rather than silently unserved: the static
+      mounts are conditional on the dist folder existing, so forgetting a build
+      would otherwise show up as a 404 in the browser with nothing in the log to
+      explain it.
+    */
+    console.log(`  portal     ${mountState('../web/dist')}  /`);
+    console.log(`  firm OS    ${mountState('../firm/dist')}  /firm`);
     console.log('  ────────────────────────────────────────────────');
     console.log('');
   });

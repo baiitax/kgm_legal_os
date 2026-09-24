@@ -1,0 +1,333 @@
+/**
+ * KGM BASE · §03 glass language · §04 background · §44 accessibility
+ *
+ * The glass system is defined ONCE here as utility surfaces. Components compose
+ * them; they do not re-declare blur and transparency locally. That is what keeps
+ * §03's "sophisticated rather than exaggerated" true in practice — a blur radius
+ * defined in twelve files becomes twelve different opinions by the second sprint.
+ */
+
+/* ==========================================================================
+   1 · RESET
+   ========================================================================== */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body, #root { height: 100%; }
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--fs-body);
+  line-height: var(--lh-normal);
+  color: var(--text-primary);
+  background: var(--bg-base);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  /* Prevents the whole app scrolling behind a modal on mobile. */
+  overscroll-behavior-y: none;
+}
+
+h1, h2, h3, h4, h5, h6, p, figure { margin: 0; }
+ul, ol { margin: 0; padding: 0; list-style: none; }
+
+img, svg, video { display: block; max-width: 100%; }
+
+button, input, select, textarea {
+  font: inherit;
+  color: inherit;
+  margin: 0;
+}
+button { background: none; border: 0; padding: 0; cursor: pointer; }
+
+a { color: var(--text-link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* §29: financial figures align on the digit, not the glyph. Without
+   tabular-nums a column of SAR amounts jitters as values change. */
+.num, [data-numeric='true'] {
+  font-variant-numeric: tabular-nums lining-nums;
+  font-feature-settings: 'tnum' 1, 'lnum' 1;
+}
+
+/* ==========================================================================
+   2 · ACCESSIBILITY (§44)
+   ========================================================================== */
+
+/* Visible focus, always. A focus ring that only appears for keyboard users is
+   the right instinct, but :focus-visible is not universally reliable inside
+   glass surfaces with backdrop-filter, so the ring is drawn whenever focus is
+   not from a pointer. */
+:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--r-sm);
+}
+
+/* The minimum touch target. §44 names touch targets explicitly; 44px is the
+   figure iOS and Material both converge on. */
+.touch-target { min-block-size: 44px; min-inline-size: 44px; }
+
+/* Screen-reader only. Used for the labels §31 requires alongside every colour. */
+.sr-only {
+  position: absolute;
+  inline-size: 1px; block-size: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ==========================================================================
+   3 · BACKGROUND ATMOSPHERE (§04)
+   Deep institutional green with extremely subtle layered light. The brief is
+   explicit that this must establish depth WITHOUT competing with content, so
+   the layers are low-opacity radial washes and nothing animated. An animated
+   background behind data is a background people stop seeing, which is also a
+   background that costs them battery all day.
+   ========================================================================== */
+
+.kgm-atmosphere {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(1200px 700px at 12% -8%,  var(--bg-atmos-1) 0%, transparent 62%),
+    radial-gradient(900px 600px at 92% 8%,    var(--bg-atmos-gold) 0%, transparent 58%),
+    radial-gradient(1100px 800px at 78% 108%, var(--bg-atmos-lime) 0%, transparent 60%),
+    linear-gradient(168deg, var(--bg-atmos-2) 0%, var(--bg-base) 58%, var(--bg-base) 100%);
+}
+
+/* A single hairline of gold at the very top of the viewport. Institutional
+   rather than decorative — the only place gold is used structurally. */
+.kgm-atmosphere::after {
+  content: '';
+  position: absolute;
+  inset-block-start: 0;
+  inset-inline: 0;
+  block-size: 1px;
+  background: linear-gradient(
+    to var(--dir-inline-end, right),
+    transparent 0%,
+    var(--border-gold) 22%,
+    var(--border-gold) 78%,
+    transparent 100%
+  );
+  opacity: 0.7;
+}
+
+/* ==========================================================================
+   4 · GLASS SURFACES (§03)
+   Layer order from the brief:
+     background → atmospheric layer → glass surface → content → subtle shadow
+   ========================================================================== */
+
+.glass {
+  position: relative;
+  background: var(--surface-glass);
+  backdrop-filter: blur(var(--glass-blur-max)) saturate(140%);
+  -webkit-backdrop-filter: blur(var(--glass-blur-max)) saturate(140%);
+  border: 1px solid var(--border-subtle);
+  box-shadow: var(--shadow-md);
+  border-radius: var(--r-lg);
+}
+
+.glass-strong {
+  background: var(--surface-glass-strong);
+  border-color: var(--border-soft);
+  box-shadow: var(--shadow-lg);
+}
+
+.glass-raised {
+  background: var(--surface-glass-raised);
+  border-color: var(--border-soft);
+  box-shadow: var(--shadow-xl);
+}
+
+/* §03: "soft highlights" and "controlled reflections". One hairline of light
+   along the top edge only. A full gradient sheen is the "exaggerated
+   glassmorphism" the brief rejects. */
+.glass-sheen::before {
+  content: '';
+  position: absolute;
+  inset-block-start: 0;
+  inset-inline: 0;
+  block-size: 1px;
+  border-radius: inherit;
+  background: linear-gradient(
+    to var(--dir-inline-end, right),
+    transparent 0%,
+    rgba(255, 255, 255, 0.22) 30%,
+    rgba(255, 255, 255, 0.30) 50%,
+    rgba(255, 255, 255, 0.22) 70%,
+    transparent 100%
+  );
+  pointer-events: none;
+}
+[data-theme='light'] .glass-sheen::before {
+  background: linear-gradient(
+    to var(--dir-inline-end, right),
+    transparent 0%, rgba(255, 255, 255, 0.85) 50%, transparent 100%
+  );
+}
+
+/* §03: cards float SLIGHTLY. The lift is 2px (§45) and the shadow deepens just
+   enough to sell it. */
+.lift {
+  transition:
+    transform var(--dur-base) var(--ease-out),
+    box-shadow var(--dur-base) var(--ease-out),
+    border-color var(--dur-base) var(--ease-out);
+  will-change: transform;
+}
+.lift:hover {
+  transform: translateY(var(--lift-hover));
+  box-shadow: var(--shadow-lg);
+  border-color: var(--border-soft);
+}
+.lift:active { transform: translateY(var(--lift-active)); }
+
+/* §45: border softly brightens, gold accent appears. Applied to interactive
+   cards rather than globally, so non-interactive surfaces stay calm. */
+.glow-brand:hover { border-color: var(--border-brand); box-shadow: var(--glow-accent), var(--shadow-lg); }
+.glow-gold:hover  { border-color: var(--border-gold);  box-shadow: var(--glow-gold), var(--shadow-lg); }
+
+/* ==========================================================================
+   5 · DIRECTION (§42, §44)
+   Logical properties throughout. These two custom properties let the few places
+   that need a directional gradient (the sheen, the atmosphere hairline) flip
+   with the document rather than being rewritten per direction.
+   ========================================================================== */
+
+:root, [dir='ltr'] {
+  --dir-inline-end: right;
+  --dir-inline-start: left;
+}
+[dir='rtl'] {
+  --dir-inline-end: left;
+  --dir-inline-start: right;
+}
+
+/* Arabic reads right-to-left but NUMBERS inside it still run left-to-right.
+   Without this, a SAR figure in an Arabic sentence renders its digits in the
+   wrong order under bidi reordering. */
+[dir='rtl'] .num,
+[dir='rtl'] [data-numeric='true'] {
+  direction: ltr;
+  unicode-bidi: isolate;
+  text-align: start;
+}
+
+/* §42: uppercase letter-spacing is a Latin device. Applied to Arabic it
+   stretches the joining forms apart and breaks the script. */
+[dir='rtl'] .u-uppercase { text-transform: none; letter-spacing: var(--ls-normal); }
+
+/* ==========================================================================
+   6 · TYPOGRAPHIC UTILITIES (§07)
+   ========================================================================== */
+
+.t-display { font-size: var(--fs-display); font-weight: var(--fw-bold);    line-height: var(--lh-tight);  letter-spacing: var(--ls-tight); }
+.t-h1      { font-size: var(--fs-h1);      font-weight: var(--fw-bold);    line-height: var(--lh-tight);  letter-spacing: var(--ls-tight); }
+.t-h2      { font-size: var(--fs-h2);      font-weight: var(--fw-semibold);line-height: var(--lh-snug); }
+.t-h3      { font-size: var(--fs-h3);      font-weight: var(--fw-semibold);line-height: var(--lh-snug); }
+.t-section { font-size: var(--fs-section); font-weight: var(--fw-semibold);line-height: var(--lh-snug); }
+.t-body    { font-size: var(--fs-body);    font-weight: var(--fw-regular); line-height: var(--lh-normal); }
+.t-caption { font-size: var(--fs-caption); font-weight: var(--fw-regular); line-height: var(--lh-normal); }
+.t-meta    { font-size: var(--fs-meta);    font-weight: var(--fw-medium);  line-height: var(--lh-snug); }
+
+.u-uppercase { text-transform: uppercase; letter-spacing: var(--ls-wide); }
+
+.c-primary   { color: var(--text-primary); }
+.c-secondary { color: var(--text-secondary); }
+.c-muted     { color: var(--text-muted); }
+.c-brand     { color: var(--text-brand); }
+.c-lime      { color: var(--text-lime); }
+.c-gold      { color: var(--text-gold); }
+
+/* §07: numbers and financial figures receive strong visual emphasis. */
+.t-figure {
+  font-size: var(--fs-h1);
+  font-weight: var(--fw-bold);
+  line-height: var(--lh-tight);
+  letter-spacing: var(--ls-tight);
+  font-variant-numeric: tabular-nums lining-nums;
+}
+
+/* ==========================================================================
+   7 · PAGE TRANSITIONS (§34)
+   fade + small vertical movement, 150–250ms. Nothing more.
+   ========================================================================== */
+
+@keyframes kgm-enter {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.page-enter { animation: kgm-enter var(--dur-slow) var(--ease-out) both; }
+
+@keyframes kgm-fade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.fade-enter { animation: kgm-fade var(--dur-base) var(--ease-out) both; }
+
+/* Stagger for card grids. The delay is set per item via --i; the total stays
+   under 300ms even for a full page, because a stagger that is still running
+   when the user tries to click is a stagger that cost them time. */
+@keyframes kgm-stagger {
+  from { opacity: 0; transform: translateY(8px) scale(0.995); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+.stagger-enter {
+  animation: kgm-stagger var(--dur-slow) var(--ease-out) both;
+  animation-delay: calc(var(--i, 0) * 28ms);
+}
+
+/* ==========================================================================
+   8 · SCROLLBARS
+   Themed, because a default light scrollbar inside a dark glass rail is the
+   most visible unthemed element in any app.
+   ========================================================================== */
+
+* { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+*::-webkit-scrollbar { inline-size: 8px; block-size: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: var(--r-pill);
+}
+*::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* ==========================================================================
+   9 · DIRECTIONAL GLYPHS
+   A "forward" chevron points right in LTR and LEFT in RTL. Flipping in CSS
+   keeps one glyph in the bundle and means no component has to know the
+   direction — which is how a shared icon set survives supporting two scripts.
+   ========================================================================== */
+
+.kgm-chevron-fwd, .kgm-chevron-back { transition: transform var(--dur-fast) var(--ease-out); }
+[dir='rtl'] .kgm-chevron-fwd { transform: scaleX(-1); }
+[dir='rtl'] .kgm-chevron-back { transform: scaleX(-1); }
+
+/* Arrow glyphs used for trends must NOT flip: "up" and "down" are absolute,
+   and mirroring a trend arrow would invert its meaning. */
+[dir='rtl'] .kgm-metric__arrow { transform: none; }
+
+
+/* Alias. The shell uses the `u-` utility prefix consistently; the bare name is
+   kept because earlier components already depend on it. Both must exist or one
+   set of call sites silently renders visible text. */
+.u-sr-only {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}

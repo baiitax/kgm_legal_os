@@ -2,10 +2,12 @@
   "name": "kgm-legal-os",
   "version": "1.0.0",
   "private": true,
-  "description": "KGM LEGAL OS \u2014 Saudi Legal Practice Management Platform. Secure Arabic-first Client Portal.",
+  "description": "KGM LEGAL OS \u2014 Saudi legal practice operating system. Client Portal + Internal Firm OS.",
   "workspaces": [
+    "packages/*",
     "server",
-    "web"
+    "web",
+    "firm"
   ],
   "scripts": {
     "dev": "npm run dev --workspace server",
@@ -14,7 +16,10 @@
     "db:reset": "npm run db:reset --workspace server",
     "test": "vitest run",
     "test:security": "vitest run tests/security",
-    "test:e2e": "vitest run tests/e2e"
+    "test:e2e": "vitest run tests/e2e",
+    "build:firm": "npm run build:demo --workspace firm",
+    "dev:firm": "npm run dev --workspace firm",
+    "build:all": "npm run build --workspace web && npm run build:demo --workspace firm"
   },
   "engines": {
     "node": ">=20.11"

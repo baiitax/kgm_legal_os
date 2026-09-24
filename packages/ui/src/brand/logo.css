@@ -1,0 +1,123 @@
+/**
+ * §46 / §47 · LOGO LOCKUP.
+ *
+ * Clear space is expressed in `em` relative to the mark so it scales with the
+ * logo. A fixed pixel gutter is correct at 32px and wrong at 64px, and §46 asks
+ * for clear space to be maintained — not merely present at one size.
+ *
+ * The mark's own colours are overridden per theme. §05 requires every component
+ * to have a light variant, and a logo is the component most likely to be
+ * forgotten: it is usually an image, so it does not inherit anything.
+ */
+
+.kgm-logo {
+  display: inline-flex;
+  align-items: center;
+  /* Clear space: half the mark's height on every side. */
+  padding: 0.28em 0.4em;
+  isolation: isolate;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.kgm-logo--inline { flex-direction: row; gap: 0.55em; }
+.kgm-logo--stacked {
+  flex-direction: column;
+  gap: 0.5em;
+  text-align: center;
+  padding: 0.5em 0.75em;
+}
+
+/* ---- type --------------------------------------------------------------- */
+
+.kgm-logo__type {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.34em;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.kgm-logo--stacked .kgm-logo__type {
+  /* The hierarchy in §47 reads downward when stacked, so the runs break. */
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.18em 0.34em;
+}
+
+/* KGM — heaviest. The brand, first. */
+.kgm-logo__kgm {
+  font-weight: var(--fw-bold);
+  letter-spacing: 0.02em;
+  color: var(--text-primary);
+  font-size: 1.06em;
+}
+
+/* LEGAL — lighter, letterspaced. The domain. */
+.kgm-logo__legal {
+  font-weight: var(--fw-medium);
+  letter-spacing: 0.20em;
+  color: var(--text-secondary);
+  font-size: 0.74em;
+  /* Optical correction: letterspacing adds trailing space, which pushes the
+     lockup off-centre. Half the tracking pulls it back. */
+  margin-inline-end: -0.10em;
+}
+
+/* OS — lightest, gold. §02 allows gold here as an institutional accent. */
+.kgm-logo__os {
+  font-weight: var(--fw-semibold);
+  letter-spacing: 0.14em;
+  color: var(--text-gold);
+  font-size: 0.74em;
+}
+
+.kgm-logo__sub {
+  font-size: var(--fs-meta);
+  font-weight: var(--fw-regular);
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  line-height: var(--lh-snug);
+}
+
+/* ---- sizes -------------------------------------------------------------- */
+/* font-size on the container drives the `em`-based gaps and clear space, so one
+   value scales the whole lockup proportionally. */
+.kgm-logo--xs { font-size: 12px; }
+.kgm-logo--sm { font-size: 14px; }
+.kgm-logo--md { font-size: 16px; }
+.kgm-logo--lg { font-size: 20px; }
+.kgm-logo--xl { font-size: 26px; }
+
+/* ---- theme overrides for the mark --------------------------------------- */
+
+:root, [data-theme='dark'] {
+  --kgm-logo-tile-1: #14654e;
+  --kgm-logo-tile-2: #072821;
+  --kgm-logo-tile-stroke: rgba(255, 255, 255, 0.16);
+  --kgm-logo-stem: #ffffff;
+  --kgm-logo-accent: #d3b469;
+}
+
+[data-theme='light'] {
+  /* The tile keeps its depth in light mode; only the stroke and highlight
+     change. Flattening it to a pale green would make the mark disappear
+     against a white topbar. */
+  --kgm-logo-tile-1: #1c7d61;
+  --kgm-logo-tile-2: #0b3a2f;
+  --kgm-logo-tile-stroke: rgba(11, 58, 47, 0.22);
+  --kgm-logo-stem: #ffffff;
+  --kgm-logo-accent: #bf9b45;
+}
+
+/* On a dark photographic or gradient surface the wordmark must stay white even
+   in light mode — e.g. the preloader, which is always institutional green. */
+.kgm-logo--on-brand .kgm-logo__kgm { color: #ffffff; }
+.kgm-logo--on-brand .kgm-logo__legal { color: rgba(255, 255, 255, 0.72); }
+.kgm-logo--on-brand .kgm-logo__os { color: var(--kgm-gold-300); }
+.kgm-logo--on-brand .kgm-logo__sub { color: rgba(255, 255, 255, 0.55); }
+
+/* Print: the mark must survive a monochrome printer (§ print styles). */
+@media print {
+  .kgm-logo__legal, .kgm-logo__os { color: #000; }
+}

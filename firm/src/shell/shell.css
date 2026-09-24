@@ -1,0 +1,1388 @@
+/* ==========================================================================
+   FIRM SHELL · §09-§18
+   ==========================================================================
+   Layout only. Every colour, radius, blur and duration comes from
+   @kgm/ui/styles/tokens.css, so this file cannot drift from the design system
+   and — more usefully — cannot introduce a second idea of what "glass" means.
+
+   THE RULE THIS FILE ENFORCES
+     No fixed pixel widths for the shell. The rail's width is a token, the
+     content's inset follows it, and the topbar's offset follows that. Changing
+     the rail in one place moves the whole layout, which is the difference
+     between a shell and three components that happen to sit next to each other.
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   1 · APP GRID
+   --------------------------------------------------------------------------
+   A CSS grid rather than flex+margin because the rail's collapsed state has to
+   move the content, and a grid track does that with one variable. The old
+   flex-plus-margin-left approach needs the margin recalculated in JS on every
+   toggle, which is how shells end up with a layout that lags the animation.
+   -------------------------------------------------------------------------- */
+
+.firm-shell {
+  display: grid;
+  grid-template-columns: var(--rail-w-expanded) minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-areas:
+    "rail topbar"
+    "rail main";
+  min-block-size: 100dvh;
+  isolation: isolate;
+}
+
+.firm-shell[data-rail="collapsed"] { grid-template-columns: var(--rail-w-collapsed) minmax(0, 1fr); }
+
+/* Below the sidebar breakpoint the rail leaves the grid entirely rather than
+   collapsing to zero width. A zero-width grid track still participates in
+   layout and still holds focusable children; removing the area is what actually
+   takes it out of the tab order. */
+@media (max-width: 899px) {
+  .firm-shell {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "topbar"
+      "main";
+  }
+}
+
+/* --------------------------------------------------------------------------
+   2 · RAIL · §10, §11
+   -------------------------------------------------------------------------- */
+
+.kgm-rail {
+  grid-area: rail;
+  position: sticky;
+  inset-block-start: 0;
+  block-size: 100dvh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--rail-bg);
+  backdrop-filter: blur(var(--blur-rail));
+  -webkit-backdrop-filter: blur(var(--blur-rail));
+  border-inline-end: var(--rail-edge);
+  /* A shadow on the rail's inner edge is what separates it from the content
+     without a hard line. Inset, so it never spills over the scrollbar. */
+  box-shadow: inset -14px 0 28px -22px var(--shadow-color);
+  z-index: var(--z-sticky);
+  transition: inline-size var(--dur-slow) var(--ease-standard);
+}
+
+[dir='rtl'] .kgm-rail { box-shadow: inset 14px 0 28px -22px var(--shadow-color); }
+
+@media (max-width: 899px) {
+  .kgm-rail { display: none; }
+}
+
+/* ---- brand row ---- */
+
+.kgm-rail__brand {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-4) var(--sp-3);
+  padding-block-end: var(--sp-3);
+  flex: none;
+}
+
+.kgm-rail__brandlink {
+  display: flex;
+  align-items: center;
+  min-inline-size: 0;
+  flex: 1 1 auto;
+  color: var(--text-hi);
+  text-decoration: none;
+  border-radius: var(--radius-sm);
+  transition: opacity var(--dur-fast) var(--ease-out);
+}
+
+.kgm-rail__brandlink:hover { opacity: .88; }
+.kgm-rail__brandlink:focus-visible { outline: 2px solid var(--focus-ring-color); outline-offset: 2px; }
+
+.kgm-rail[data-state='collapsed'] .kgm-rail__brandlink { flex: 0 0 auto; justify-content: center; inline-size: 100%; }
+
+.kgm-rail__logo { min-inline-size: 0; }
+
+/* The toggler. §10 calls for a smooth toggler; the rotation is the cue that
+   something changed, and the icon itself flips with direction via CSS. */
+.kgm-rail__toggle {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  inline-size: 28px;
+  block-size: 28px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition:
+    color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
+}
+
+.kgm-rail__toggle:hover { color: var(--text-hi); background: var(--surface-1); border-color: var(--line-soft); }
+.kgm-rail__toggle:focus-visible { outline: none; border-color: var(--focus-ring-color); box-shadow: var(--focus-ring-glow); color: var(--text-hi); }
+.kgm-rail__toggle:active { scale: .94; }
+
+.kgm-rail[data-state='collapsed'] .kgm-rail__toggle {
+  position: absolute;
+  inset-block-end: var(--sp-3);
+  inset-inline-start: 50%;
+  translate: -50% 0;
+  background: var(--surface-2);
+  border-color: var(--line-soft);
+}
+
+/* ---- scroll region ---- */
+
+.kgm-rail__scroll {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: var(--sp-2) var(--sp-2) var(--sp-6);
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+
+.kgm-rail__scroll::-webkit-scrollbar { inline-size: 6px; }
+.kgm-rail__scroll::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: var(--radius-full); }
+.kgm-rail__scroll::-webkit-scrollbar-track { background: transparent; }
+
+.kgm-rail__group { margin-block-end: var(--sp-4); }
+.kgm-rail__group:last-child { margin-block-end: 0; }
+
+.kgm-rail__grouplabel {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0 0 var(--sp-1);
+  padding-inline: var(--sp-2);
+  color: var(--text-dim);
+  font-size: var(--fs-meta);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.kgm-rail__groupicon { display: inline-grid; place-items: center; inline-size: 100%; color: var(--text-dim); }
+
+.kgm-rail__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+
+/* ---- nav link ---- */
+
+.kgm-rail__link {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-md);
+  color: var(--text-md);
+  font-size: var(--fs-body);
+  font-weight: var(--fw-medium);
+  text-decoration: none;
+  white-space: nowrap;
+  overflow: hidden;
+  transition:
+    color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out);
+}
+
+.kgm-rail__link:hover { color: var(--text-hi); background: var(--surface-1); }
+.kgm-rail__link:focus-visible { outline: 2px solid var(--focus-ring-color); outline-offset: -2px; color: var(--text-hi); }
+
+/* The active indicator is a bar on the inline-start edge, not a filled pill.
+   A filled pill competes with the metric cards for attention in a rail that is
+   mostly text; an edge bar reads as position without shouting. §26: "use colour
+   to mean something, not to decorate." */
+.kgm-rail__link[data-active] {
+  color: var(--text-hi);
+  background: var(--surface-2);
+  font-weight: var(--fw-semibold);
+}
+
+.kgm-rail__link[data-active]::before {
+  content: '';
+  position: absolute;
+  inset-block: 22%;
+  inset-inline-start: 0;
+  inline-size: 3px;
+  border-radius: 0 var(--radius-full) var(--radius-full) 0;
+  background: var(--kgm-green-500);
+  box-shadow: 0 0 10px var(--kgm-green-glow);
+}
+
+[dir='rtl'] .kgm-rail__link[data-active]::before { border-radius: var(--radius-full) 0 0 var(--radius-full); }
+
+.kgm-rail__linkicon { display: inline-grid; place-items: center; flex: none; color: var(--text-dim); transition: color var(--dur-fast) var(--ease-out); }
+.kgm-rail__link:hover .kgm-rail__linkicon,
+.kgm-rail__link[data-active] .kgm-rail__linkicon { color: var(--kgm-green-300); }
+
+.kgm-rail__linklabel { flex: 1 1 auto; min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; }
+
+/* Planned modules: dimmed with a trailing dot, and inert. The dot is a visual
+   affordance only — `aria-disabled` carries the state to AT. */
+.kgm-rail__link[data-planned] { color: var(--text-faint); cursor: not-allowed; }
+.kgm-rail__link[data-planned]:hover { background: transparent; color: var(--text-dim); }
+.kgm-rail__link[data-planned] .kgm-rail__linkicon { color: var(--text-faint); }
+
+.kgm-rail__linkplanned {
+  flex: none;
+  inline-size: 5px;
+  block-size: 5px;
+  border-radius: var(--radius-full);
+  background: var(--gold-400);
+  opacity: .7;
+}
+
+/* Collapsed rail: everything centres, and the label is gone rather than
+   truncated. A truncated label in a 72px rail is unreadable AND still occupies
+   layout; removing it is what makes the collapsed width honest. */
+.kgm-rail[data-state='collapsed'] .kgm-rail__link {
+  justify-content: center;
+  padding-inline: 0;
+  gap: 0;
+}
+
+.kgm-rail[data-state='collapsed'] .kgm-rail__link::before { inset-block: 30%; }
+.kgm-rail[data-state='collapsed'] .kgm-rail__grouplabel { justify-content: center; padding-inline: 0; }
+
+/* ---- empty rail ---- */
+
+.kgm-rail__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-6) var(--sp-3);
+  text-align: center;
+  color: var(--text-dim);
+}
+
+.kgm-rail__emptyicon { color: var(--gold-400); opacity: .8; }
+.kgm-rail__emptytitle { margin: 0; font-size: var(--fs-body-sm); font-weight: var(--fw-semibold); color: var(--text-hi); }
+.kgm-rail__emptyhint { margin: 0; font-size: var(--fs-caption); line-height: var(--lh-relaxed); }
+
+/* ---- footer ---- */
+
+.kgm-rail__foot {
+  flex: none;
+  padding: var(--sp-3);
+  border-block-start: 1px solid var(--line-soft);
+}
+
+.kgm-rail__note {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0;
+  color: var(--text-faint);
+  font-size: var(--fs-meta);
+  line-height: var(--lh-snug);
+}
+
+.kgm-rail[data-state='collapsed'] .kgm-rail__foot { padding-block-end: var(--sp-8); }
+
+/* --------------------------------------------------------------------------
+   3 · TOPBAR · §13
+   -------------------------------------------------------------------------- */
+
+.kgm-topbar {
+  grid-area: topbar;
+  position: sticky;
+  inset-block-start: 0;
+  z-index: var(--z-sticky);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  min-block-size: var(--topbar-h);
+  background: var(--topbar-bg);
+  backdrop-filter: blur(var(--blur-bar));
+  -webkit-backdrop-filter: blur(var(--blur-bar));
+  border-block-end: var(--topbar-edge);
+  /* The topbar's shadow falls on the content below it, which is what makes the
+     sticky header read as a layer rather than a coloured band. */
+  box-shadow: 0 10px 30px -24px var(--shadow-color);
+}
+
+.kgm-topbar__spacer { flex: 1 1 auto; }
+
+/* ---- search ---- */
+
+.kgm-topbar__search {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: 1 1 auto;
+  max-inline-size: 520px;
+  min-inline-size: 0;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--line-soft);
+  background: var(--surface-1);
+  color: var(--text-dim);
+  cursor: pointer;
+  text-align: start;
+  font: inherit;
+  transition: border-color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out);
+}
+
+.kgm-topbar__search:hover { border-color: var(--kgm-green-500); background: var(--surface-2); color: var(--text-md); }
+.kgm-topbar__search:focus-visible { outline: none; border-color: var(--focus-ring-color); box-shadow: var(--focus-ring-glow); }
+
+.kgm-topbar__searchtext {
+  flex: 1 1 auto;
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-body-sm);
+}
+
+/* The ⌘K hint. Displayed on coarse pointers as a tap target instead — a
+   keyboard shortcut hint on a phone is dead text. */
+.kbd {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  padding: 2px var(--sp-1);
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--line-soft);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-family: var(--font-latin);
+  font-size: 10.5px;
+  font-weight: var(--fw-semibold);
+  line-height: 1.4;
+  letter-spacing: .02em;
+}
+
+@media (pointer: coarse) { .kbd { display: none; } }
+
+.kgm-topbar__iconbtns { display: flex; align-items: center; gap: var(--sp-1); flex: none; }
+
+/* ---- profile button ---- */
+
+.kgm-topbar__profile {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 4px var(--sp-2) 4px 4px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--line-soft);
+  background: var(--surface-1);
+  color: var(--text-hi);
+  cursor: pointer;
+  font: inherit;
+  transition: border-color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out);
+}
+
+[dir='rtl'] .kgm-topbar__profile { padding: 4px 4px 4px var(--sp-2); }
+
+.kgm-topbar__profile:hover { border-color: var(--kgm-green-500); background: var(--surface-2); }
+.kgm-topbar__profile:focus-visible { outline: none; border-color: var(--focus-ring-color); box-shadow: var(--focus-ring-glow); }
+
+.kgm-topbar__avatar {
+  display: inline-grid;
+  place-items: center;
+  inline-size: 30px;
+  block-size: 30px;
+  border-radius: var(--radius-full);
+  background: var(--kgm-green-500);
+  color: #041915;
+  font-size: var(--fs-caption);
+  font-weight: var(--fw-bold);
+  letter-spacing: .01em;
+  flex: none;
+}
+
+.kgm-topbar__who { display: flex; flex-direction: column; align-items: flex-start; min-inline-size: 0; line-height: 1.2; }
+[dir='rtl'] .kgm-topbar__who { align-items: flex-end; }
+.kgm-topbar__name { font-size: var(--fs-body-sm); font-weight: var(--fw-semibold); max-inline-size: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kgm-topbar__role { font-size: var(--fs-meta); color: var(--text-dim); max-inline-size: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+@media (max-width: 1099px) { .kgm-topbar__who { display: none; } }
+
+/* ---- mobile menu button ---- */
+
+.kgm-topbar__menu { display: none; }
+
+@media (max-width: 899px) {
+  .kgm-topbar { padding-inline: var(--sp-3); gap: var(--sp-2); }
+  .kgm-topbar__menu { display: inline-grid; }
+  .kgm-topbar__searchtext { display: none; }
+  .kgm-topbar__search { flex: 0 0 auto; padding: var(--sp-2); }
+}
+
+/* --------------------------------------------------------------------------
+   4 · MAIN CONTENT REGION
+   -------------------------------------------------------------------------- */
+
+.firm-main {
+  grid-area: main;
+  min-inline-size: 0;
+  /* Bottom padding on mobile clears the floating bottom nav (§16). Without it
+     the last row of a table sits under the nav and cannot be reached. */
+  padding: var(--sp-5) var(--sp-5) var(--sp-8);
+}
+
+@media (max-width: 899px) {
+  .firm-main { padding: var(--sp-4) var(--sp-4) calc(var(--bottomnav-h) + var(--sp-6) + env(safe-area-inset-bottom)); }
+}
+
+@media (max-width: 639px) {
+  .firm-main { padding-inline: var(--sp-3); }
+}
+
+/* Page header: the sticky matter header (§22) and ordinary page titles share
+   this, so a title never looks different depending on which page it is on. */
+.firm-pagehead {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-4);
+  flex-wrap: wrap;
+  margin-block-end: var(--sp-5);
+}
+
+.firm-pagehead__text { flex: 1 1 260px; min-inline-size: 0; }
+.firm-pagehead__eyebrow { margin: 0 0 var(--sp-1); color: var(--text-dim); font-size: var(--fs-meta); font-weight: var(--fw-medium); letter-spacing: var(--tracking-label); text-transform: uppercase; }
+.firm-pagehead__title { margin: 0; color: var(--text-hi); font-size: var(--fs-h1); font-weight: var(--fw-bold); letter-spacing: var(--tracking-display); }
+.firm-pagehead__sub { margin: var(--sp-1) 0 0; color: var(--text-dim); font-size: var(--fs-body-sm); line-height: var(--lh-relaxed); }
+.firm-pagehead__actions { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+
+@media (max-width: 639px) {
+  .firm-pagehead__title { font-size: var(--fs-h2); }
+  .firm-pagehead__actions { inline-size: 100%; }
+}
+
+/* --------------------------------------------------------------------------
+   5 · BOTTOM NAV · §16
+   --------------------------------------------------------------------------
+   Floating, rounded, pill-shaped, elevated above content. Five items.
+   -------------------------------------------------------------------------- */
+
+.kgm-bottomnav {
+  position: fixed;
+  inset-block-end: calc(var(--sp-3) + env(safe-area-inset-bottom));
+  inset-inline: 50%;
+  translate: -50% 0;
+  z-index: var(--z-nav);
+  display: none;
+  align-items: stretch;
+  gap: 2px;
+  padding: 6px;
+  border-radius: var(--radius-pill);
+  border: var(--nav-edge);
+  background: var(--nav-bg);
+  backdrop-filter: blur(var(--blur-nav));
+  -webkit-backdrop-filter: blur(var(--blur-nav));
+  box-shadow: var(--shadow-nav);
+  /* Cap the width so the pill does not stretch edge-to-edge on a tablet. */
+  max-inline-size: calc(100vw - var(--sp-6));
+}
+
+@media (max-width: 899px) { .kgm-bottomnav { display: flex; } }
+
+.kgm-bottomnav__item {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  flex: 1 1 0;
+  min-inline-size: 56px;
+  /* 48px of tap target inside a 60px pill. §18's 44px minimum is comfortably
+     cleared, and the visual footprint stays small because the pill is padded. */
+  min-block-size: 48px;
+  padding: var(--sp-1) var(--sp-2);
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 10.5px;
+  font-weight: var(--fw-medium);
+  line-height: 1.2;
+  text-decoration: none;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out);
+}
+
+.kgm-bottomnav__item:hover { color: var(--text-hi); }
+.kgm-bottomnav__item:focus-visible { outline: 2px solid var(--focus-ring-color); outline-offset: -2px; }
+
+.kgm-bottomnav__item[data-active] { color: var(--kgm-green-300); background: var(--surface-2); font-weight: var(--fw-semibold); }
+
+.kgm-bottomnav__icon { display: inline-grid; place-items: center; }
+
+/* The badge sits at the icon's outer corner. Positioned on the icon wrapper
+   rather than the item so it stays put when the label wraps. */
+.kgm-bottomnav__item .kgm-badge--count {
+  position: absolute;
+  inset-block-start: 2px;
+  inset-inline-end: calc(50% - 20px);
+  pointer-events: none;
+}
+
+/* --------------------------------------------------------------------------
+   6 · MORE SHEET · §17
+   --------------------------------------------------------------------------
+   The bottom sheet's own styling lives in primitives.css. What is here is the
+   module list inside it, which is a firm-shell concern.
+   -------------------------------------------------------------------------- */
+
+.kgm-morelist { display: flex; flex-direction: column; gap: var(--sp-1); margin: 0; padding: 0; list-style: none; }
+
+.kgm-morelist__group {
+  margin-block-end: var(--sp-3);
+}
+
+.kgm-morelist__grouplabel {
+  margin: 0 0 var(--sp-2);
+  padding-inline: var(--sp-1);
+  color: var(--text-dim);
+  font-size: var(--fs-meta);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+}
+
+.kgm-morelist__grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: var(--sp-2); }
+
+.kgm-morelist__item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--line-soft);
+  background: var(--surface-1);
+  color: var(--text-md);
+  font-size: var(--fs-body-sm);
+  font-weight: var(--fw-medium);
+  text-decoration: none;
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out);
+}
+
+.kgm-morelist__item:hover { border-color: var(--kgm-green-500); background: var(--surface-2); color: var(--text-hi); }
+.kgm-morelist__item:focus-visible { outline: none; border-color: var(--focus-ring-color); box-shadow: var(--focus-ring-glow); }
+.kgm-morelist__item[data-planned] { color: var(--text-faint); cursor: not-allowed; }
+.kgm-morelist__item[data-planned]:hover { border-color: var(--line-soft); background: var(--surface-1); }
+
+.kgm-morelist__icon { display: inline-grid; place-items: center; flex: none; color: var(--kgm-green-300); }
+.kgm-morelist__item[data-planned] .kgm-morelist__icon { color: var(--text-faint); }
+
+/* --------------------------------------------------------------------------
+   7 · PRELOADER · §32, §33
+   --------------------------------------------------------------------------
+   The markup is inlined in index.html so it paints before any JS executes.
+   These rules only govern its exit.
+   -------------------------------------------------------------------------- */
+
+#kgm-boot { will-change: opacity; }
+
+/* --------------------------------------------------------------------------
+   8 · AUTH / LOGIN SCREEN · §08
+   --------------------------------------------------------------------------
+   A split layout: the form on one side, brand atmosphere on the other. On
+   mobile the atmosphere collapses to a header band rather than disappearing —
+   §08's brand presence requirement is not desktop-only.
+   -------------------------------------------------------------------------- */
+
+.firm-auth {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr);
+  min-block-size: 100dvh;
+}
+
+@media (max-width: 899px) { .firm-auth { grid-template-columns: minmax(0, 1fr); } }
+
+/* ---- brand side ---- */
+
+.firm-auth__brand {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: var(--sp-6);
+  padding: var(--sp-8) var(--sp-7);
+  overflow: hidden;
+  background:
+    radial-gradient(760px 520px at 18% 8%, var(--kgm-green-500-22) 0%, transparent 62%),
+    radial-gradient(620px 460px at 86% 94%, var(--gold-400-08) 0%, transparent 58%),
+    linear-gradient(165deg, var(--kgm-green-950) 0%, var(--kgm-green-900) 46%, var(--kgm-green-950) 100%);
+}
+
+.firm-auth__brand::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: linear-gradient(var(--kgm-green-500-07) 1px, transparent 1px),
+                    linear-gradient(90deg, var(--kgm-green-500-07) 1px, transparent 1px);
+  background-size: 56px 56px;
+  mask-image: radial-gradient(ellipse 80% 70% at 40% 40%, #000 0%, transparent 72%);
+  -webkit-mask-image: radial-gradient(ellipse 80% 70% at 40% 40%, #000 0%, transparent 72%);
+  pointer-events: none;
+}
+
+.firm-auth__brandinner { position: relative; z-index: 1; display: flex; flex-direction: column; gap: var(--sp-5); }
+
+.firm-auth__headline {
+  margin: 0;
+  color: #fff;
+  font-size: var(--fs-display);
+  font-weight: var(--fw-bold);
+  line-height: var(--lh-tight);
+  letter-spacing: var(--tracking-display);
+  text-wrap: balance;
+}
+
+.firm-auth__headline em { font-style: normal; color: var(--kgm-green-300); }
+
+.firm-auth__lede { margin: 0; max-inline-size: 46ch; color: var(--kgm-green-100); font-size: var(--fs-body); line-height: var(--lh-loose); opacity: .82; }
+
+.firm-auth__points { display: flex; flex-direction: column; gap: var(--sp-3); margin: 0; padding: 0; list-style: none; }
+
+.firm-auth__point { display: flex; align-items: flex-start; gap: var(--sp-3); color: var(--kgm-green-100); font-size: var(--fs-body-sm); line-height: var(--lh-relaxed); opacity: .88; }
+.firm-auth__pointicon { display: inline-grid; place-items: center; flex: none; inline-size: 26px; block-size: 26px; border-radius: var(--radius-full); background: var(--kgm-green-500-22); color: var(--kgm-green-300); }
+
+.firm-auth__foot { position: relative; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: var(--sp-4); color: var(--kgm-green-100); font-size: var(--fs-meta); opacity: .6; }
+
+@media (max-width: 899px) {
+  .firm-auth__brand { padding: var(--sp-6) var(--sp-4) var(--sp-7); }
+  .firm-auth__headline { font-size: var(--fs-h2); }
+  .firm-auth__lede, .firm-auth__points { display: none; }
+  .firm-auth__foot { display: none; }
+}
+
+/* ---- form side ---- */
+
+.firm-auth__form {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-7) var(--sp-5);
+  background: var(--canvas);
+}
+
+.firm-auth__card { inline-size: 100%; max-inline-size: 420px; }
+
+.firm-auth__cardhead { display: flex; flex-direction: column; gap: var(--sp-2); margin-block-end: var(--sp-5); }
+.firm-auth__cardtitle { margin: 0; color: var(--text-hi); font-size: var(--fs-h2); font-weight: var(--fw-bold); letter-spacing: var(--tracking-display); }
+.firm-auth__cardsub { margin: 0; color: var(--text-dim); font-size: var(--fs-body-sm); line-height: var(--lh-relaxed); }
+
+.firm-auth__fields { display: flex; flex-direction: column; gap: var(--sp-4); }
+
+.firm-auth__remember { display: flex; flex-direction: column; gap: 4px; }
+.firm-auth__rememberhint { margin: 0; padding-inline-start: var(--sp-6); color: var(--text-dim); font-size: var(--fs-meta); line-height: var(--lh-snug); }
+
+.firm-auth__error { margin-block-end: var(--sp-4); }
+
+.firm-auth__submit { inline-size: 100%; margin-block-start: var(--sp-2); }
+
+.firm-auth__divider {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin: var(--sp-5) 0 var(--sp-4);
+  color: var(--text-faint);
+  font-size: var(--fs-meta);
+}
+
+.firm-auth__divider::before, .firm-auth__divider::after { content: ''; flex: 1 1 auto; block-size: 1px; background: var(--line-soft); }
+
+/* Demo accounts. Synthetic only — §demo-data constraint. This block is a
+   development affordance and is gated on the environment so it cannot ship
+   into a production build where it would advertise real-looking credentials. */
+.firm-auth__demo { display: flex; flex-direction: column; gap: var(--sp-2); }
+.firm-auth__demohint { margin: 0; color: var(--text-dim); font-size: var(--fs-meta); text-align: center; }
+.firm-auth__demolist { display: flex; flex-direction: column; gap: var(--sp-1); margin: 0; padding: 0; list-style: none; }
+
+.firm-auth__demoitem {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--line-soft);
+  background: var(--surface-1);
+}
+
+.firm-auth__demoitem:hover { border-color: var(--kgm-green-600); }
+.firm-auth__demowho { flex: 1 1 auto; min-inline-size: 0; }
+.firm-auth__demoname { display: block; color: var(--text-hi); font-size: var(--fs-body-sm); font-weight: var(--fw-semibold); }
+.firm-auth__demorole { display: block; color: var(--text-dim); font-size: var(--fs-meta); }
+.firm-auth__demoemail { display: block; color: var(--text-faint); font-size: var(--fs-meta); font-family: var(--font-latin); direction: ltr; unicode-bidi: isolate; }
+
+.firm-auth__portalnote {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  margin: var(--sp-5) 0 0;
+  color: var(--text-dim);
+  font-size: var(--fs-meta);
+}
+
+/* MFA step */
+.firm-auth__mfacode input { text-align: center; letter-spacing: .4em; font-family: var(--font-latin); font-variant-numeric: tabular-nums; }
+.firm-auth__mfadest { margin: 0; color: var(--text-dim); font-size: var(--fs-body-sm); }
+.firm-auth__mfaexpire { margin: var(--sp-1) 0 0; color: var(--text-faint); font-size: var(--fs-meta); }
+
+/* --------------------------------------------------------------------------
+   9 · DASHBOARD · §19-§20
+   -------------------------------------------------------------------------- */
+
+.firm-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: var(--sp-4);
+  margin-block-end: var(--sp-5);
+}
+
+/* §20: four primary cards, deliberately not more. A fifth metric card in the
+   same row makes all five secondary. */
+@media (min-width: 1200px) { .firm-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+@media (max-width: 639px) { .firm-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-3); } }
+@media (max-width: 420px) { .firm-metrics { grid-template-columns: minmax(0, 1fr); } }
+
+.firm-dashgrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+  gap: var(--sp-4);
+  align-items: start;
+}
+
+@media (max-width: 1099px) { .firm-dashgrid { grid-template-columns: minmax(0, 1fr); } }
+
+.firm-dashcol { display: flex; flex-direction: column; gap: var(--sp-4); min-inline-size: 0; }
+
+/* Scope notice: a short, quiet line stating that the dashboard is filtered.
+   §50 makes this a disclosure rather than a decoration — a member who sees no
+   finance metrics needs to know that is scope and not absence. */
+.firm-scopenotice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--line-soft);
+  border-inline-start: 3px solid var(--kgm-green-500);
+  background: var(--surface-1);
+  color: var(--text-md);
+  font-size: var(--fs-body-sm);
+  line-height: var(--lh-relaxed);
+  margin-block-end: var(--sp-4);
+}
+
+.firm-scopenotice__icon { display: inline-grid; place-items: center; flex: none; color: var(--kgm-green-300); padding-block-start: 2px; }
+
+/* ---- matter rows on the dashboard ---- */
+
+.firm-matterlist { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
+
+.firm-matterrow {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3);
+  border-radius: var(--radius-md);
+  text-decoration: none;
+  color: var(--text-md);
+  transition: background var(--dur-fast) var(--ease-out);
+}
+
+.firm-matterrow:hover { background: var(--surface-1); }
+.firm-matterrow:focus-visible { outline: 2px solid var(--focus-ring-color); outline-offset: -2px; }
+
+.firm-matterrow__num {
+  flex: none;
+  inline-size: 44px;
+  color: var(--text-dim);
+  font-family: var(--font-latin);
+  font-size: var(--fs-meta);
+  font-weight: var(--fw-semibold);
+  letter-spacing: .02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.firm-matterrow__body { flex: 1 1 auto; min-inline-size: 0; }
+.firm-matterrow__title { display: block; color: var(--text-hi); font-size: var(--fs-body-sm); font-weight: var(--fw-semibold); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.firm-matterrow__meta { display: block; color: var(--text-dim); font-size: var(--fs-meta); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.firm-matterrow__side { display: flex; align-items: center; gap: var(--sp-2); flex: none; }
+
+@media (max-width: 639px) {
+  .firm-matterrow__num { inline-size: 38px; font-size: 10.5px; }
+  .firm-matterrow__side .kgm-badge:not(.kgm-badge--restricted) { display: none; }
+}
+
+/* --------------------------------------------------------------------------
+   10 · MATTER WORKSPACE · §22
+   -------------------------------------------------------------------------- */
+
+/* The sticky header. It holds identity + status + primary actions and survives
+   scrolling inside a long matter. Sticky within the main region, not the
+   viewport, so it does not fight the topbar. */
+.firm-matterhead {
+  position: sticky;
+  inset-block-start: var(--topbar-h);
+  z-index: var(--z-sticky);
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-4);
+  flex-wrap: wrap;
+  margin: calc(-1 * var(--sp-5)) calc(-1 * var(--sp-5)) var(--sp-4);
+  padding: var(--sp-4) var(--sp-5);
+  background: var(--glass-1);
+  backdrop-filter: blur(var(--blur-bar));
+  -webkit-backdrop-filter: blur(var(--blur-bar));
+  border-block-end: 1px solid var(--line-soft);
+}
+
+@media (max-width: 899px) {
+  .firm-matterhead { inset-block-start: var(--topbar-h); margin-inline: calc(-1 * var(--sp-4)); padding-inline: var(--sp-4); }
+}
+
+@media (max-width: 639px) {
+  .firm-matterhead { margin-inline: calc(-1 * var(--sp-3)); padding: var(--sp-3); }
+}
+
+.firm-matterhead__id { flex: 1 1 260px; min-inline-size: 0; }
+.firm-matterhead__num { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; margin-block-end: var(--sp-1); }
+.firm-matterhead__numtext { color: var(--text-dim); font-family: var(--font-latin); font-size: var(--fs-meta); font-weight: var(--fw-semibold); letter-spacing: .04em; }
+.firm-matterhead__title { margin: 0; color: var(--text-hi); font-size: var(--fs-h2); font-weight: var(--fw-bold); letter-spacing: var(--tracking-display); line-height: var(--lh-tight); }
+.firm-matterhead__meta { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; margin-block-start: var(--sp-2); color: var(--text-dim); font-size: var(--fs-meta); }
+.firm-matterhead__actions { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+
+@media (max-width: 639px) {
+  .firm-matterhead__title { font-size: var(--fs-h3); }
+  .firm-matterhead__actions { inline-size: 100%; }
+}
+
+/* ---- tabs ---- */
+
+.firm-tabs {
+  display: flex;
+  gap: var(--sp-1);
+  margin-block-end: var(--sp-4);
+  overflow-x: auto;
+  scrollbar-width: none;
+  /* A fade at the trailing edge signals that the tab strip scrolls, which is
+     the only affordance a horizontal overflow has on a touch device. */
+  mask-image: linear-gradient(to right, #000 0%, #000 calc(100% - 24px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, #000 0%, #000 calc(100% - 24px), transparent 100%);
+  padding-block-end: 2px;
+}
+
+[dir='rtl'] .firm-tabs { mask-image: linear-gradient(to left, #000 0%, #000 calc(100% - 24px), transparent 100%); -webkit-mask-image: linear-gradient(to left, #000 0%, #000 calc(100% - 24px), transparent 100%); }
+
+/* No fade when everything fits — a permanent fade on a short strip implies
+   scrollability that is not there. */
+.firm-tabs[data-overflow='false'] { mask-image: none; -webkit-mask-image: none; }
+.firm-tabs::-webkit-scrollbar { display: none; }
+
+.firm-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: none;
+  padding: var(--sp-2) var(--sp-4);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: var(--fs-body-sm);
+  font-weight: var(--fw-medium);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out);
+}
+
+.firm-tab:hover { color: var(--text-hi); background: var(--surface-1); }
+.firm-tab:focus-visible { outline: 2px solid var(--focus-ring-color); outline-offset: -2px; }
+.firm-tab[data-active] { color: var(--text-hi); background: var(--surface-2); font-weight: var(--fw-semibold); }
+
+/* Underline on the active tab. Combined with the surface fill so the state is
+   carried by two channels — §30 forbids colour-only signalling, and a fill that
+   is only a subtle tint is close enough to colour-only to warrant the bar. */
+.firm-tab[data-active]::after {
+  content: '';
+  position: absolute;
+  inset-inline: var(--sp-4);
+  inset-block-end: 2px;
+  block-size: 2px;
+  border-radius: var(--radius-full);
+  background: var(--kgm-green-500);
+}
+
+.firm-tab[data-disabled] { color: var(--text-faint); cursor: not-allowed; }
+.firm-tab[data-disabled]:hover { background: transparent; color: var(--text-faint); }
+
+/* ---- matter body ---- */
+
+.firm-mattergrid { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: var(--sp-4); align-items: start; }
+@media (max-width: 1099px) { .firm-mattergrid { grid-template-columns: minmax(0, 1fr); } }
+
+.firm-fieldgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--sp-4); }
+@media (max-width: 639px) { .firm-fieldgrid { grid-template-columns: minmax(0, 1fr); } }
+
+.firm-field { display: flex; flex-direction: column; gap: 3px; min-inline-size: 0; }
+.firm-field__label { color: var(--text-dim); font-size: var(--fs-meta); font-weight: var(--fw-medium); letter-spacing: var(--tracking-label); text-transform: uppercase; }
+.firm-field__value { color: var(--text-hi); font-size: var(--fs-body); font-weight: var(--fw-medium); line-height: var(--lh-snug); overflow-wrap: anywhere; }
+.firm-field__value[data-numeric] { font-family: var(--font-latin); font-variant-numeric: tabular-nums; font-weight: var(--fw-bold); font-size: var(--fs-body-lg); }
+
+/* ---- §57 field lock ----
+   A withheld field renders a LOCK, not an empty cell and not nothing at all.
+   This is the visible half of the classification system: the member learns the
+   field EXISTS and that their access level is what hides it, which is both more
+   useful and more honest than a blank. It is also the half that makes §57
+   legible to the people it governs. */
+.firm-fieldlock {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--radius-sm);
+  border: 1px dashed var(--gold-400-45);
+  background: var(--gold-400-08);
+  color: var(--gold-200);
+  font-size: var(--fs-meta);
+  font-weight: var(--fw-medium);
+  cursor: help;
+}
+
+.firm-fieldlock__icon { display: inline-grid; place-items: center; flex: none; }
+
+/* The count strip. Sits under the header rather than inline with it, so a
+   member always sees how much of the record they are NOT seeing. */
+.firm-withheldstrip {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--gold-400-24);
+  background: var(--gold-400-06);
+  color: var(--gold-200);
+  font-size: var(--fs-body-sm);
+  line-height: var(--lh-relaxed);
+  margin-block-end: var(--sp-4);
+}
+
+.firm-withheldstrip__icon { display: inline-grid; place-items: center; flex: none; padding-block-start: 2px; }
+.firm-withheldstrip__body { flex: 1 1 auto; min-inline-size: 0; }
+.firm-withheldstrip__title { display: block; font-weight: var(--fw-semibold); }
+.firm-withheldstrip__hint { display: block; color: var(--text-dim); font-size: var(--fs-meta); margin-block-start: 2px; }
+
+/* Restricted matter banner */
+.firm-restrictedbanner {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--gold-400-45);
+  background: linear-gradient(180deg, var(--gold-400-12) 0%, var(--gold-400-06) 100%);
+  color: var(--gold-100);
+  margin-block-end: var(--sp-4);
+}
+
+.firm-restrictedbanner__icon { display: inline-grid; place-items: center; flex: none; color: var(--gold-300); padding-block-start: 2px; }
+.firm-restrictedbanner__body { flex: 1 1 auto; min-inline-size: 0; }
+.firm-restrictedbanner__title { display: block; font-size: var(--fs-body-sm); font-weight: var(--fw-bold); color: var(--gold-100); }
+.firm-restrictedbanner__text { display: block; font-size: var(--fs-meta); color: var(--gold-200); margin-block-start: 2px; line-height: var(--lh-snug); }
+
+/* --------------------------------------------------------------------------
+   11 · TIMELINE · §23
+   --------------------------------------------------------------------------
+   Vertical, newest first, with a continuous line, typed markers and readable
+   spacing. The line is drawn on the list, not per item, so a gap between items
+   never breaks it.
+   -------------------------------------------------------------------------- */
+
+.kgm-timeline { position: relative; list-style: none; margin: 0; padding: 0; padding-inline-start: var(--sp-6); }
+
+.kgm-timeline::before {
+  content: '';
+  position: absolute;
+  inset-block: var(--sp-2);
+  inset-inline-start: 9px;
+  inline-size: 2px;
+  border-radius: var(--radius-full);
+  background: linear-gradient(180deg, var(--kgm-green-500-45) 0%, var(--line-strong) 40%, transparent 100%);
+}
+
+.kgm-timeline__item { position: relative; padding-block-end: var(--sp-5); }
+.kgm-timeline__item:last-child { padding-block-end: 0; }
+
+/* The marker sits on the line. Its background is the card colour so the line
+   appears to pass behind it rather than through it. */
+.kgm-timeline__marker {
+  position: absolute;
+  inset-inline-start: calc(-1 * var(--sp-6) + 2px);
+  inset-block-start: 2px;
+  display: inline-grid;
+  place-items: center;
+  inline-size: 16px;
+  block-size: 16px;
+  border-radius: var(--radius-full);
+  border: 2px solid var(--kgm-green-500);
+  background: var(--card-bg-solid);
+  color: var(--kgm-green-300);
+}
+
+.kgm-timeline__item[data-kind='hearing'] .kgm-timeline__marker { border-color: var(--kgm-green-400); }
+.kgm-timeline__item[data-kind='deadline'] .kgm-timeline__marker { border-color: var(--gold-400); color: var(--gold-300); }
+.kgm-timeline__item[data-kind='billing'] .kgm-timeline__marker { border-color: var(--sky-400); color: var(--sky-300); }
+.kgm-timeline__item[data-kind='document'] .kgm-timeline__marker { border-color: var(--line-strong); color: var(--text-dim); }
+.kgm-timeline__item[data-kind='status'] .kgm-timeline__marker { border-color: var(--kgm-green-500); }
+
+.kgm-timeline__head { display: flex; align-items: baseline; gap: var(--sp-3); flex-wrap: wrap; }
+.kgm-timeline__title { color: var(--text-hi); font-size: var(--fs-body); font-weight: var(--fw-semibold); }
+.kgm-timeline__when { color: var(--text-dim); font-size: var(--fs-meta); font-variant-numeric: tabular-nums; }
+.kgm-timeline__body { margin-block-start: var(--sp-1); color: var(--text-md); font-size: var(--fs-body-sm); line-height: var(--lh-relaxed); }
+.kgm-timeline__actor { margin-block-start: var(--sp-1); color: var(--text-faint); font-size: var(--fs-meta); }
+
+/* --------------------------------------------------------------------------
+   12 · COMMAND PALETTE / GLOBAL SEARCH · §14
+   -------------------------------------------------------------------------- */
+
+.kgm-palette__input {
+  inline-size: 100%;
+  padding: var(--sp-3) var(--sp-4);
+  border: 0;
+  border-block-end: 1px solid var(--line-soft);
+  background: transparent;
+  color: var(--text-hi);
+  font-family: inherit;
+  font-size: var(--fs-body-lg);
+  outline: none;
+}
+
+.kgm-palette__input::placeholder { color: var(--text-faint); }
+
+.kgm-palette__body { max-block-size: min(52vh, 420px); overflow-y: auto; padding: var(--sp-2); }
+
+.kgm-palette__group { margin-block-end: var(--sp-3); }
+.kgm-palette__group:last-child { margin-block-end: 0; }
+.kgm-palette__grouplabel { margin: 0 0 var(--sp-1); padding-inline: var(--sp-2); color: var(--text-dim); font-size: var(--fs-meta); font-weight: var(--fw-medium); letter-spacing: var(--tracking-label); text-transform: uppercase; }
+
+.kgm-palette__item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  inline-size: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-md);
+  font-family: inherit;
+  font-size: var(--fs-body-sm);
+  text-align: start;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+
+.kgm-palette__item:hover { background: var(--surface-1); color: var(--text-hi); }
+.kgm-palette__item:focus-visible { outline: none; background: var(--surface-2); color: var(--text-hi); box-shadow: inset 0 0 0 1px var(--focus-ring); }
+.kgm-palette__itemicon { display: inline-grid; place-items: center; flex: none; color: var(--kgm-green-300); }
+.kgm-palette__itembody { flex: 1 1 auto; min-inline-size: 0; }
+.kgm-palette__itemtitle { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: var(--fw-medium); }
+.kgm-palette__itemmeta { display: block; color: var(--text-dim); font-size: var(--fs-meta); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.kgm-palette__foot {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-2) var(--sp-4);
+  border-block-start: 1px solid var(--line-soft);
+  color: var(--text-faint);
+  font-size: var(--fs-meta);
+}
+
+.kgm-palette__hint { display: inline-flex; align-items: center; gap: var(--sp-1); }
+
+/* The search only returns authorized records (§14). This line states that, so
+   a member who finds nothing knows it is scope and not a broken search. */
+.kgm-palette__scope { margin-inline-start: auto; }
+
+@media (max-width: 639px) {
+  .kgm-palette__foot { flex-wrap: wrap; gap: var(--sp-2); }
+  .kgm-palette__scope { margin-inline-start: 0; inline-size: 100%; }
+}
+
+/* --------------------------------------------------------------------------
+   13 · PROFILE DRAWER
+   -------------------------------------------------------------------------- */
+
+.kgm-profile__head { display: flex; align-items: center; gap: var(--sp-4); padding-block-end: var(--sp-4); border-block-end: 1px solid var(--line-soft); }
+.kgm-profile__avatar { display: inline-grid; place-items: center; flex: none; inline-size: 52px; block-size: 52px; border-radius: var(--radius-full); background: var(--kgm-green-500); color: #041915; font-size: var(--fs-h3); font-weight: var(--fw-bold); }
+.kgm-profile__name { margin: 0; color: var(--text-hi); font-size: var(--fs-h3); font-weight: var(--fw-bold); }
+.kgm-profile__email { margin: 2px 0 0; color: var(--text-dim); font-size: var(--fs-meta); font-family: var(--font-latin); direction: ltr; unicode-bidi: isolate; }
+
+.kgm-profile__section { padding-block: var(--sp-4); border-block-end: 1px solid var(--line-soft); }
+.kgm-profile__section:last-child { border-block-end: 0; }
+.kgm-profile__sectiontitle { margin: 0 0 var(--sp-3); color: var(--text-dim); font-size: var(--fs-meta); font-weight: var(--fw-medium); letter-spacing: var(--tracking-label); text-transform: uppercase; }
+
+.kgm-profile__chips { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin: 0; padding: 0; list-style: none; }
+
+/* Authority ceilings. Rendered as numbers with strong emphasis because §03
+   wants numbers emphasised and §10 makes these the member's actual limits. */
+.kgm-profile__authority { display: flex; flex-direction: column; gap: var(--sp-3); }
+.kgm-profile__ceiling { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-3); }
+.kgm-profile__ceilinglabel { color: var(--text-md); font-size: var(--fs-body-sm); }
+.kgm-profile__ceilingvalue { color: var(--text-hi); font-size: var(--fs-h3); font-weight: var(--fw-bold); font-variant-numeric: tabular-nums; }
+.kgm-profile__ceilingvalue[data-none] { color: var(--text-faint); font-size: var(--fs-body-sm); font-weight: var(--fw-medium); }
+
+.kgm-profile__noauthority {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  color: var(--text-dim);
+  font-size: var(--fs-body-sm);
+  line-height: var(--lh-relaxed);
+}
+
+/* --------------------------------------------------------------------------
+   14 · ROUTE GUARD / ERROR SURFACES
+   -------------------------------------------------------------------------- */
+
+.firm-guard { display: grid; place-items: center; min-block-size: 60vh; padding: var(--sp-6); }
+.firm-guard__inner { inline-size: 100%; max-inline-size: 480px; }
+
+/* --------------------------------------------------------------------------
+   15 · PAGE TRANSITIONS · §34
+   --------------------------------------------------------------------------
+   One shared motion curve, applied to the routed content. A page that slides in
+   from a different direction depending on the nav item would imply a hierarchy
+   that does not exist; every transition here is the same fade-and-settle.
+   -------------------------------------------------------------------------- */
+
+@keyframes firmPageIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.firm-page { animation: firmPageIn var(--dur-slow) var(--ease-standard) both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .firm-page { animation: none; }
+}
+
+
+/* --------------------------------------------------------------------------
+   16 · TOOLBAR · §25
+   --------------------------------------------------------------------------
+   Search plus filters in one row. The table primitive deliberately does NOT own
+   filter state — that is a page concern — but it does expect a consistent
+   toolbar shape, which is what this provides.
+   -------------------------------------------------------------------------- */
+
+.firm-toolbar {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  margin-block-end: var(--sp-4);
+}
+
+.firm-toolbar__search { flex: 1 1 260px; min-inline-size: 0; max-inline-size: 420px; }
+
+.firm-toolbar__filters {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  flex: 0 1 auto;
+}
+
+.firm-toolbar__filtericon { display: inline-grid; place-items: center; color: var(--text-dim); }
+
+.firm-toolbar__check {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--line-soft);
+  background: var(--surface-1);
+  color: var(--text-md);
+  font-size: var(--fs-body-sm);
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+
+.firm-toolbar__check:hover { border-color: var(--kgm-green-500); }
+.firm-toolbar__check:has(input:checked) { border-color: var(--gold-400); background: var(--gold-400-08); color: var(--gold-100); }
+.firm-toolbar__check:has(input:focus-visible) { border-color: var(--focus-ring-color); box-shadow: var(--focus-ring-glow); }
+.firm-toolbar__check input { inline-size: 15px; block-size: 15px; accent-color: var(--gold-400); cursor: pointer; }
+
+@media (max-width: 639px) {
+  .firm-toolbar { flex-direction: column; align-items: stretch; }
+  .firm-toolbar__search { max-inline-size: none; }
+}
+
+/* --------------------------------------------------------------------------
+   17 · TABLE CELLS
+   -------------------------------------------------------------------------- */
+
+.firm-cellnum {
+  font-family: var(--font-latin);
+  font-size: var(--fs-meta);
+  font-weight: var(--fw-semibold);
+  letter-spacing: .02em;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+
+.firm-celltitle { display: inline-flex; align-items: center; gap: var(--sp-2); min-inline-size: 0; }
+.firm-celltitle__lock { flex: none; color: var(--gold-300); }
+
+/* --------------------------------------------------------------------------
+   18 · DEFINITION LIST
+   --------------------------------------------------------------------------
+   Used for the profile and the matter's authorization card. A <dl> rather than a
+   grid of divs because these are term/value pairs and the semantics are free.
+   -------------------------------------------------------------------------- */
+
+.firm-deflist { margin: 0; display: flex; flex-direction: column; }
+
+.firm-deflist__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  padding: var(--sp-2) 0;
+  border-block-end: 1px solid var(--line-soft);
+}
+
+.firm-deflist__row:last-child { border-block-end: 0; }
+
+.firm-deflist dt {
+  flex: 0 1 auto;
+  min-inline-size: 0;
+  color: var(--text-dim);
+  font-size: var(--fs-meta);
+  font-weight: var(--fw-medium);
+}
+
+.firm-deflist dd {
+  flex: 0 0 auto;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  color: var(--text-hi);
+  font-size: var(--fs-body-sm);
+  font-weight: var(--fw-medium);
+  text-align: end;
+}
+
+/* --------------------------------------------------------------------------
+   19 · FIELD LOCK EXTENSIONS · §57
+   --------------------------------------------------------------------------
+   The base .firm-fieldlock lives in §10 above; these are the states it needs
+   once it is used inline and once it carries a visible tag.
+   -------------------------------------------------------------------------- */
+
+.firm-fieldlock__label { font-weight: var(--fw-semibold); }
+
+.firm-fieldlock__tag {
+  padding-inline-start: var(--sp-2);
+  margin-inline-start: var(--sp-1);
+  border-inline-start: 1px solid var(--gold-400-24);
+  color: var(--gold-200);
+  font-size: var(--fs-meta);
+  opacity: .8;
+  white-space: nowrap;
+}
+
+.firm-fieldlock--inline {
+  display: inline-flex;
+  vertical-align: baseline;
+  padding: 0 var(--sp-1);
+  font-size: inherit;
+}
+
+.firm-fieldlock--inline .firm-fieldlock__tag { display: none; }
+
+.firm-field--block .firm-field__value { white-space: pre-wrap; }
+
+.firm-withheldstrip__level {
+  flex: none;
+  align-self: center;
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--radius-sm);
+  background: var(--gold-400-12);
+  color: var(--gold-100);
+  font-family: var(--font-latin);
+  font-size: var(--fs-meta);
+  font-weight: var(--fw-semibold);
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+@media (max-width: 639px) {
+  .firm-withheldstrip { flex-wrap: wrap; }
+  .firm-withheldstrip__level { margin-inline-start: auto; }
+}
+
+.firm-accessalert { margin-block-start: var(--sp-4); }
+
+.firm-metrics__none { grid-column: 1 / -1; }
+
+.firm-matterrow__lock { flex: none; color: var(--gold-300); vertical-align: -2px; margin-inline-end: 4px; }
+
+
+/* --------------------------------------------------------------------------
+   20 · BOOT / SHELL MISC
+   -------------------------------------------------------------------------- */
+
+/* The pre-session skeleton. Centred and capped so it reads as a loading state
+   rather than a page with one small card in the corner. */
+.firm-booting {
+  display: grid;
+  place-items: center;
+  min-block-size: 100dvh;
+  padding: var(--sp-6);
+}
+
+.firm-booting > * { inline-size: 100%; max-inline-size: 560px; }
+
+/* The More sheet's trailing brand line. */
+.kgm-morelist__lang {
+  margin: var(--sp-4) 0 0;
+  padding-block-start: var(--sp-3);
+  border-block-start: 1px solid var(--line-soft);
+  color: var(--text-faint);
+  font-size: var(--fs-meta);
+  text-align: center;
+}
+
+/* The topbar's tenant badge, hidden on narrow viewports where the profile menu
+   already carries it. */
+.kgm-topbar__tenant { display: inline-flex; align-items: center; flex: none; }
+@media (max-width: 1099px) { .kgm-topbar__tenant { display: none; } }
+
+
+/* The tenant switcher rows in the profile drawer. A firm name plus the role held
+   at that firm, so switching is an informed choice rather than a guess. */
+.kgm-profile__tenant { display: flex; flex-direction: column; gap: 3px; inline-size: 100%; }
+.kgm-profile__tenantrole { padding-inline-start: var(--sp-2); color: var(--text-dim); font-size: var(--fs-meta); }

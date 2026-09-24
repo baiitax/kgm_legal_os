@@ -39,8 +39,18 @@ import { ok } from './lib/http.js';
 const BODY_LIMIT = '64kb';
 
 export interface AppOptions {
-  /** Directory of the built SPA. Falls back to web/dist. */
+  /** Directory of the built client-portal SPA. Falls back to web/dist. */
   webRoot?: string;
+  /**
+   * Directory of the built Firm OS SPA. Falls back to firm/dist.
+   *
+   * A separate option rather than a sibling folder convention: the two apps are
+   * separate products with separate authorization surfaces, and a deployment must
+   * be able to ship one without the other. An API-only firm deployment, or a
+   * portal-only one, should not have to create an empty directory to satisfy a
+   * guess about layout.
+   */
+  firmRoot?: string;
   /** Disable static serving (API-only mode, used by tests). */
   apiOnly?: boolean;
 }
@@ -115,7 +125,75 @@ export function createApp(c: Container, opts: AppOptions = {}): express.Express 
     app.use('/api/dev', devRouter(c));
   }
 
-  // ---- 10 · static SPA --------------------------------------------------
+  // ---- 10 · static SPAs -------------------------------------------------
+  /*
+   * TWO SEPARATE APPLICATIONS, TWO SEPARATE MOUNTS.
+   *
+   * The Firm OS is served at /firm and the client portal at /. Both are static
+   * bundles; neither mount authorizes anything. Every request that matters goes
+   * to /api/firm or /api/client, and the audience guard in
+   * auth/firm-middleware.ts decides there.
+   *
+   * ORDER MATTERS. The firm mount is registered first because the portal's
+   * fallback below is a catch-all for everything that is not /api. Were the
+   * portal registered first, GET /firm would return the PORTAL's index.html, and
+   * the firm SPA would never load — silently, with a 200. That failure is easy to
+   * introduce by reordering and produces no error anywhere, so the ordering is
+   * stated here rather than left to be inferred.
+   *
+   * The firm SPA uses hash routing, so the only server-visible path is /firm
+   * itself plus its hashed assets. A single fallback covers every screen.
+   *
+   * `/firm` is NOT in config.security.forbiddenPathPrefixes — that list contains
+   * `/firm-settings`, and the prefix match is exact-or-slash, so `/firm` does not
+   * collide with it. Serving the firm UI is legitimate; what `denyInternalRoutes`
+   * refuses are the old-style internal paths that predate this product.
+   */
+  if (!opts.apiOnly) {
+    const firmRoot = opts.firmRoot ?? path.resolve(process.cwd(), '../firm/dist');
+    if (fs.existsSync(firmRoot)) {
+      /*
+        Serve /firm (no trailing slash) directly.
+        express.static answers a bare directory request with a 301 to /firm/.
+        That works, but a 301 is cached permanently by browsers — so if this
+        mount ever moves, every client that has visited once keeps redirecting to
+        the old path with no request reaching the server to be corrected. Serving
+        the document at both /firm and /firm/ removes the redirect entirely.
+      */
+      app.get('/firm', (req, res, next) => {
+        const index = path.join(firmRoot, 'index.html');
+        if (!fs.existsSync(index)) return next();
+        res.setHeader('cache-control', 'no-cache');
+        res.sendFile(index);
+      });
+
+      app.use(
+        '/firm',
+        express.static(firmRoot, {
+          index: false,
+          dotfiles: 'ignore',
+          setHeaders: (res, filePath) => {
+            if (/\/assets\//.test(filePath)) {
+              res.setHeader('cache-control', 'public, max-age=31536000, immutable');
+            } else {
+              res.setHeader('cache-control', 'no-cache');
+            }
+          },
+        }),
+      );
+
+      // Fallback for /firm and any sub-path, so a hard reload or a shared link
+      // lands on the app rather than a 404.
+      app.get(/^\/firm(\/.*)?$/, (req, res, next) => {
+        if (req.method !== 'GET') return next();
+        const index = path.join(firmRoot, 'index.html');
+        if (!fs.existsSync(index)) return next();
+        res.setHeader('cache-control', 'no-cache');
+        res.sendFile(index);
+      });
+    }
+  }
+
   if (!opts.apiOnly) {
     const webRoot = opts.webRoot ?? path.resolve(process.cwd(), '../web/dist');
     if (fs.existsSync(webRoot)) {

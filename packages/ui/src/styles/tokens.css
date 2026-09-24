@@ -1,0 +1,558 @@
+/**
+ * KGM DESIGN TOKENS · §02 palette · §03 glass · §05 light · §06 dark
+ *
+ * Everything visual in both applications resolves through this file. A component
+ * that hardcodes a colour is a component that will not have a light-mode
+ * variant, which §05 forbids.
+ *
+ * THREE RULES THIS FILE ENFORCES BY SHAPE
+ *
+ * 1. LOGICAL PROPERTIES ONLY.
+ *    Inline-start, not left. block-size, not height, where direction matters.
+ *    §42 requires that switching to Arabic changes the interface's DIRECTION,
+ *    not merely its text — and a design written with `left` cannot do that
+ *    without a mirror stylesheet that will drift. RTL is therefore not a
+ *    transform of an LTR design; it is the same design under `[dir=rtl]`.
+ *
+ * 2. DARK IS THE DEFAULT, LIGHT IS A PEER.
+ *    `:root` carries dark values and `[data-theme=light]` overrides them. Not
+ *    the reverse: §06 makes dark the premium default, and a light-first sheet
+ *    tends to leave dark surfaces unconverted — the exact failure §05 names
+ *    ("dark cards remain unchanged inside light mode").
+ *
+ * 3. GLASS IS A SURFACE, NOT AN EFFECT.
+ *    Blur and transparency are capped. §03 asks for sophisticated glass and
+ *    explicitly rejects extreme blur, excessive transparency and unreadable
+ *    text. The caps live here as tokens so no component can exceed them by
+ *    accident, and §44's readability requirement is enforced by construction
+ *    rather than by review.
+ */
+
+/* ==========================================================================
+   1 · BRAND PALETTE (§02)
+   Raw values. Components consume the semantic tokens in section 3, not these.
+   ========================================================================== */
+
+:root {
+  /* --- KGM Green: the principal brand colour --------------------------- */
+  --kgm-green-50:  #eaf6f0;
+  --kgm-green-100: #cfeae0;
+  --kgm-green-200: #a3d6c4;
+  --kgm-green-300: #6fbda4;
+  --kgm-green-400: #3f9e81;
+  --kgm-green-500: #1c7d61;   /* primary */
+  --kgm-green-600: #14654e;
+  --kgm-green-700: #0f5040;
+  --kgm-green-800: #0b3a2f;
+  --kgm-green-900: #072821;
+  --kgm-green-950: #041915;
+
+  /* --- Lime: success, positive trend, active indicator ------------------ */
+  /* Used SELECTIVELY per §02. Overuse reads as a consumer fintech app.     */
+  --kgm-lime-300: #d7f59a;
+  --kgm-lime-400: #bdea6d;
+  --kgm-lime-500: #9fd94a;    /* primary lime */
+  --kgm-lime-600: #7fb832;
+  --kgm-lime-700: #5f8c26;
+
+  /* --- Saudi Gold: restrained premium accent ---------------------------- */
+  /* §02: must not make the interface metallic or overly decorative.        */
+  --kgm-gold-200: #f0e2bd;
+  --kgm-gold-300: #e3cd94;
+  --kgm-gold-400: #d3b469;
+  --kgm-gold-500: #bf9b45;    /* primary gold */
+  --kgm-gold-600: #9c7c33;
+  --kgm-gold-700: #775e27;
+
+  /* --- Neutrals ---------------------------------------------------------- */
+  --kgm-white:      #ffffff;
+  --kgm-gray-50:    #f7f9f8;
+  --kgm-gray-100:   #eef1f0;
+  --kgm-gray-200:   #dfe4e2;
+  --kgm-gray-300:   #c6cecb;
+  --kgm-gray-400:   #9aa5a1;
+  --kgm-gray-500:   #717d79;
+  --kgm-gray-600:   #525c59;
+  --kgm-gray-700:   #3a423f;
+  --kgm-gray-800:   #252b29;
+  --kgm-gray-900:   #161a19;
+
+  /* --- Status (§31) ------------------------------------------------------ */
+  /* Each severity pairs a colour with an ICON and a LABEL. §31 requires all
+     three, because colour alone is not accessible and §44 says so.          */
+  --kgm-info:    #4a9ec4;
+  --kgm-notice:  #6fbda4;
+  --kgm-warning: #d9a441;
+  --kgm-high:    #c9743a;
+  --kgm-critical:#b8483f;
+  --kgm-success: var(--kgm-lime-500);
+
+  /* --- Glass caps (§03) -------------------------------------------------- */
+  /* The ceiling on how much glass a surface may use. These exist so the
+     "sophisticated, not exaggerated" instruction survives contact with a
+     deadline. */
+  --glass-blur-max:      18px;
+  --glass-opacity-floor: 0.55;   /* a surface never drops below this opacity */
+}
+
+/* ==========================================================================
+   2 · TYPE SCALE (§07)
+   ========================================================================== */
+
+:root {
+  /* IBM Plex Sans Arabic covers both scripts, so one family serves ar and en.
+     Self-hosted: the CSP allows no third-party font origin, by design. */
+  --font-sans: 'IBM Plex Sans Arabic', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  /* Display → Metadata. §07 asks for strong emphasis on numbers and financial
+     figures, which is what --fs-display and tabular-nums are for. */
+  --fs-display:  clamp(2rem, 1.4rem + 2.2vw, 3rem);
+  --fs-h1:     clamp(1.5rem, 1.2rem + 1.1vw, 2rem);
+  --fs-h2:     clamp(1.25rem, 1.1rem + 0.6vw, 1.5rem);
+  --fs-h3:     1.125rem;
+  --fs-section: 0.9375rem;
+  --fs-body:   0.9375rem;
+  --fs-caption: 0.8125rem;
+  --fs-meta:   0.75rem;
+
+  --fw-regular:  400;
+  --fw-medium:   500;
+  --fw-semibold: 600;
+  --fw-bold:     700;
+
+  --lh-tight:  1.2;
+  --lh-snug:   1.35;
+  --lh-normal: 1.55;
+  --lh-loose:  1.7;   /* Arabic needs more leading than Latin at body size */
+
+  --ls-tight:  -0.015em;
+  --ls-normal:  0;
+  --ls-wide:    0.06em;  /* uppercase Latin labels only; never on Arabic */
+}
+
+/* Arabic sits slightly larger at the same nominal size and needs looser
+   leading. Adjusting here means no component has to know which script is
+   active. */
+:root[lang='ar'], :root[dir='rtl'] {
+  --fs-body:    1rem;
+  --fs-caption: 0.875rem;
+  --lh-normal:  1.75;
+}
+
+/* ==========================================================================
+   3 · SEMANTIC TOKENS — DARK (default, §06)
+   ========================================================================== */
+
+:root, [data-theme='dark'] {
+  color-scheme: dark;
+
+  /* --- Background system (§04) ------------------------------------------ */
+  /* Deep institutional green with an atmospheric gradient. §04: establish
+     depth WITHOUT competing with content, and no distracting abstractions. */
+  --bg-base:        var(--kgm-green-950);
+  --bg-atmos-1:     rgba(28, 125, 97, 0.20);
+  --bg-atmos-2:     rgba(7, 40, 33, 0.85);
+  --bg-atmos-gold:  rgba(191, 155, 69, 0.07);
+  --bg-atmos-lime:  rgba(159, 217, 74, 0.05);
+
+  /* --- Surfaces ---------------------------------------------------------- */
+  --surface-glass:        rgba(255, 255, 255, 0.055);
+  --surface-glass-strong: rgba(255, 255, 255, 0.085);
+  --surface-glass-raised: rgba(255, 255, 255, 0.10);
+  --surface-solid:        #0a1f19;
+  --surface-overlay:      rgba(4, 18, 14, 0.72);
+
+  /* A document canvas stays WHITE even in dark mode (§27). Working on a legal
+     document should feel like working on paper. */
+  --surface-document:     #ffffff;
+  --surface-document-ink: var(--kgm-gray-900);
+
+  /* --- Borders ----------------------------------------------------------- */
+  --border-subtle:  rgba(255, 255, 255, 0.08);
+  --border-soft:    rgba(255, 255, 255, 0.12);
+  --border-strong:  rgba(255, 255, 255, 0.20);
+  --border-brand:   rgba(63, 158, 129, 0.45);
+  --border-gold:    rgba(191, 155, 69, 0.40);
+
+  /* --- Text hierarchy (§06) --------------------------------------------- */
+  --text-primary:   #ffffff;
+  --text-secondary: #b6c2bd;
+  --text-muted:     #7d8a85;
+  --text-inverse:   var(--kgm-green-950);
+  --text-brand:     var(--kgm-green-300);
+  --text-lime:      var(--kgm-lime-400);
+  --text-gold:      var(--kgm-gold-300);
+  --text-link:      var(--kgm-green-300);
+
+  /* --- Interactive ------------------------------------------------------- */
+  --accent:         var(--kgm-green-500);
+  --accent-hover:   var(--kgm-green-400);
+  --accent-active:  var(--kgm-green-600);
+  --accent-soft:    rgba(28, 125, 97, 0.18);
+  --accent-ink:     #ffffff;
+
+  --hover-surface:  rgba(255, 255, 255, 0.045);
+  --active-surface: rgba(255, 255, 255, 0.075);
+
+  /* §36: primary carries a subtle glow. Subtle — not neon (§03). */
+  --glow-accent: 0 0 0 1px rgba(63, 158, 129, 0.30), 0 6px 20px -8px rgba(28, 125, 97, 0.65);
+  --glow-lime:   0 0 0 1px rgba(159, 217, 74, 0.28), 0 4px 14px -6px rgba(159, 217, 74, 0.45);
+  --glow-gold:   0 0 0 1px rgba(191, 155, 69, 0.30), 0 4px 14px -6px rgba(191, 155, 69, 0.40);
+
+  /* §37: focus is a green border plus a soft lime glow. Visible always (§44). */
+  --focus-ring: 0 0 0 2px var(--bg-base), 0 0 0 4px rgba(159, 217, 74, 0.65);
+
+  /* --- Elevation (§03: cards float SLIGHTLY) ----------------------------- */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.30);
+  --shadow-md: 0 4px 16px -6px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 12px 32px -12px rgba(0, 0, 0, 0.55);
+  --shadow-xl: 0 24px 56px -20px rgba(0, 0, 0, 0.60);
+
+  /* --- Skeletons (§35): green-tinted shimmer, not generic gray ----------- */
+  --skeleton-base:  rgba(255, 255, 255, 0.06);
+  --skeleton-sheen: rgba(111, 189, 164, 0.16);
+}
+
+/* ==========================================================================
+   4 · SEMANTIC TOKENS — LIGHT (§05)
+   Warm white, soft white, very light green, muted gray, subtle gold.
+   EVERY token the dark sheet defines is redefined here. A token left out is a
+   dark surface surviving into light mode, which §05 calls out by name.
+   ========================================================================== */
+
+[data-theme='light'] {
+  color-scheme: light;
+
+  --bg-base:        #f4f7f5;
+  --bg-atmos-1:     rgba(163, 214, 196, 0.35);
+  --bg-atmos-2:     rgba(247, 249, 248, 0.90);
+  --bg-atmos-gold:  rgba(191, 155, 69, 0.08);
+  --bg-atmos-lime:  rgba(159, 217, 74, 0.07);
+
+  /* Glass becomes translucent WHITE (§05), with soft borders and light
+     shadows rather than the dark sheet's highlights. */
+  --surface-glass:        rgba(255, 255, 255, 0.72);
+  --surface-glass-strong: rgba(255, 255, 255, 0.86);
+  --surface-glass-raised: rgba(255, 255, 255, 0.94);
+  --surface-solid:        #ffffff;
+  --surface-overlay:      rgba(20, 45, 36, 0.34);
+
+  --surface-document:     #ffffff;
+  --surface-document-ink: var(--kgm-gray-900);
+
+  --border-subtle:  rgba(11, 58, 47, 0.08);
+  --border-soft:    rgba(11, 58, 47, 0.13);
+  --border-strong:  rgba(11, 58, 47, 0.22);
+  --border-brand:   rgba(28, 125, 97, 0.40);
+  --border-gold:    rgba(156, 124, 51, 0.38);
+
+  /* Text inverts. --text-inverse flips too, because it means "ink that sits on
+     an accent fill" and the accent fill is unchanged. */
+  --text-primary:   #0c1a15;
+  --text-secondary: #46524d;
+  --text-muted:     #6e7a75;
+  --text-inverse:   #ffffff;
+  --text-brand:     var(--kgm-green-700);
+  --text-lime:      var(--kgm-lime-700);
+  --text-gold:      var(--kgm-gold-700);
+  --text-link:      var(--kgm-green-600);
+
+  --accent:         var(--kgm-green-600);
+  --accent-hover:   var(--kgm-green-500);
+  --accent-active:  var(--kgm-green-700);
+  --accent-soft:    rgba(28, 125, 97, 0.12);
+  --accent-ink:     #ffffff;
+
+  --hover-surface:  rgba(11, 58, 47, 0.045);
+  --active-surface: rgba(11, 58, 47, 0.075);
+
+  --glow-accent: 0 0 0 1px rgba(28, 125, 97, 0.22), 0 6px 18px -8px rgba(28, 125, 97, 0.45);
+  --glow-lime:   0 0 0 1px rgba(127, 184, 50, 0.24), 0 4px 12px -6px rgba(127, 184, 50, 0.35);
+  --glow-gold:   0 0 0 1px rgba(156, 124, 51, 0.24), 0 4px 12px -6px rgba(156, 124, 51, 0.32);
+
+  --focus-ring: 0 0 0 2px var(--bg-base), 0 0 0 4px rgba(28, 125, 97, 0.55);
+
+  /* Light-mode shadows are softer and cooler. Dark shadows on white read as
+     dirt rather than depth. */
+  --shadow-sm: 0 1px 2px rgba(11, 58, 47, 0.07);
+  --shadow-md: 0 4px 14px -6px rgba(11, 58, 47, 0.14);
+  --shadow-lg: 0 12px 28px -12px rgba(11, 58, 47, 0.18);
+  --shadow-xl: 0 24px 48px -20px rgba(11, 58, 47, 0.22);
+
+  --skeleton-base:  rgba(11, 58, 47, 0.07);
+  --skeleton-sheen: rgba(28, 125, 97, 0.14);
+}
+
+/* ==========================================================================
+   5 · GEOMETRY, MOTION, LAYOUT
+   Direction-independent, so they live outside the theme sheets.
+   ========================================================================== */
+
+:root {
+  /* --- Radius ------------------------------------------------------------ */
+  --r-xs: 4px;
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+  --r-xl: 22px;
+  --r-2xl: 28px;
+  --r-pill: 999px;
+
+  /* --- Spacing (4px base) ------------------------------------------------ */
+  --sp-1: 4px;   --sp-2: 8px;   --sp-3: 12px;  --sp-4: 16px;
+  --sp-5: 20px;  --sp-6: 24px;  --sp-8: 32px;  --sp-10: 40px;
+  --sp-12: 48px; --sp-16: 64px;
+
+  /* --- Layout (§08, §09) ------------------------------------------------- */
+  --rail-expanded: 264px;    /* §09 asks for 250–280px */
+  --rail-collapsed: 76px;    /* §09 asks for 72–84px  */
+  --topbar-h: 60px;
+  --topbar-h-mobile: 56px;
+  --bottomnav-h: 64px;
+  --content-max: 1440px;
+
+  /* --- Motion (§34, §45) ------------------------------------------------- */
+  /* 150–250ms for page transitions. Anything longer reads as sluggish in a
+     tool people live in all day. */
+  --dur-instant: 90ms;
+  --dur-fast: 150ms;
+  --dur-base: 200ms;
+  --dur-slow: 250ms;
+  --dur-deliberate: 420ms;   /* preloader and sheets only */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-spring: cubic-bezier(0.34, 1.42, 0.64, 1);
+
+  /* §45: a card rises 2px on hover. Exactly 2px — the spec is specific, and
+     "subtle" is the whole point. */
+  --lift-hover: -2px;
+  --lift-active: 0px;
+
+  /* --- Z-order ----------------------------------------------------------- */
+  --z-base: 0;
+  --z-sticky: 100;
+  --z-rail: 200;
+  --z-topbar: 300;
+  --z-drawer: 600;
+  --z-modal: 700;
+  --z-toast: 800;
+  --z-bottomnav: 500;
+  --z-preloader: 1000;
+
+  /* --- Breakpoints (§43) — reference only; media queries need literals --- */
+  /* mobile   < 640px
+     tablet   640–1023px
+     desktop  1024–1439px
+     large    >= 1440px  */
+  --bp-mobile: 640px;
+  --bp-tablet: 1024px;
+  --bp-large: 1440px;
+}
+
+/* ==========================================================================
+   6 · REDUCED MOTION (§44)
+   ========================================================================== */
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-instant: 0ms;
+    --dur-fast: 0ms;
+    --dur-base: 0ms;
+    --dur-slow: 0ms;
+    --dur-deliberate: 0ms;
+    --lift-hover: 0px;
+  }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ==========================================================================
+   8 · TOKEN COMPLETION LAYER
+   ==========================================================================
+   This block closes two real gaps and one naming split. It is appended last so
+   that, at equal specificity, these definitions win — and every themed alias
+   here is a `var()` reference rather than a literal, which matters:
+
+     Custom properties are substituted at COMPUTED-VALUE time, per element. So
+     `--text-hi: var(--text-primary)` declared once on :root resolves against
+     whichever `--text-primary` won the cascade on that same element. When
+     `[data-theme='light']` overrides `--text-primary`, `--text-hi` follows
+     automatically, with no light-theme duplicate needed.
+
+     That is why most of this block is theme-agnostic. The few entries that DO
+     need per-theme literals (a focus colour, a shadow colour) are overridden in
+     the light block at the end, and they are the only ones.
+
+   WHY THIS BLOCK EXISTS RATHER THAN A REWRITE
+     The shell and the primitives were written against a short vocabulary
+     (`--text-hi`, `--radius-md`, `--line-soft`) while the canonical sheet used
+     a longer one (`--text-primary`, `--r-md`, `--border-soft`). Rewriting 2,700
+     lines of CSS to rename tokens would change nothing a user can see and would
+     risk introducing exactly the kind of silent invalid-declaration bug that a
+     missing token causes. Mapping the vocabulary once, in the token sheet, keeps
+     a single source of truth — which is the property that actually matters.
+
+     The genuinely MISSING values (a spacing scale, two body sizes, a sky hue for
+     finance markers, a fainter text tier) are new definitions, not aliases.
+   ========================================================================== */
+
+:root {
+  /* --- Spacing scale ------------------------------------------------------
+     The sheet defined sp-1 (4px), sp-5 (20px) and sp-12 (48px). Those three
+     pin a perfectly linear 4px-per-step scale, so the missing steps are derived
+     rather than invented: sp-2=8, sp-3=12, sp-4=16, sp-6=24, sp-7=28, sp-8=32,
+     sp-10=40. A linear scale is what lets a component change density by moving
+     one step instead of picking a new number. */
+  --sp-2:  8px;
+  --sp-3:  12px;
+  --sp-4:  16px;
+  --sp-6:  24px;
+  --sp-7:  28px;
+  --sp-8:  32px;
+  --sp-10: 40px;
+
+  /* --- Type: two body steps the scale was missing -------------------------
+     --fs-body (15px) and --fs-caption (13px) left no step between them, and
+     dense UI — table cells, meta rows, nav labels — needs one. --fs-body-lg
+     gives figures room to be emphasised per §07. */
+  --fs-body-sm: 0.875rem;   /* 14px */
+  --fs-body-lg: 1.0625rem;  /* 17px */
+  --lh-relaxed: 1.65;       /* between --lh-normal (1.55) and --lh-loose (1.7) */
+
+  /* --- Letter tracking, aliased to the canonical scale --------------------
+     --tracking-label is the uppercase-Latin label tracking. §07: never applied
+     to Arabic, which the call sites honour by conditioning on direction. */
+  --tracking-display: var(--ls-tight);
+  --tracking-label:   var(--ls-wide);
+
+  /* --- Text tiers ---------------------------------------------------------
+     Four tiers rather than three. --text-faint is the "disabled / decorative /
+     legal-footnote" tier that --text-muted was being asked to cover twice. */
+  --text-hi:    var(--text-primary);
+  --text-md:    var(--text-secondary);
+  --text-dim:   var(--text-muted);
+  /* Mixed toward transparent rather than toward a fixed grey, so it dims
+     correctly against BOTH themes: in dark it falls toward the near-black
+     canvas, in light it falls toward the warm white. */
+  --text-faint: color-mix(in srgb, var(--text-muted) 72%, transparent);
+
+  /* --- Hairlines ---------------------------------------------------------- */
+  --line-soft:   var(--border-soft);
+  --line-strong: var(--border-strong);
+
+  /* --- Radii --------------------------------------------------------------
+     --radius-full is the pill value (999px), not 50%. It is applied to dots,
+     avatars and a scrollbar thumb; 50% would render that thumb as an ellipse. */
+  --radius-xs:   var(--r-xs);
+  --radius-sm:   var(--r-sm);
+  --radius-md:   var(--r-md);
+  --radius-lg:   var(--r-lg);
+  --radius-xl:   var(--r-xl);
+  --radius-pill: var(--r-pill);
+  --radius-full: var(--r-pill);
+
+  /* --- Surfaces ----------------------------------------------------------- */
+  --surface-1:      var(--surface-glass);
+  --surface-2:      var(--surface-glass-strong);
+  --glass-1:        var(--surface-glass);
+  --canvas:         var(--bg-base);
+  --card-bg-solid:  var(--surface-solid);
+
+  /* --- Shell chrome -------------------------------------------------------
+     The `*-edge` tokens are full border shorthands because the call sites use
+     them as `border-inline-end: var(--rail-edge)`. Keeping the width and style
+     in the token means the shell's hairlines cannot drift apart per component. */
+  --rail-bg:    var(--surface-glass);
+  --rail-edge:  1px solid var(--border-soft);
+  --topbar-bg:   var(--surface-glass);
+  --topbar-edge: 1px solid var(--border-soft);
+  --nav-bg:     var(--surface-glass-raised);
+  --nav-edge:   1px solid var(--border-soft);
+
+  --rail-w-expanded:  var(--rail-expanded);
+  --rail-w-collapsed: var(--rail-collapsed);
+
+  /* --- Blur (§03 caps glass blur; nothing here exceeds --glass-blur-max) --- */
+  --blur-rail: var(--glass-blur-max);
+  --blur-bar:  var(--glass-blur-max);
+  --blur-nav:  var(--glass-blur-max);
+
+  /* --- Elevation ---------------------------------------------------------- */
+  --shadow-nav: var(--shadow-xl);
+
+  /* --- Motion / layering -------------------------------------------------- */
+  --ease-standard: var(--ease-in-out);
+  --z-nav:         var(--z-bottomnav);
+
+  /* --- Latin-facing stack -------------------------------------------------
+     Same family as --font-sans. IBM Plex Sans Arabic ships a Latin subset (the
+     woff2 files include a `-latin-` cut), so matter numbers, emails and ⌘K hints
+     set in it stay metrically consistent with the Arabic around them instead of
+     jumping to a fallback face. */
+  --font-latin: var(--font-sans);
+
+  /* --- Gold ramp ----------------------------------------------------------
+     The canonical ramp is --kgm-gold-200…700. The shell asks for four named
+     steps; mapping them keeps "gold" meaning one thing across both vocabularies
+     rather than two slightly different golds. */
+  --gold-100: var(--kgm-gold-200);
+  --gold-200: var(--kgm-gold-300);
+  --gold-300: var(--kgm-gold-400);
+  --gold-400: var(--kgm-gold-500);
+
+  /* Alpha tints of the gold accent, used for the §57 field-lock chrome and the
+     restricted-matter banner. Derived by color-mix so there is one gold, at
+     several opacities, rather than five hand-picked near-golds. */
+  --gold-400-06: color-mix(in srgb, var(--gold-400)  6%, transparent);
+  --gold-400-08: color-mix(in srgb, var(--gold-400)  8%, transparent);
+  --gold-400-12: color-mix(in srgb, var(--gold-400) 12%, transparent);
+  --gold-400-24: color-mix(in srgb, var(--gold-400) 24%, transparent);
+  --gold-400-45: color-mix(in srgb, var(--gold-400) 45%, transparent);
+
+  /* --- Green tints -------------------------------------------------------- */
+  --kgm-green-500-07: color-mix(in srgb, var(--kgm-green-500)  7%, transparent);
+  --kgm-green-500-22: color-mix(in srgb, var(--kgm-green-500) 22%, transparent);
+  --kgm-green-500-45: color-mix(in srgb, var(--kgm-green-500) 45%, transparent);
+  --kgm-green-glow:   color-mix(in srgb, var(--kgm-green-400) 55%, transparent);
+
+  /* --- Sky ----------------------------------------------------------------
+     New hue. The timeline marks event KINDS by colour (§23) and finance needed
+     a fourth hue distinct from green (status), gold (deadline) and grey
+     (document). Kept desaturated so it reads as an accent inside a green
+     system rather than as a second brand colour. */
+  --sky-300: #8ecfe0;
+  --sky-400: #5aa9c2;
+
+  /* --- Focus (§44: visible in both themes, always) ------------------------
+     --focus-ring is a BOX-SHADOW (an inset/outset pair), so it cannot be used
+     as an outline colour. --focus-ring-color is the colour, for the
+     `outline: 2px solid …` and `border-color: …` cases. */
+  --focus-ring-color: rgba(159, 217, 74, 0.85);
+  --focus-ring-glow:  var(--glow-accent);
+
+  /* --- Shadow base colour ------------------------------------------------- */
+  --shadow-color: rgba(0, 0, 0, 0.55);
+}
+
+/* Arabic gets the same two new body steps, bumped — §07 notes Arabic needs more
+   size and leading than Latin to carry the same x-height. */
+:root[lang='ar'], :root[dir='rtl'] {
+  --fs-body-sm: 0.9375rem;
+  --fs-body-lg: 1.125rem;
+}
+
+/* Light theme: only the two values that cannot be expressed as a reference to
+   an already-themed token. Everything else in the block above follows the light
+   sheet automatically. */
+[data-theme='light'] {
+  /* Focus must stay visible against a warm-white canvas, where the dark theme's
+     lime reads as a highlight rather than an outline. Deepened, not replaced —
+     §44 wants one recognisable focus language across themes. */
+  --focus-ring-color: rgba(20, 101, 78, 0.85);
+  --shadow-color: rgba(16, 44, 34, 0.16);
+}

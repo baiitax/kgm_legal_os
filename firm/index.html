@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="ar" dir="rtl" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#041915" />
+    <!--
+      `referrer` is restricted: a firm operator's URL can carry a matter id, and
+      leaking that to any third party on a referer header would be a disclosure
+      the CSP is otherwise careful to prevent.
+    -->
+    <meta name="referrer" content="strict-origin-when-cross-origin" />
+    <meta name="robots" content="noindex, nofollow, noarchive" />
+    <title>KGM LEGAL OS — مساحة العمل الآمنة</title>
+    <!--
+      The preloader is inline rather than bundled on purpose. §33 wants the brand
+      on screen within ~200ms; waiting for a JS chunk to parse before painting
+      anything is how a splash screen becomes a white flash. This markup is the
+      first paint, and the app replaces it.
+    -->
+    <style>
+      html, body { height: 100%; margin: 0; background: #041915; }
+      #kgm-boot {
+        position: fixed; inset: 0; z-index: 1000;
+        display: grid; place-items: center;
+        background:
+          radial-gradient(900px 600px at 15% 0%, rgba(28,125,97,.22) 0%, transparent 60%),
+          radial-gradient(700px 500px at 88% 100%, rgba(191,155,69,.08) 0%, transparent 58%),
+          linear-gradient(168deg, rgba(7,40,33,.9) 0%, #041915 60%);
+        font-family: 'IBM Plex Sans Arabic', 'Segoe UI', system-ui, sans-serif;
+        transition: opacity 320ms cubic-bezier(.22,1,.36,1), visibility 320ms;
+      }
+      #kgm-boot[data-hidden="true"] { opacity: 0; visibility: hidden; pointer-events: none; }
+      .kgm-boot__inner { display: flex; flex-direction: column; align-items: center; gap: 18px; }
+      .kgm-boot__mark { opacity: 0; animation: kgmBootMark 520ms cubic-bezier(.22,1,.36,1) 200ms forwards; }
+      @keyframes kgmBootMark {
+        from { opacity: 0; transform: scale(.92); }
+        to   { opacity: 1; transform: scale(1); }
+      }
+      .kgm-boot__glow {
+        position: absolute; inset-inline: -30%; inset-block: 20%;
+        background: linear-gradient(100deg, transparent 20%, rgba(111,189,164,.22) 45%, rgba(211,180,105,.20) 55%, transparent 80%);
+        filter: blur(18px); opacity: 0; pointer-events: none;
+        animation: kgmBootGlow 900ms ease-in-out 800ms 1 forwards;
+      }
+      @keyframes kgmBootGlow {
+        0%   { opacity: 0; transform: translateX(-40%); }
+        40%  { opacity: 1; }
+        100% { opacity: 0; transform: translateX(40%); }
+      }
+      .kgm-boot__name {
+        display: flex; align-items: baseline; gap: 8px; color: #fff;
+        font-weight: 700; letter-spacing: .02em; font-size: 20px;
+        opacity: 0; animation: kgmBootMark 400ms ease-out 420ms forwards;
+      }
+      .kgm-boot__name span:nth-child(2) { font-size: 12px; font-weight: 500; letter-spacing: .22em; color: rgba(255,255,255,.66); }
+      .kgm-boot__name span:nth-child(3) { font-size: 12px; font-weight: 600; letter-spacing: .16em; color: #e3cd94; }
+      .kgm-boot__msg { color: rgba(255,255,255,.55); font-size: 12.5px; opacity: 0; animation: kgmBootMark 400ms ease-out 1000ms forwards; }
+      .kgm-boot__spin {
+        inline-size: 22px; block-size: 22px; border-radius: 50%;
+        border: 2px solid rgba(255,255,255,.16); border-block-start-color: #6fbda4;
+        animation: kgmBootSpin 760ms linear infinite;
+        opacity: 0; animation: kgmBootSpin 760ms linear infinite, kgmBootMark 300ms ease-out 1100ms forwards;
+      }
+      @keyframes kgmBootSpin { to { transform: rotate(360deg); } }
+      .kgm-boot__markwrap { position: relative; display: grid; place-items: center; }
+      @media (prefers-reduced-motion: reduce) {
+        .kgm-boot__mark, .kgm-boot__name, .kgm-boot__msg, .kgm-boot__spin { animation-duration: 1ms; opacity: 1; }
+        .kgm-boot__glow { display: none; }
+        .kgm-boot__spin { animation: kgmBootSpin 760ms linear infinite; }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <!--
+      §32 — the branded preloader. The mark here is the SAME geometry as
+      @kgm/ui's LogoMark, inlined so it paints before any JS executes. It is a
+      swappable slot: replacing the <svg> below and the LogoMark component keeps
+      the preloader and the app in step. §46 forbids substituting a generic icon,
+      so this is the actual mark rather than a placeholder spinner.
+    -->
+    <div id="kgm-boot">
+      <div class="kgm-boot__inner">
+        <div class="kgm-boot__markwrap">
+          <div class="kgm-boot__glow"></div>
+          <svg class="kgm-boot__mark" width="64" height="64" viewBox="0 0 48 48" fill="none" aria-hidden="true">
+            <rect x="1.5" y="1.5" width="45" height="45" rx="13" fill="url(#bootTile)"/>
+            <rect x="1.5" y="1.5" width="45" height="45" rx="13" stroke="rgba(255,255,255,.16)" stroke-width="1"/>
+            <path d="M14.5 2.2h19" stroke="rgba(255,255,255,.30)" stroke-width="1.2" stroke-linecap="round"/>
+            <g stroke="#fff" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" fill="none">
+              <path d="M17 13.5v21"/><path d="M17.6 25.4 31 13.5"/>
+            </g>
+            <path d="M19.4 27.4 32.5 35.5" stroke="#d3b469" stroke-width="4.2" stroke-linecap="round" fill="none"/>
+            <defs>
+              <linearGradient id="bootTile" x1="4" y1="2" x2="44" y2="46" gradientUnits="userSpaceOnUse">
+                <stop stop-color="#14654e"/><stop offset="1" stop-color="#072821"/>
+              </linearGradient>
+            </defs>
+          </svg>
+        </div>
+        <div class="kgm-boot__name"><span>KGM</span><span>LEGAL</span><span>OS</span></div>
+        <div class="kgm-boot__msg">Loading secure workspace…</div>
+        <div class="kgm-boot__spin"></div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

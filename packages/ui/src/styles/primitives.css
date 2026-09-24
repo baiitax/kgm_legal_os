@@ -1,0 +1,1339 @@
+/**
+ * PRIMITIVE STYLES
+ *
+ * Every visual rule for @kgm/ui components. Kept in ONE stylesheet rather than
+ * co-located per component because the glass language has to be consistent to be
+ * believable: two cards with slightly different blur radii read as a bug, not as
+ * a variant. §03's "sophisticated rather than exaggerated" is only enforceable if
+ * the numbers live next to each other.
+ *
+ * LOGICAL PROPERTIES ONLY (§42). inset-inline-start, margin-inline-end,
+ * border-inline-start. Under [dir=rtl] the whole system mirrors without a single
+ * directional override.
+ */
+
+/* ==========================================================================
+   CARD
+   ========================================================================== */
+
+.kgm-card {
+  position: relative;
+  border-radius: var(--r-lg);
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-glass);
+  backdrop-filter: blur(var(--glass-blur-max)) saturate(140%);
+  -webkit-backdrop-filter: blur(var(--glass-blur-max)) saturate(140%);
+  box-shadow: var(--shadow-md);
+  /* A card is a region of content; overflow hidden keeps the sheen and any
+     child radius from escaping the border. */
+  overflow: hidden;
+  text-align: start;
+}
+
+.kgm-card--pad-none { padding: 0; }
+.kgm-card--pad-sm   { padding: var(--sp-3); }
+.kgm-card--pad-md   { padding: var(--sp-5); }
+.kgm-card--pad-lg   { padding: var(--sp-6); }
+
+.kgm-card--solid {
+  background: var(--surface-solid);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* §27 — the document canvas stays white even in dark mode. */
+.kgm-card--document {
+  background: var(--surface-document);
+  color: var(--surface-document-ink);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  border-color: var(--border-soft);
+  box-shadow: var(--shadow-lg);
+}
+
+.kgm-card--clickable {
+  cursor: pointer;
+  inline-size: 100%;
+  display: block;
+  font: inherit;
+  color: inherit;
+}
+
+/* Accent treatments. §20 allows gold for high-value executive indicators, and
+   §02 says gold must be restrained — so the accent is a hairline, never a fill. */
+.kgm-card--accent-gold { border-color: var(--border-gold); }
+.kgm-card--accent-gold::after {
+  content: '';
+  position: absolute;
+  inset-block-start: 0;
+  inset-inline-start: 0;
+  inline-size: 100%;
+  block-size: 2px;
+  background: linear-gradient(
+    to var(--dir-inline-end, right),
+    transparent, var(--kgm-gold-500) 35%, var(--kgm-gold-400) 65%, transparent
+  );
+  opacity: 0.85;
+}
+.kgm-card--accent-lime { border-color: rgba(159, 217, 74, 0.32); }
+.kgm-card--accent-brand { border-color: var(--border-brand); }
+
+.kgm-card--executive {
+  background:
+    linear-gradient(135deg, var(--bg-atmos-gold) 0%, transparent 55%),
+    var(--surface-glass-strong);
+}
+
+/* ---- card anatomy ------------------------------------------------------- */
+
+.kgm-card__head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+}
+.kgm-card__headtext { flex: 1 1 auto; min-inline-size: 0; }
+.kgm-card__title {
+  color: var(--text-primary);
+  font-weight: var(--fw-semibold);
+  overflow-wrap: anywhere;
+}
+.kgm-card__subtitle { margin-block-start: 2px; }
+.kgm-card__action { flex: 0 0 auto; display: flex; align-items: center; gap: var(--sp-2); }
+
+.kgm-card__icon {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  inline-size: 34px;
+  block-size: 34px;
+  border-radius: var(--r-md);
+  background: var(--accent-soft);
+  color: var(--text-brand);
+  border: 1px solid var(--border-brand);
+}
+
+.kgm-card__body { margin-block-start: var(--sp-4); }
+.kgm-card__head + .kgm-card__body { margin-block-start: var(--sp-4); }
+.kgm-card__foot {
+  margin-block-start: var(--sp-4);
+  padding-block-start: var(--sp-3);
+  border-block-start: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+/* ==========================================================================
+   §20 · METRIC CARD
+   ========================================================================== */
+
+.kgm-metric { display: flex; flex-direction: column; gap: var(--sp-3); }
+
+.kgm-metric__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+
+.kgm-metric__label {
+  color: var(--text-muted);
+  /* Uppercase is a Latin device; the token sheet suppresses it under RTL. */
+  overflow-wrap: anywhere;
+}
+
+.kgm-metric__icon {
+  display: grid;
+  place-items: center;
+  inline-size: 30px;
+  block-size: 30px;
+  border-radius: var(--r-sm);
+  background: var(--accent-soft);
+  color: var(--text-brand);
+  flex: 0 0 auto;
+}
+.kgm-card--executive .kgm-metric__icon {
+  background: var(--bg-atmos-gold);
+  color: var(--text-gold);
+}
+
+.kgm-metric__figure {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+/* The figure is the loudest thing on the card (§07: strong emphasis on numbers). */
+.kgm-metric__value {
+  color: var(--text-primary);
+  letter-spacing: var(--ls-tight);
+}
+.kgm-card--executive .kgm-metric__value { color: var(--text-gold); }
+.kgm-metric__unit { color: var(--text-muted); }
+
+.kgm-metric__bar {
+  inline-size: 100%;
+  block-size: 4px;
+  border-radius: var(--r-pill);
+  background: var(--skeleton-base);
+  overflow: hidden;
+}
+.kgm-metric__bar-fill {
+  display: block;
+  block-size: 100%;
+  border-radius: inherit;
+  background: linear-gradient(to var(--dir-inline-end, right), var(--kgm-green-400), var(--kgm-lime-500));
+  transition: inline-size var(--dur-deliberate) var(--ease-out);
+}
+.kgm-metric__bar-fill--gold {
+  background: linear-gradient(to var(--dir-inline-end, right), var(--kgm-gold-600), var(--kgm-gold-300));
+}
+
+/* Trend. §44/§31: direction is carried by the arrow AND the label, never by
+   colour alone — a red/green pair is unreadable to a colourblind operator and
+   "up is good" is not true of outstanding debt. */
+.kgm-metric__trend {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  color: var(--text-muted);
+}
+.kgm-metric__trend--up   { color: var(--text-lime); }
+.kgm-metric__trend--down { color: var(--text-secondary); }
+.kgm-metric__arrow { font-size: 0.9em; line-height: 1; }
+.kgm-metric__note { color: var(--text-muted); }
+
+/* ==========================================================================
+   BUTTON · §36
+   ========================================================================== */
+
+.kgm-btn {
+  --btn-h: 38px;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  block-size: var(--btn-h);
+  padding-inline: var(--sp-4);
+  border-radius: var(--r-md);
+  border: 1px solid transparent;
+  font-size: var(--fs-caption);
+  font-weight: var(--fw-semibold);
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+
+/* §44: touch targets. The visual height stays small on desktop; on a coarse
+   pointer the hit area grows. Doing this with a media query rather than a fixed
+   44px keeps dense desktop toolbars dense. */
+@media (pointer: coarse) {
+  .kgm-btn { --btn-h: 44px; }
+  .kgm-btn--xs, .kgm-btn--sm { --btn-h: 44px; padding-inline: var(--sp-3); }
+}
+
+.kgm-btn:disabled, .kgm-btn[aria-disabled='true'] {
+  opacity: 0.45;
+  cursor: not-allowed;
+  box-shadow: none;
+  transform: none;
+}
+
+.kgm-btn:active:not(:disabled) { transform: translateY(1px); }
+
+/* ---- variants ----------------------------------------------------------- */
+
+.kgm-btn--primary {
+  background: linear-gradient(180deg, var(--accent-hover) 0%, var(--accent) 100%);
+  color: var(--accent-ink);
+  box-shadow: var(--glow-accent);
+}
+.kgm-btn--primary:hover:not(:disabled) {
+  background: linear-gradient(180deg, var(--accent-hover) 0%, var(--accent-active) 100%);
+  box-shadow: var(--glow-accent), var(--shadow-md);
+}
+
+/* Secondary: glass with a green border and green text, per §36. */
+.kgm-btn--secondary {
+  background: var(--surface-glass);
+  border-color: var(--border-brand);
+  color: var(--text-brand);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+.kgm-btn--secondary:hover:not(:disabled) {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+/* Premium: Saudi gold with DARK text. White on gold fails contrast (§44);
+   this is the one variant where the ink inverts. */
+.kgm-btn--premium {
+  background: linear-gradient(180deg, var(--kgm-gold-300) 0%, var(--kgm-gold-500) 100%);
+  color: var(--kgm-green-950);
+  box-shadow: var(--glow-gold);
+}
+.kgm-btn--premium:hover:not(:disabled) {
+  background: linear-gradient(180deg, var(--kgm-gold-200) 0%, var(--kgm-gold-400) 100%);
+}
+
+.kgm-btn--ghost {
+  background: transparent;
+  color: var(--text-secondary);
+}
+.kgm-btn--ghost:hover:not(:disabled) {
+  background: var(--hover-surface);
+  color: var(--text-primary);
+}
+
+/* Danger: a restrained warning tone, NOT red (§36). */
+.kgm-btn--danger {
+  background: transparent;
+  border-color: color-mix(in srgb, var(--kgm-warning) 45%, transparent);
+  color: var(--kgm-warning);
+}
+.kgm-btn--danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--kgm-warning) 12%, transparent);
+  border-color: var(--kgm-warning);
+}
+
+/* Destructive: the small number of irreversible actions. This is the only
+   button that reaches for red, so that when it appears it means something. */
+.kgm-btn--destructive {
+  background: color-mix(in srgb, var(--kgm-critical) 16%, transparent);
+  border-color: color-mix(in srgb, var(--kgm-critical) 55%, transparent);
+  color: var(--kgm-critical);
+}
+.kgm-btn--destructive:hover:not(:disabled) {
+  background: var(--kgm-critical);
+  color: #fff;
+  border-color: var(--kgm-critical);
+}
+
+/* ---- sizes -------------------------------------------------------------- */
+
+.kgm-btn--xs { --btn-h: 28px; padding-inline: var(--sp-2); font-size: var(--fs-meta); border-radius: var(--r-sm); }
+.kgm-btn--sm { --btn-h: 32px; padding-inline: var(--sp-3); font-size: var(--fs-meta); }
+.kgm-btn--lg { --btn-h: 46px; padding-inline: var(--sp-6); font-size: var(--fs-body); border-radius: var(--r-md); }
+
+.kgm-btn--block { inline-size: 100%; }
+
+.kgm-btn--icon-only {
+  inline-size: var(--btn-h);
+  padding-inline: 0;
+}
+.kgm-btn--icon-only.kgm-btn--xs { inline-size: 28px; }
+
+.kgm-btn__icon { display: inline-flex; align-items: center; flex: 0 0 auto; }
+.kgm-btn__label { overflow: hidden; text-overflow: ellipsis; }
+
+.kgm-btn--loading { cursor: progress; }
+.kgm-btn--loading .kgm-btn__label { opacity: 0.7; }
+
+/* §45 — an active nav/toggle button. */
+.kgm-btn--active {
+  background: var(--accent-soft);
+  border-color: var(--border-brand);
+  color: var(--text-brand);
+}
+
+/* Unread dot. */
+.kgm-btn--dot::after {
+  content: '';
+  position: absolute;
+  inset-block-start: 6px;
+  inset-inline-end: 6px;
+  inline-size: 7px;
+  block-size: 7px;
+  border-radius: 50%;
+  background: var(--kgm-lime-500);
+  box-shadow: 0 0 0 2px var(--bg-base);
+}
+
+.kgm-spinner { display: inline-flex; animation: kgm-spin 800ms linear infinite; }
+@keyframes kgm-spin { to { transform: rotate(360deg); } }
+
+/* §10 — collapsed-rail tooltip. Pure CSS so it works without JS positioning. */
+.kgm-tip { position: relative; }
+.kgm-tip::after {
+  content: attr(data-tip);
+  position: absolute;
+  inset-block-start: 50%;
+  inset-inline-start: calc(100% + 10px);
+  transform: translateY(-50%) scale(0.96);
+  padding: 5px 9px;
+  border-radius: var(--r-sm);
+  background: var(--surface-glass-raised);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border-soft);
+  box-shadow: var(--shadow-lg);
+  color: var(--text-primary);
+  font-size: var(--fs-meta);
+  font-weight: var(--fw-medium);
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out);
+  z-index: var(--z-toast);
+}
+/* Under RTL the rail is on the right, so the tooltip flips to the other side. */
+[dir='rtl'] .kgm-tip::after {
+  inset-inline-start: auto;
+  inset-inline-end: calc(100% + 10px);
+}
+.kgm-tip:hover::after, .kgm-tip:focus-visible::after {
+  opacity: 1;
+  transform: translateY(-50%) scale(1);
+}
+
+/* ==========================================================================
+   BADGE · §21, §31
+   Tinted surface + saturated foreground. A saturated fill with white text fails
+   contrast at 11px, which is the size these render at.
+   ========================================================================== */
+
+.kgm-badge {
+  --badge-fg: var(--text-secondary);
+  --badge-bg: var(--hover-surface);
+  --badge-bd: var(--border-subtle);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding-inline: 8px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--badge-bd);
+  background: var(--badge-bg);
+  color: var(--badge-fg);
+  font-weight: var(--fw-semibold);
+  line-height: 1.5;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.kgm-badge--xs { font-size: 10px; padding-inline: 6px; }
+.kgm-badge--sm { font-size: var(--fs-meta); }
+.kgm-badge--md { font-size: var(--fs-caption); padding-inline: 10px; }
+
+.kgm-badge__icon { display: inline-flex; font-size: 1.05em; line-height: 1; }
+
+.kgm-badge__dot {
+  inline-size: 6px;
+  block-size: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: 0 0 auto;
+}
+.kgm-badge__dot--pulse { animation: kgm-pulse 2s var(--ease-in-out) infinite; }
+@keyframes kgm-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.45; transform: scale(0.82); }
+}
+
+/* Tone assignments. Each uses color-mix so light and dark derive from the same
+   base hue instead of needing two hardcoded palettes. */
+.kgm-badge--neutral  { --badge-fg: var(--text-secondary); --badge-bg: var(--hover-surface); --badge-bd: var(--border-subtle); }
+.kgm-badge--brand    { --badge-fg: var(--text-brand); --badge-bg: color-mix(in srgb, var(--kgm-green-500) 14%, transparent); --badge-bd: color-mix(in srgb, var(--kgm-green-500) 34%, transparent); }
+.kgm-badge--lime     { --badge-fg: var(--text-lime); --badge-bg: color-mix(in srgb, var(--kgm-lime-500) 14%, transparent); --badge-bd: color-mix(in srgb, var(--kgm-lime-500) 34%, transparent); }
+.kgm-badge--gold     { --badge-fg: var(--text-gold); --badge-bg: color-mix(in srgb, var(--kgm-gold-500) 14%, transparent); --badge-bd: color-mix(in srgb, var(--kgm-gold-500) 38%, transparent); }
+.kgm-badge--info     { --badge-fg: var(--kgm-info); --badge-bg: color-mix(in srgb, var(--kgm-info) 14%, transparent); --badge-bd: color-mix(in srgb, var(--kgm-info) 34%, transparent); }
+.kgm-badge--notice   { --badge-fg: var(--kgm-notice); --badge-bg: color-mix(in srgb, var(--kgm-notice) 14%, transparent); --badge-bd: color-mix(in srgb, var(--kgm-notice) 34%, transparent); }
+.kgm-badge--warning  { --badge-fg: var(--kgm-warning); --badge-bg: color-mix(in srgb, var(--kgm-warning) 15%, transparent); --badge-bd: color-mix(in srgb, var(--kgm-warning) 38%, transparent); }
+.kgm-badge--high     { --badge-fg: var(--kgm-high); --badge-bg: color-mix(in srgb, var(--kgm-high) 15%, transparent); --badge-bd: color-mix(in srgb, var(--kgm-high) 38%, transparent); }
+.kgm-badge--critical { --badge-fg: var(--kgm-critical); --badge-bg: color-mix(in srgb, var(--kgm-critical) 16%, transparent); --badge-bd: color-mix(in srgb, var(--kgm-critical) 42%, transparent); }
+
+/* The one place a saturated fill is correct: a solid badge is a count or a
+   live indicator that must dominate. §02 says use lime selectively — this is it. */
+.kgm-badge--solid.kgm-badge--lime {
+  --badge-fg: var(--kgm-green-950);
+  --badge-bg: var(--kgm-lime-500);
+  --badge-bd: var(--kgm-lime-600);
+}
+.kgm-badge--solid.kgm-badge--brand {
+  --badge-fg: #fff;
+  --badge-bg: var(--kgm-green-500);
+  --badge-bd: var(--kgm-green-600);
+}
+.kgm-badge--solid.kgm-badge--critical {
+  --badge-fg: #fff;
+  --badge-bg: var(--kgm-critical);
+  --badge-bd: var(--kgm-critical);
+}
+
+/* ==========================================================================
+   SKELETON · §35 — green-tinted shimmer, not generic gray
+   ========================================================================== */
+
+.kgm-skel {
+  display: block;
+  position: relative;
+  border-radius: var(--r-sm);
+  background: var(--skeleton-base);
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+
+.kgm-skel::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--skeleton-sheen) 50%,
+    transparent 100%
+  );
+  transform: translateX(-100%);
+  animation: kgm-shimmer 1.6s var(--ease-in-out) infinite;
+}
+[dir='rtl'] .kgm-skel::after { animation-name: kgm-shimmer-rtl; }
+
+@keyframes kgm-shimmer     { to { transform: translateX(100%); } }
+@keyframes kgm-shimmer-rtl { to { transform: translateX(-100%); } }
+
+@media (prefers-reduced-motion: reduce) {
+  /* §44: the sweep is a vestibular trigger. The static tint still reads as a
+     placeholder, so removing the motion costs nothing but the polish. */
+  .kgm-skel::after { animation: none; transform: none; opacity: 0.5; }
+}
+
+.kgm-skel--text   { block-size: 12px; inline-size: 100%; border-radius: var(--r-xs); }
+.kgm-skel--title  { block-size: 18px; inline-size: 60%; border-radius: var(--r-xs); }
+.kgm-skel--figure { block-size: 34px; inline-size: 104px; border-radius: var(--r-sm); }
+.kgm-skel--chip   { block-size: 20px; inline-size: 72px; border-radius: var(--r-pill); }
+.kgm-skel--circle { border-radius: 50%; inline-size: 32px; block-size: 32px; }
+.kgm-skel--rect   { border-radius: var(--r-md); inline-size: 100%; block-size: 88px; }
+
+.kgm-skel-group { display: flex; flex-direction: column; gap: var(--sp-2); inline-size: 100%; }
+
+.kgm-skel-card { pointer-events: none; }
+.kgm-skel-matter { display: flex; flex-direction: column; gap: var(--sp-3); }
+.kgm-skel-matter__head,
+.kgm-skel-matter__foot { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); }
+.kgm-skel-matter__row { display: flex; gap: var(--sp-4); }
+
+.kgm-skel-table { display: flex; flex-direction: column; gap: 2px; }
+.kgm-skel-table__head,
+.kgm-skel-table__row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-3) var(--sp-4);
+}
+.kgm-skel-table__head { border-block-end: 1px solid var(--border-subtle); }
+.kgm-skel-table__row > * { flex: 1 1 0; }
+.kgm-skel-table__head > * { flex: 1 1 0; }
+
+.kgm-page-skel { display: flex; flex-direction: column; gap: var(--sp-5); }
+.kgm-page-skel__head { display: flex; flex-direction: column; gap: var(--sp-2); }
+
+/* ==========================================================================
+   TABLE · §24
+   ========================================================================== */
+
+.kgm-tablewrap {
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--r-lg);
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-glass);
+  backdrop-filter: blur(var(--glass-blur-max)) saturate(140%);
+  -webkit-backdrop-filter: blur(var(--glass-blur-max)) saturate(140%);
+  box-shadow: var(--shadow-md);
+  overflow: hidden;
+}
+
+.kgm-tablewrap__toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border-block-end: 1px solid var(--border-subtle);
+  background: var(--surface-glass);
+  flex-wrap: wrap;
+}
+.kgm-tablewrap__toolbar-start { display: flex; align-items: center; gap: var(--sp-2); flex: 1 1 auto; flex-wrap: wrap; }
+.kgm-tablewrap__toolbar-end { display: flex; align-items: center; gap: var(--sp-2); flex: 0 0 auto; }
+.kgm-tablewrap__bulk {
+  display: flex; align-items: center; gap: var(--sp-2);
+  padding-inline: var(--sp-3);
+  border-radius: var(--r-pill);
+  background: var(--accent-soft);
+  border: 1px solid var(--border-brand);
+  color: var(--text-brand);
+}
+
+.kgm-tablescroll { inline-size: 100%; overflow: auto; }
+.kgm-tablescroll--sticky thead th { position: sticky; inset-block-start: 0; z-index: 2; }
+
+.kgm-table {
+  inline-size: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: var(--fs-caption);
+}
+
+/* Glass header. The backdrop is what keeps it legible while rows scroll under
+   it — an opaque header inside a glass card looks pasted on. */
+.kgm-table thead th {
+  background: var(--surface-glass-strong);
+  backdrop-filter: blur(var(--glass-blur-max)) saturate(140%);
+  -webkit-backdrop-filter: blur(var(--glass-blur-max)) saturate(140%);
+  border-block-end: 1px solid var(--border-soft);
+  color: var(--text-muted);
+  font-size: var(--fs-meta);
+  font-weight: var(--fw-semibold);
+  text-align: start;
+  white-space: nowrap;
+  padding: var(--sp-3) var(--sp-4);
+}
+
+.kgm-table__th--sortable { cursor: pointer; user-select: none; }
+.kgm-table__sortbtn {
+  display: inline-flex; align-items: center; gap: 6px;
+  color: inherit; font: inherit; cursor: pointer;
+  padding: 2px 4px; margin: -2px -4px; border-radius: var(--r-xs);
+}
+.kgm-table__sortbtn:hover { color: var(--text-primary); background: var(--hover-surface); }
+.kgm-table__sortmark { opacity: 0.45; font-size: 0.9em; }
+.kgm-table__th--sorted { color: var(--text-brand); }
+.kgm-table__th--sorted .kgm-table__sortmark { opacity: 1; }
+
+.kgm-table__th--end, .kgm-table__td--end { text-align: end; }
+.kgm-table__th--center, .kgm-table__td--center { text-align: center; }
+
+.kgm-table tbody td {
+  padding: var(--sp-3) var(--sp-4);
+  border-block-end: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  vertical-align: middle;
+}
+
+/* §24: soft row separators, avoid heavy borders. The last row has none at all —
+   a separator under the final row reads as a missing row. */
+.kgm-table tbody tr:last-child td { border-block-end: 0; }
+
+.kgm-table__row { transition: background-color var(--dur-fast) var(--ease-out); }
+.kgm-table__row:hover { background: var(--hover-surface); }
+.kgm-table__row--selected { background: var(--accent-soft); }
+.kgm-table--clickable .kgm-table__row { cursor: pointer; }
+.kgm-table--clickable .kgm-table__row:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--kgm-lime-500);
+  outline: none;
+}
+
+.kgm-table--striped tbody tr:nth-child(even) { background: var(--hover-surface); }
+.kgm-table--compact thead th, .kgm-table--compact tbody td { padding: var(--sp-2) var(--sp-3); }
+
+.kgm-table__check { inline-size: 40px; padding-inline: var(--sp-3) !important; }
+.kgm-table__check input {
+  inline-size: 16px; block-size: 16px; cursor: pointer;
+  accent-color: var(--accent);
+}
+
+/* Numeric columns align on the digit (§29). */
+.kgm-table td.num, .kgm-table th.num {
+  font-variant-numeric: tabular-nums lining-nums;
+  color: var(--text-primary);
+}
+
+.kgm-table__empty {
+  padding: var(--sp-10) var(--sp-4);
+  display: grid;
+  place-items: center;
+  text-align: center;
+}
+
+/* Responsive column hiding (§43). */
+.kgm-hide-tablet, .kgm-hide-desktop, .kgm-hide-card { display: table-cell; }
+@media (max-width: 1023px) { .kgm-hide-desktop { display: none; } }
+@media (max-width: 639px)  { .kgm-hide-tablet, .kgm-hide-desktop { display: none; } }
+
+/* ---- mobile card view (§43: "mobile-friendly tables") --------------------
+   Below the mobile breakpoint a `card` column set turns each row into a
+   labelled stack. A horizontally scrolling table hides its own row identity,
+   which is worse than no table. */
+@media (max-width: 639px) {
+  .kgm-table--cards thead { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .kgm-table--cards, .kgm-table--cards tbody, .kgm-table--cards tr, .kgm-table--cards td { display: block; inline-size: 100%; }
+  .kgm-table--cards tr {
+    padding: var(--sp-3) var(--sp-4);
+    border-block-end: 1px solid var(--border-subtle);
+  }
+  .kgm-table--cards td {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: var(--sp-4);
+    padding: 5px 0;
+    border: 0;
+    text-align: end;
+  }
+  .kgm-table--cards td::before {
+    content: attr(data-label);
+    flex: 0 0 auto;
+    color: var(--text-muted);
+    font-size: var(--fs-meta);
+    font-weight: var(--fw-semibold);
+    text-align: start;
+  }
+  .kgm-table--cards td[data-label='']::before,
+  .kgm-table--cards td:not([data-label])::before { content: none; }
+  .kgm-table--cards .kgm-hide-card { display: none; }
+}
+
+/* ---- pagination ---------------------------------------------------------- */
+
+.kgm-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border-block-start: 1px solid var(--border-subtle);
+  flex-wrap: wrap;
+}
+.kgm-pagination__controls { display: flex; align-items: center; gap: var(--sp-2); }
+.kgm-pagination__btn {
+  inline-size: 30px; block-size: 30px;
+  display: grid; place-items: center;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-glass);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 1.1em;
+  line-height: 1;
+  transition: background-color var(--dur-fast), border-color var(--dur-fast), color var(--dur-fast);
+}
+.kgm-pagination__btn:hover:not(:disabled) { background: var(--accent-soft); border-color: var(--border-brand); color: var(--text-brand); }
+.kgm-pagination__btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.kgm-pagination__page { color: var(--text-secondary); padding-inline: var(--sp-2); }
+
+/* ==========================================================================
+   FORMS · §37
+   ========================================================================== */
+
+.kgm-field { display: flex; flex-direction: column; gap: 6px; inline-size: 100%; }
+.kgm-field--inline {
+  display: grid;
+  grid-template-columns: minmax(120px, 34%) 1fr;
+  align-items: center;
+  gap: var(--sp-4);
+}
+.kgm-field--inline .kgm-field__hint,
+.kgm-field--inline .kgm-field__error { grid-column: 2; }
+
+.kgm-field__labelrow {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+.kgm-field__label {
+  color: var(--text-secondary);
+  font-weight: var(--fw-semibold);
+  cursor: pointer;
+}
+.kgm-field__req { color: var(--kgm-warning); }
+.kgm-field__labelaction { flex: 0 0 auto; }
+.kgm-field__hint { color: var(--text-muted); }
+
+/* §37: error carries a clear text explanation AND an icon AND an accessible
+   state (aria-invalid + role=alert on the message). All three, not just colour. */
+.kgm-field__error {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  color: var(--kgm-critical);
+  font-weight: var(--fw-medium);
+}
+.kgm-field__erroricon { flex: 0 0 auto; line-height: 1.4; }
+
+.kgm-control { position: relative; display: flex; align-items: center; }
+.kgm-control--leading .kgm-input { padding-inline-start: 38px; }
+.kgm-control--trailing .kgm-input { padding-inline-end: 38px; }
+.kgm-control__lead, .kgm-control__trail {
+  position: absolute;
+  inset-block-start: 50%;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  inline-size: 34px;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+.kgm-control__lead { inset-inline-start: 2px; }
+.kgm-control__trail { inset-inline-end: 2px; }
+/* A trailing slot may hold a real button (show/hide password), so it is only
+   pointer-transparent when it is purely decorative. */
+.kgm-control__trail:has(button) { pointer-events: auto; }
+
+.kgm-input {
+  inline-size: 100%;
+  min-block-size: 40px;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-md);
+  border: 1px solid var(--border-soft);
+  /* Translucent per §37. Solid white inputs inside a glass card look pasted in. */
+  background: var(--surface-glass);
+  color: var(--text-primary);
+  font-size: var(--fs-body);
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out),
+    background-color var(--dur-fast) var(--ease-out);
+}
+@media (pointer: coarse) { .kgm-input { min-block-size: 44px; } }
+
+.kgm-input::placeholder { color: var(--text-muted); opacity: 0.75; }
+
+.kgm-input:hover:not(:disabled):not(:focus) { border-color: var(--border-strong); }
+
+/* §37 focus: green border + subtle lime glow. */
+.kgm-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--surface-glass-strong);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--kgm-lime-500) 22%, transparent);
+}
+
+.kgm-input:disabled { opacity: 0.5; cursor: not-allowed; }
+.kgm-input[readonly] { background: transparent; border-style: dashed; }
+
+.kgm-field--invalid .kgm-input {
+  border-color: var(--kgm-critical);
+}
+.kgm-field--invalid .kgm-input:focus {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--kgm-critical) 22%, transparent);
+}
+
+.kgm-input--area { min-block-size: 96px; resize: vertical; line-height: var(--lh-normal); }
+
+.kgm-input--select {
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+  padding-inline-end: 38px;
+}
+/* Native option lists cannot be styled consistently, so they inherit the
+   document colour scheme set on :root. */
+.kgm-input--select option { background: var(--surface-solid); color: var(--text-primary); }
+
+.kgm-counter { font-variant-numeric: tabular-nums; }
+.c-warning { color: var(--kgm-warning); }
+.c-critical { color: var(--kgm-critical); }
+
+/* ---- checkbox / switch --------------------------------------------------- */
+
+.kgm-check, .kgm-switch {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  cursor: pointer;
+}
+.kgm-check__input, .kgm-switch__input {
+  position: absolute;
+  opacity: 0;
+  inline-size: 1px; block-size: 1px;
+  pointer-events: none;
+}
+.kgm-check__box {
+  flex: 0 0 auto;
+  inline-size: 19px; block-size: 19px;
+  margin-block-start: 2px;
+  border-radius: var(--r-xs);
+  border: 1.5px solid var(--border-strong);
+  background: var(--surface-glass);
+  display: grid;
+  place-items: center;
+  transition: background-color var(--dur-fast), border-color var(--dur-fast), box-shadow var(--dur-fast);
+}
+.kgm-check__box::after {
+  content: '';
+  inline-size: 10px; block-size: 6px;
+  border-inline-start: 2px solid #fff;
+  border-block-end: 2px solid #fff;
+  transform: rotate(-45deg) scale(0);
+  transition: transform var(--dur-fast) var(--ease-spring);
+  margin-block-start: -2px;
+}
+.kgm-check__input:checked + .kgm-check__box {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.kgm-check__input:checked + .kgm-check__box::after { transform: rotate(-45deg) scale(1); }
+.kgm-check__input:focus-visible + .kgm-check__box { box-shadow: var(--focus-ring); }
+
+.kgm-check__label, .kgm-switch__label {
+  display: flex; flex-direction: column; gap: 2px; cursor: pointer; min-inline-size: 0;
+}
+
+.kgm-switch__track {
+  flex: 0 0 auto;
+  inline-size: 40px; block-size: 23px;
+  margin-block-start: 2px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--border-soft);
+  background: var(--surface-glass-strong);
+  padding: 2px;
+  display: flex;
+  align-items: center;
+  transition: background-color var(--dur-base), border-color var(--dur-base);
+}
+.kgm-switch__thumb {
+  inline-size: 17px; block-size: 17px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: transform var(--dur-base) var(--ease-spring), background-color var(--dur-base);
+}
+.kgm-switch__input:checked + .kgm-switch__track {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.kgm-switch__input:checked + .kgm-switch__track .kgm-switch__thumb {
+  background: #fff;
+  /* Logical translation would need direction awareness; the track is a flex row
+     whose order already flips under RTL, so the thumb follows automatically. */
+  transform: translateX(17px);
+}
+[dir='rtl'] .kgm-switch__input:checked + .kgm-switch__track .kgm-switch__thumb {
+  transform: translateX(-17px);
+}
+.kgm-switch__input:focus-visible + .kgm-switch__track { box-shadow: var(--focus-ring); }
+
+/* ---- segmented ----------------------------------------------------------- */
+
+.kgm-seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--r-md);
+  background: var(--surface-glass);
+  border: 1px solid var(--border-subtle);
+}
+.kgm-seg__opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding-inline: var(--sp-3);
+  block-size: 30px;
+  border-radius: var(--r-sm);
+  color: var(--text-muted);
+  font-size: var(--fs-meta);
+  font-weight: var(--fw-semibold);
+  cursor: pointer;
+  transition: background-color var(--dur-fast), color var(--dur-fast), box-shadow var(--dur-fast);
+  white-space: nowrap;
+}
+.kgm-seg--sm .kgm-seg__opt { block-size: 26px; padding-inline: var(--sp-2); }
+.kgm-seg__opt:hover { color: var(--text-primary); background: var(--hover-surface); }
+.kgm-seg__opt--active {
+  background: var(--accent-soft);
+  color: var(--text-brand);
+  box-shadow: inset 0 0 0 1px var(--border-brand);
+}
+.kgm-seg__icon { display: inline-flex; }
+
+/* ==========================================================================
+   OVERLAY · MODAL · DRAWER · SHEET · §38, §39
+   ========================================================================== */
+
+.kgm-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  display: grid;
+  place-items: center;
+  padding: var(--sp-4);
+}
+
+.kgm-overlay__scrim {
+  position: absolute;
+  inset: 0;
+  background: var(--surface-overlay);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+.kgm-overlay__panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  max-block-size: min(88vh, 900px);
+  inline-size: 100%;
+  border-radius: var(--r-xl);
+  overflow: hidden;
+  animation: kgm-pop var(--dur-slow) var(--ease-out) both;
+}
+
+@keyframes kgm-pop {
+  from { opacity: 0; transform: translateY(10px) scale(0.985); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.kgm-overlay--sm .kgm-overlay__panel { max-inline-size: 420px; }
+.kgm-overlay--md .kgm-overlay__panel { max-inline-size: 580px; }
+.kgm-overlay--lg .kgm-overlay__panel { max-inline-size: 820px; }
+.kgm-overlay--xl .kgm-overlay__panel { max-inline-size: 1080px; }
+.kgm-overlay--full .kgm-overlay__panel { max-inline-size: 100%; max-block-size: 100%; border-radius: 0; }
+
+.kgm-overlay__head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-4);
+  padding: var(--sp-5) var(--sp-5) var(--sp-4);
+  border-block-end: 1px solid var(--border-subtle);
+  flex: 0 0 auto;
+}
+.kgm-overlay__headtext { flex: 1 1 auto; min-inline-size: 0; }
+.kgm-overlay__title { color: var(--text-primary); overflow-wrap: anywhere; }
+.kgm-overlay__desc { margin-block-start: 4px; }
+
+.kgm-overlay__body {
+  padding: var(--sp-5);
+  overflow: auto;
+  flex: 1 1 auto;
+  /* A complex form in a scrolling body needs breathing room at the bottom or the
+     last field sits flush against the footer. */
+  padding-block-end: var(--sp-6);
+}
+
+.kgm-overlay__foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-3);
+  padding: var(--sp-4) var(--sp-5);
+  border-block-start: 1px solid var(--border-subtle);
+  background: var(--surface-glass);
+  flex: 0 0 auto;
+}
+
+/* ---- drawer: anchored to one edge on desktop ---------------------------- */
+
+.kgm-overlay--drawer {
+  display: block;
+  padding: 0;
+}
+.kgm-overlay--drawer .kgm-overlay__panel {
+  position: absolute;
+  inset-block: 0;
+  inline-size: min(440px, 92vw);
+  max-block-size: none;
+  border-radius: 0;
+  animation: none;
+}
+.kgm-drawer--end .kgm-overlay__panel { inset-inline-end: 0; animation: kgm-slide-end var(--dur-slow) var(--ease-out) both; }
+.kgm-drawer--start .kgm-overlay__panel { inset-inline-start: 0; animation: kgm-slide-start var(--dur-slow) var(--ease-out) both; }
+
+/* Logical transforms: under RTL "end" is the left edge, so the slide direction
+   has to follow the writing direction rather than the physical axis. */
+@keyframes kgm-slide-end {
+  from { opacity: 0.4; transform: translateX(var(--slide-end, 100%)); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+@keyframes kgm-slide-start {
+  from { opacity: 0.4; transform: translateX(var(--slide-start, -100%)); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+:root, [dir='ltr'] { --slide-end: 100%; --slide-start: -100%; }
+[dir='rtl']        { --slide-end: -100%; --slide-start: 100%; }
+
+/* ---- sheet: anchored to the block-end edge ------------------------------ */
+
+.kgm-overlay--sheet {
+  display: block;
+  padding: 0;
+}
+.kgm-overlay--sheet .kgm-overlay__panel {
+  position: absolute;
+  inset-block-end: 0;
+  inset-inline: 0;
+  inline-size: 100%;
+  max-block-size: 88vh;
+  /* §16: a rounded capsule feel. Only the top corners — a sheet meets the
+     screen edge at the bottom. */
+  border-radius: var(--r-2xl) var(--r-2xl) 0 0;
+  animation: kgm-slide-up var(--dur-deliberate) var(--ease-out) both;
+}
+@keyframes kgm-slide-up {
+  from { transform: translateY(100%); }
+  to   { transform: translateY(0); }
+}
+
+.kgm-overlay__grab {
+  position: absolute;
+  inset-block-start: 8px;
+  inset-inline-start: 50%;
+  transform: translateX(-50%);
+  inline-size: 40px;
+  block-size: 4px;
+  border-radius: var(--r-pill);
+  background: var(--border-strong);
+}
+.kgm-overlay--sheet .kgm-overlay__head { padding-block-start: var(--sp-6); }
+.kgm-overlay--sheet .kgm-overlay__foot {
+  /* §18: sticky action bar, and clear of the iOS home indicator. */
+  padding-block-end: calc(var(--sp-4) + env(safe-area-inset-bottom, 0px));
+}
+
+/* ---- drawer becomes a sheet on mobile (§39) ----------------------------- */
+@media (max-width: 639px) {
+  .kgm-overlay--drawer { display: block; }
+  .kgm-overlay--drawer .kgm-overlay__panel {
+    inset-block: auto 0;
+    inset-inline: 0;
+    inline-size: 100%;
+    max-block-size: 92vh;
+    border-radius: var(--r-2xl) var(--r-2xl) 0 0;
+    animation: kgm-slide-up var(--dur-deliberate) var(--ease-out) both;
+  }
+  .kgm-overlay--center { padding: 0; display: block; }
+  .kgm-overlay--center .kgm-overlay__panel {
+    position: absolute;
+    inset-block: auto 0;
+    inset-inline: 0;
+    inline-size: 100%;
+    max-inline-size: none;
+    max-block-size: 94vh;
+    border-radius: var(--r-2xl) var(--r-2xl) 0 0;
+    animation: kgm-slide-up var(--dur-deliberate) var(--ease-out) both;
+  }
+  /* §38: a complex form must not be squeezed into a tiny dialog. On a phone the
+     dialog is the screen, so the size modifiers stop constraining it. */
+  .kgm-overlay--sm .kgm-overlay__panel,
+  .kgm-overlay--md .kgm-overlay__panel { max-inline-size: none; }
+}
+
+/* ==========================================================================
+   TOAST · §40
+   ========================================================================== */
+
+.kgm-toasts {
+  position: fixed;
+  z-index: var(--z-toast);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  /* Stays clear of the mobile bottom nav (§16) and the iOS home indicator. */
+  padding: var(--sp-4);
+  pointer-events: none;
+  max-inline-size: min(400px, calc(100vw - 2 * var(--sp-4)));
+}
+.kgm-toasts__region { display: flex; flex-direction: column; gap: var(--sp-2); }
+
+.kgm-toasts--bottom-end   { inset-block-end: 0; inset-inline-end: 0; }
+.kgm-toasts--bottom-start { inset-block-end: 0; inset-inline-start: 0; }
+.kgm-toasts--bottom-center{ inset-block-end: 0; inset-inline-start: 50%; transform: translateX(-50%); }
+.kgm-toasts--top-end      { inset-block-start: 0; inset-inline-end: 0; }
+.kgm-toasts--top-start    { inset-block-start: 0; inset-inline-start: 0; }
+.kgm-toasts--top-center   { inset-block-start: 0; inset-inline-start: 50%; transform: translateX(-50%); }
+
+@media (max-width: 639px) {
+  .kgm-toasts--bottom-end, .kgm-toasts--bottom-start, .kgm-toasts--bottom-center {
+    /* Above the floating bottom nav, not behind it. */
+    inset-block-end: calc(var(--bottomnav-h) + var(--sp-4) + env(safe-area-inset-bottom, 0px));
+    inset-inline: var(--sp-3);
+    transform: none;
+    max-inline-size: none;
+  }
+}
+
+.kgm-toast {
+  --toast-accent: var(--text-brand);
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--r-lg);
+  border-inline-start: 3px solid var(--toast-accent);
+  pointer-events: auto;
+  animation: kgm-toast-in var(--dur-slow) var(--ease-spring) both;
+  box-shadow: var(--shadow-lg);
+}
+@keyframes kgm-toast-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.kgm-toast--success  { --toast-accent: var(--kgm-lime-500); }
+.kgm-toast--info     { --toast-accent: var(--kgm-info); }
+.kgm-toast--warning  { --toast-accent: var(--kgm-warning); }
+.kgm-toast--error    { --toast-accent: var(--kgm-critical); }
+.kgm-toast--critical { --toast-accent: var(--kgm-critical); }
+
+.kgm-toast__glyph {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  inline-size: 22px; block-size: 22px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--toast-accent) 18%, transparent);
+  color: var(--toast-accent);
+  font-size: 12px;
+  font-weight: var(--fw-bold);
+  margin-block-start: 1px;
+}
+.kgm-toast__text { flex: 1 1 auto; min-inline-size: 0; }
+.kgm-toast__title { color: var(--text-primary); overflow-wrap: anywhere; }
+.kgm-toast__desc { margin-block-start: 2px; overflow-wrap: anywhere; }
+.kgm-toast__action {
+  margin-block-start: var(--sp-2);
+  color: var(--toast-accent);
+  font-weight: var(--fw-semibold);
+  cursor: pointer;
+  padding: 0;
+  background: none;
+  border: 0;
+}
+.kgm-toast__action:hover { text-decoration: underline; }
+.kgm-toast__close {
+  flex: 0 0 auto;
+  inline-size: 24px; block-size: 24px;
+  display: grid; place-items: center;
+  border-radius: var(--r-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  transition: background-color var(--dur-fast), color var(--dur-fast);
+}
+.kgm-toast__close:hover { background: var(--hover-surface); color: var(--text-primary); }
+
+/* ==========================================================================
+   EMPTY STATE · §46
+   ========================================================================== */
+
+.kgm-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-3);
+  padding: var(--sp-12) var(--sp-6);
+  text-align: center;
+  inline-size: 100%;
+}
+.kgm-empty--compact { padding: var(--sp-6) var(--sp-4); gap: var(--sp-2); }
+
+.kgm-empty__mark {
+  display: grid;
+  place-items: center;
+  inline-size: 62px; block-size: 62px;
+  border-radius: var(--r-xl);
+  background: var(--surface-glass);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  margin-block-end: var(--sp-1);
+}
+.kgm-empty--compact .kgm-empty__mark { inline-size: 40px; block-size: 40px; border-radius: var(--r-md); margin-block-end: 0; }
+
+.kgm-empty__title { color: var(--text-primary); max-inline-size: 46ch; }
+.kgm-empty__desc { max-inline-size: 56ch; line-height: var(--lh-normal); }
+.kgm-empty__actions { display: flex; gap: var(--sp-3); margin-block-start: var(--sp-3); flex-wrap: wrap; justify-content: center; }
+
+/* A denied state must not read as an error, and must not read as empty. The
+   mark carries a lock tint so the three are distinguishable at a glance. */
+.kgm-empty--denied .kgm-empty__mark {
+  color: var(--text-gold);
+  border-color: var(--border-gold);
+  background: var(--bg-atmos-gold);
+}
+.kgm-empty--error .kgm-empty__mark,
+.kgm-empty--offline .kgm-empty__mark {
+  color: var(--kgm-critical);
+  border-color: color-mix(in srgb, var(--kgm-critical) 35%, transparent);
+}
+.kgm-empty--loading .kgm-empty__mark { color: var(--text-brand); border-color: var(--border-brand); }
+
+
+/* ==========================================================================
+   ALERT · §31, §45
+   ==========================================================================
+   In-flow, persistent. The accent edge is on the inline-start so it reads
+   correctly in RTL without a mirrored rule, and the tint is a color-mix of the
+   severity colour rather than a hand-picked background — one source of truth
+   per severity, which is what keeps five levels from drifting into eight.
+   ========================================================================== */
+
+.kgm-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--alert-bd);
+  border-inline-start: 3px solid var(--alert-fg);
+  background: var(--alert-bg);
+  color: var(--text-md);
+  font-size: var(--fs-body-sm);
+  line-height: var(--lh-relaxed);
+}
+
+.kgm-alert--compact { padding: var(--sp-2) var(--sp-3); gap: var(--sp-2); font-size: var(--fs-meta); }
+
+.kgm-alert__icon { display: inline-grid; place-items: center; flex: none; padding-block-start: 1px; color: var(--alert-fg); }
+.kgm-alert__body { flex: 1 1 auto; min-inline-size: 0; }
+.kgm-alert__severity { display: block; margin-block-end: 2px; color: var(--alert-fg); font-size: var(--fs-meta); font-weight: var(--fw-semibold); }
+.kgm-alert__title { margin: 0; color: var(--text-hi); font-size: var(--fs-body-sm); font-weight: var(--fw-semibold); line-height: var(--lh-snug); }
+.kgm-alert--compact .kgm-alert__title { font-size: var(--fs-meta); }
+.kgm-alert__text { margin-block-start: 2px; color: var(--text-md); }
+.kgm-alert__title + .kgm-alert__text { margin-block-start: 3px; }
+.kgm-alert__action { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-block-start: var(--sp-3); }
+.kgm-alert--compact .kgm-alert__action { margin-block-start: var(--sp-2); }
+.kgm-alert__close { flex: none; margin-inline-start: auto; color: var(--text-dim); }
+.kgm-alert__close:hover { color: var(--text-hi); }
+
+/* Severity tints. `--alert-fg` is the icon and edge; the background is a low
+   percentage mix so text contrast is preserved in both themes. */
+.kgm-alert--info     { --alert-fg: var(--kgm-info);     --alert-bg: color-mix(in srgb, var(--kgm-info) 9%, transparent);     --alert-bd: color-mix(in srgb, var(--kgm-info) 26%, transparent); }
+.kgm-alert--notice   { --alert-fg: var(--kgm-notice);   --alert-bg: color-mix(in srgb, var(--kgm-notice) 9%, transparent);   --alert-bd: color-mix(in srgb, var(--kgm-notice) 26%, transparent); }
+.kgm-alert--warning  { --alert-fg: var(--kgm-warning);  --alert-bg: color-mix(in srgb, var(--kgm-warning) 10%, transparent); --alert-bd: color-mix(in srgb, var(--kgm-warning) 30%, transparent); }
+.kgm-alert--high     { --alert-fg: var(--kgm-high);     --alert-bg: color-mix(in srgb, var(--kgm-high) 10%, transparent);    --alert-bd: color-mix(in srgb, var(--kgm-high) 30%, transparent); }
+.kgm-alert--critical { --alert-fg: var(--kgm-critical); --alert-bg: color-mix(in srgb, var(--kgm-critical) 11%, transparent); --alert-bd: color-mix(in srgb, var(--kgm-critical) 34%, transparent); }
+
+/* The critical level earns a slightly stronger edge: it is the one severity
+   where the user must not scroll past it. */
+.kgm-alert--critical { border-inline-start-width: 4px; }
+
+/* --------------------------------------------------------------------------
+   LINK · a text link inside body copy or a footer note.
+   Underlined by default — an uncoloured, underlined link is the one affordance
+   that survives every theme, and colour-only link styling fails for the same
+   reason colour-only severity does.
+   -------------------------------------------------------------------------- */
+
+.kgm-link {
+  color: var(--kgm-green-300);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+  text-decoration-color: color-mix(in srgb, var(--kgm-green-300) 45%, transparent);
+  transition: color var(--dur-fast) var(--ease-out), text-decoration-color var(--dur-fast) var(--ease-out);
+}
+
+.kgm-link:hover { color: var(--kgm-green-200); text-decoration-color: currentColor; }
+.kgm-link:focus-visible { outline: 2px solid var(--focus-ring-color); outline-offset: 2px; border-radius: 2px; }
+
+/* --------------------------------------------------------------------------
+   PALETTE LOADING ROW
+   -------------------------------------------------------------------------- */
+
+.kgm-palette__loading {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-5) var(--sp-4);
+  color: var(--text-dim);
+  font-size: var(--fs-body-sm);
+}
