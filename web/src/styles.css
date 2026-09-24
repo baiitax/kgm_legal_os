@@ -1593,6 +1593,37 @@ html[dir='dark'] .btn--primary,
   font-weight: 700;
 }
 
+/*
+  The endonym labels are wider than the old "ع"/"EN" pair, and the Arabic one is
+  in a different script — so the pill gets a little horizontal room and the
+  labels never wrap. `white-space: nowrap` matters more here than usual: at the
+  narrowest phone width a wrapped "English" would make the two options different
+  heights, which reads as a rendering fault rather than a control.
+*/
+.lang-toggle--segmented button {
+  padding: 5px 14px;
+  white-space: nowrap;
+}
+
+.lang-toggle--compact button {
+  padding: 5px 10px;
+  min-inline-size: 32px;
+}
+
+/*
+  Before authentication the switch floats above the card it belongs to. It is
+  positioned rather than placed in the flow so the sign-in card stays vertically
+  centred on every anonymous screen, and it respects the reading direction via
+  logical properties (inset-inline-end), so it sits on the left in Arabic and the
+  right in English without a second rule.
+*/
+.auth-lang {
+  position: fixed;
+  inset-block-start: max(14px, env(safe-area-inset-top));
+  inset-inline-end: max(14px, env(safe-area-inset-right));
+  z-index: 20;
+}
+
 .progress {
   block-size: 6px;
   border-radius: 3px;

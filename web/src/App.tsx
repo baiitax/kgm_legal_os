@@ -19,10 +19,10 @@ import {
   useNavigate,
 } from 'react-router-dom';
 import { AuthProvider, useAuth } from './auth';
-import { get, patch } from './api/client';
+import { get } from './api/client';
 import { I18nProvider, useI18n } from './i18n';
 import { Icon, PageLoader } from './components/ui';
-import type { Lang } from './api/client';
+import { LanguageToggle } from './components/LanguageToggle';
 
 const Login = lazy(() => import('./pages/Login'));
 const Invite = lazy(() => import('./pages/Invite'));
@@ -102,29 +102,6 @@ const TABS: NavItem[] = [
   { to: '/portal/profile', labelKey: 'nav.profile', icon: 'user' },
 ];
 
-function LangToggle() {
-  const { lang, setLang, t } = useI18n();
-  const { session } = useAuth();
-  const navigate = useNavigate();
-
-  const apply = async (next: Lang) => {
-    setLang(next);
-    // Persisting is best-effort: the switch must feel instant even if the write
-    // fails, and an unauthenticated visitor simply gets a local preference.
-    if (session.authenticated) {
-      await patch('/api/client/preferences', { language: next }).catch(() => undefined);
-    }
-    navigate(window.location.pathname);
-  };
-
-  return (
-    <div className="lang-toggle" role="group" aria-label={t('a11y.langSwitch')}>
-      <button type="button" aria-pressed={lang === 'ar'} onClick={() => void apply('ar')}>ع</button>
-      <button type="button" aria-pressed={lang === 'en'} onClick={() => void apply('en')}>EN</button>
-    </div>
-  );
-}
-
 function BrandMark({ small }: { small?: boolean }) {
   return (
     <div className={small ? 'brand-mark brand-mark--sm' : 'brand-mark'} aria-hidden="true">
@@ -185,7 +162,7 @@ function Sidebar() {
 
       <div className="sidebar__foot">
         <div className="row" style={{ marginBlockEnd: 10 }}>
-          <LangToggle />
+          <LanguageToggle />
         </div>
         <button
           className="btn btn--ghost btn--sm btn--block"
@@ -216,7 +193,7 @@ function TopBar({ unread }: { unread: number }) {
         <span>{name ?? t('app.portal')}</span>
       </Link>
       <span className="topbar__spacer" />
-      <LangToggle />
+      <LanguageToggle variant="compact" />
       <Link
         to="/portal/notifications"
         className="icon-btn"
@@ -311,7 +288,21 @@ function RequireAnonymous({ children }: { children: ReactNode }) {
   const { signedIn, loading } = useAuth();
   if (loading) return <PageLoader />;
   if (signedIn) return <Navigate to="/portal" replace />;
-  return <>{children}</>;
+  /*
+    The language switch is rendered HERE rather than inside each page, because
+    the reader who needs it most is the one who cannot read the current
+    interface language — and if it lived in the pages, a new anonymous screen
+    would silently ship without it. This wraps sign-in, invitation acceptance,
+    forgot-password and reset-password alike.
+  */
+  return (
+    <>
+      <div className="auth-lang">
+        <LanguageToggle />
+      </div>
+      {children}
+    </>
+  );
 }
 
 function BootFailure() {

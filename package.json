@@ -14,7 +14,7 @@
     "build": "npm run build --workspace web",
     "start": "npm run start --workspace server",
     "db:reset": "npm run db:reset --workspace server",
-    "test": "npm run test:server && npm run test:firm",
+    "test": "npm run test:server && npm run test:web && npm run test:firm",
     "test:security": "vitest run tests/security",
     "test:e2e": "vitest run tests/e2e",
     "build:firm": "npm run build:demo --workspace firm",
@@ -22,7 +22,8 @@
     "build:all": "npm run build --workspace web && npm run build:demo --workspace firm",
     "test:server": "vitest run",
     "test:firm": "npm run test --workspace firm",
-    "build:vercel": "node scripts/build-vercel.mjs"
+    "build:vercel": "node scripts/build-vercel.mjs",
+    "test:web": "npm run test --workspace web"
   },
   "engines": {
     "node": ">=20.11"
