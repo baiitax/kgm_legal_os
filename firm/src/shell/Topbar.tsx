@@ -28,6 +28,7 @@ import { useFirmSession } from '../auth/FirmSession.js';
 import { useTheme } from '../app/theme.js';
 import { CommandPalette } from './CommandPalette.js';
 import { LanguageToggle } from '../components/LanguageToggle.js';
+import { ActiveSessions } from '../components/ActiveSessions.js';
 import './shell.css';
 
 interface TopbarProps {
@@ -233,6 +234,13 @@ export function Topbar({ onNavigate, onSignOut }: TopbarProps) {
           </ul>
         </div>
       )}
+
+      {/*
+        Placed directly above sign-out: the two are the same family of control, and
+        a member who came here to end sessions should not have to hunt past the
+        tenant switcher for it.
+      */}
+      <ActiveSessions />
 
       <div className="kgm-profile__section">
         <Button variant="ghost" icon={<IconLogout size={16} />} block onClick={onSignOut}>

@@ -1571,3 +1571,71 @@
 }
 .firm-rolepicker__name { flex: 1 1 auto; min-inline-size: 0; color: var(--text-md); font-size: var(--fs-body-sm); }
 .firm-rolepicker__currenttag { color: var(--text-dim); font-size: var(--fs-caption); }
+
+/* --------------------------------------------------------------------------
+   ACTIVE SESSIONS · §48
+   --------------------------------------------------------------------------
+   The device list in the profile drawer. Compact and scannable: a member reads
+   it when they suspect a compromise, so the current device and any revoked entry
+   must be identifiable at a glance rather than by reading every row.
+   -------------------------------------------------------------------------- */
+
+.kgm-sessions__hint {
+  margin: 0 0 var(--sp-3);
+  color: var(--text-dim);
+  font-size: var(--fs-caption);
+  line-height: var(--lh-relaxed);
+}
+
+.kgm-sessions {
+  list-style: none; margin: 0 0 var(--sp-3); padding: 0;
+  display: flex; flex-direction: column; gap: var(--sp-2);
+  max-block-size: 42vh; overflow-y: auto;
+}
+
+.kgm-sessions__item {
+  padding: var(--sp-3);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-md);
+  background: var(--glass-1);
+}
+
+/* The device in hand. Marked with a border as well as the badge, so it is
+   findable while scanning rather than only by reading labels. */
+.kgm-sessions__item[data-current] {
+  border-color: var(--border-brand);
+  background: var(--kgm-green-500-07);
+}
+
+/* Ended sessions stay in the list — removing them would erase the evidence a
+   member came here to find. Dimmed, not hidden, and each carries its own badge
+   so "expired" is never mistaken for "revoked". */
+.kgm-sessions__item[data-state='revoked'] { opacity: 0.55; }
+.kgm-sessions__item[data-state='expired'] { opacity: 0.7; }
+
+.kgm-sessions__head {
+  display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap;
+  margin-block-end: var(--sp-1);
+}
+.kgm-sessions__device { flex: 1 1 auto; min-inline-size: 0; color: var(--text-hi); font-size: var(--fs-body-sm); font-weight: var(--fw-medium); }
+
+.kgm-sessions__spec {
+  margin: 0 0 var(--sp-2);
+  color: var(--text-dim); font-size: var(--fs-caption);
+  font-family: var(--font-mono);
+}
+
+.kgm-sessions__meta { margin: 0; display: flex; flex-direction: column; gap: 2px; }
+.kgm-sessions__meta > div { display: flex; gap: var(--sp-2); justify-content: space-between; }
+.kgm-sessions__meta dt { color: var(--text-faint); font-size: var(--fs-caption); margin: 0; }
+.kgm-sessions__meta dd { margin: 0; color: var(--text-md); font-size: var(--fs-caption); text-align: end; }
+.kgm-sessions__abs { color: var(--text-faint); }
+
+.kgm-sessions__mfa { margin: var(--sp-2) 0 0; }
+
+.kgm-sessions__error {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2);
+  color: var(--text-dim); font-size: var(--fs-caption);
+}
+
+.kgm-sessions__actions { display: flex; flex-direction: column; gap: var(--sp-2); }
