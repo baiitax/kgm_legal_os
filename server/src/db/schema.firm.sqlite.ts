@@ -994,6 +994,21 @@ create trigger if not exists invoice_lines_reconcile_guard
     select raise(ABORT, 'invoice_lines_do_not_reconcile: the invoice totals must equal the sum of its lines');
   end;
 
+/* A credit note against a STANDARD invoice may not be shared before ZATCA clears it.
+   The rule is the same one 0039 repairs in Postgres: a correction the authority has not
+   seen cannot be relied on by the buyer, so the credit note may not be reported until
+   the invoice it corrects has been cleared. */
+create trigger if not exists credit_note_needs_clearance_guard
+  before insert on credit_notes
+  for each row when new.invoice_uuid is not null
+    and (select invoice_type from invoices where id = new.invoice_id) = 'standard'
+    and not exists (select 1 from invoice_submissions
+                     where invoice_id = new.invoice_id
+                       and submission_type = 'clearance' and status = 'cleared')
+  begin
+    select raise(ABORT, 'credit_note_not_cleared: a credit note against a standard tax invoice may not be shared before ZATCA clears it');
+  end;
+
 /* A credit note may not exceed what it corrects. */
 create trigger if not exists credit_note_within_invoice_guard
   before insert on credit_notes
@@ -1001,6 +1016,29 @@ create trigger if not exists credit_note_within_invoice_guard
                    - coalesce((select sum(total) from credit_notes where invoice_id = new.invoice_id), 0) + 0.01
   begin
     select raise(ABORT, 'credit_note_exceeds_invoice: the credits against an invoice may not exceed it');
+  end;
+
+/*
+  A CREDIT NOTE AGAINST A STANDARD INVOICE IS NOT SHARED UNTIL ZATCA HAS CLEARED IT.
+
+  The buyer cannot recover the VAT on a correction the authority never saw, so the rule
+  belongs to the document rather than to the route. Postgres has enforced it since 0034
+  and — until 0039 corrected the lookup — enforced it WRONGLY: the guard compared the
+  submission to the credit note's own id, so no clearance could ever satisfy it. SQLite
+  did not implement the rule at all, which is how a suite of 42 tests stayed green while
+  a firm could not correct a single B2B invoice. Both halves are fixed; this is the
+  mirror, and it fires only once the credit note carries a fiscal identity.
+*/
+create trigger if not exists credit_note_needs_clearance_guard
+  before insert on credit_notes
+  for each row when new.invoice_uuid is not null
+    and (select invoice_type from invoices where id = new.invoice_id) = 'standard'
+    and not exists (
+      select 1 from invoice_submissions
+       where invoice_id = new.invoice_id
+         and submission_type = 'clearance' and status = 'cleared')
+  begin
+    select raise(ABORT, 'credit_note_not_cleared: a credit note against a standard tax invoice may not be shared before ZATCA clears it');
   end;
 
 create trigger if not exists credit_note_against_unissued_guard

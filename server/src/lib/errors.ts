@@ -88,6 +88,8 @@ export type ErrorCode =
   | 'invoice_lines_do_not_reconcile'
   | 'credit_note_exceeds_invoice'
   | 'credit_note_against_unissued_invoice'
+  /* The rule the database enforces for a standard invoice, and nothing else does. */
+  | 'credit_note_not_cleared'
   /* client money */
   | 'ledger_is_append_only'
   | 'ledger_not_found'

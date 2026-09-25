@@ -1897,8 +1897,8 @@ export function firmRouter(c: Container): Router {
       },
       buyer: {
         name: String(client?.name ?? ''),
-        nameAr: toStrOrNull(client?.name_ar),
-        vatNumber: toStrOrNull(client?.vat_number),
+        nameAr: client?.nameAr ?? null,
+        vatNumber: client?.vatNumber ?? null,
         address: null,
       },
       lines: xmlLines,
@@ -1916,7 +1916,7 @@ export function firmRouter(c: Container): Router {
       tenantId: p.tenantId, invoiceId, deviceId: String(device.id), icv: allocated.icv,
       previousHash: allocated.previousHash ?? GENESIS_PIH, hash, qr: qrPayload,
       subtype, uuid, supplyAt: supplyAt.toISOString(),
-      buyerName: String(client?.name ?? ''), buyerVat: toStrOrNull(client?.vat_number),
+      buyerName: String(client?.name ?? ''), buyerVat: client?.vatNumber ?? null,
       xmlStorageKey: `${p.tenantId}/${String(invoice.client_id)}/fiscal/${invoiceId}/${uuid}.xml`,
       invoiceNumber: officialNumber,
     });
@@ -2338,6 +2338,20 @@ export function firmRouter(c: Container): Router {
       // Same reason a write-off carries a ceiling: spending money is a financial
       // decision with a limit attached to the member making it.
       c.permissions.assertWithinAuthority(p, 'writeoff', body.amount, { type: 'trust_ledger', id: clientId });
+    }
+
+    /*
+      THE CLIENT MUST EXIST BEFORE A LEDGER IS OPENED FOR THEM.
+
+      A ledger is created on its first movement, so this route is the only place that can
+      notice a request naming a client the firm has no record of — and without this check
+      the insert that opens the ledger fails on its foreign key, which reaches the caller
+      as "internal error". A 500 says the system is broken; the honest answer is that
+      there is no such client here. The lookup is tenant-scoped, so a client of another
+      firm gets the same answer and the refusal discloses nothing about whose it is.
+    */
+    if (!(await c.firm.getClientForTenant(p.tenantId, clientId))) {
+      throw notFoundOrForbidden('client', clientId);
     }
 
     if (body.entryType === 'application_to_fee') {

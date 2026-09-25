@@ -172,6 +172,59 @@ describe('§P0.2 · issuing a tax invoice', () => {
     expect(res.body.error.code).toBe('buyer_vat_required');
   });
 
+  it('issues a STANDARD invoice for a buyer who has a VAT number, and asks for clearance', async () => {
+    /*
+      THE POSITIVE HALF OF THE GATE ABOVE, and the test that was missing when it
+      mattered. Every other invoice in this suite is simplified — its buyer is an
+      individual — so nothing ever asked the standard path to admit anybody, and a
+      repository method that handed the route `vat_number` where the route read
+      `vatNumber` made EVERY buyer look VAT-less. The refusal above passed for the
+      wrong reason, and the defect reached the live system, where the live harness
+      found it.
+
+      A standard supply to a company: the document must carry the buyer's
+      registration, and a standard invoice may not be sent until ZATCA has cleared it.
+    */
+    const buyer = await row<{ party_id: string | null }>(`select party_id from clients where id = ?`, [CLIENT_GULF]);
+    const party = await row<{ vat_number: string }>(`select vat_number from parties where id = ?`, [buyer.party_id!]);
+    expect(party.vat_number).toBe('300055667700003');
+
+    const draft = crypto.randomUUID();
+    const today = new Date().toISOString().slice(0, 10);
+    const due = new Date(Date.now() + 30 * 86_400_000).toISOString().slice(0, 10);
+    await s.db.run(
+      `insert into invoices (id, tenant_id, client_id, matter_id, invoice_number, issue_date, due_date,
+                             currency, subtotal, vat_rate, vat_amount, total, amount_paid,
+                             internal_status, client_status, storage_key, created_at, updated_at)
+       values (?, ?, ?, ?, 'INV-2026-0900-DRAFT', ?, ?, 'SAR', 40000, 0.15, 6000, 46000, 0,
+               'draft', null, ?, ?, ?)`,
+      [draft, IDS.tenantKgm, CLIENT_GULF, IDS.matterGulf, today, due, `demo/${draft}.pdf`, new Date().toISOString(), new Date().toISOString()],
+    );
+    await s.db.run(
+      `insert into invoice_lines (id, invoice_id, position, description, quantity, unit_price, amount,
+                                  vat_category, vat_rate, vat_amount, discount_amount)
+       values (?, ?, 1, 'Acquisition advisory — phase two', 1, 40000, 40000, 'standard', 0.15, 6000, 0)`,
+      [crypto.randomUUID(), draft],
+    );
+
+    const res = await noura.post(`/api/firm/billing/invoices/${draft}/issue`, { subtype: 'standard' });
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    const issued = res.body.data as { subtype: string; fiscalStatus: string; xml: string; icv: number };
+
+    // The document is standard, it carries the buyer's registration, and it goes for
+    // CLEARANCE — it is not released to the client on the strength of its own hash.
+    expect(issued.subtype).toBe('standard');
+    expect(issued.fiscalStatus).toBe('pending_clearance');
+    expect(issued.xml).toContain(party.vat_number);
+    expect(issued.xml).toContain('<cbc:InvoiceTypeCode name="0100000">388</cbc:InvoiceTypeCode>');
+
+    const stored = await row<{ fiscal_status: string; invoice_type: string; buyer_vat_number: string }>(
+      `select fiscal_status, invoice_type, buyer_vat_number from invoices where id = ?`, [draft]);
+    expect(stored.fiscal_status).toBe('pending_clearance');
+    expect(stored.invoice_type).toBe('standard');
+    expect(stored.buyer_vat_number).toBe(party.vat_number);
+  });
+
   it('holds the chain together: the next issue links to the last hash, never to genesis', async () => {
     const head = await row<{ invoice_counter_value: number }>(
       `select invoice_counter_value from fiscal_devices where id = ?`, [detId('fiscal_device:kgm-1')]);
@@ -374,6 +427,74 @@ describe('§P0.2 · reporting, clearance and correction', () => {
     // projection omitted client_id, and this insert failed its foreign key with the
     // string 'undefined' — a 500 where a 201 belongs.
     expect(stored.client_id).toBe(CLIENT_AHMED);
+  });
+
+  it('refuses to share a credit note against a STANDARD invoice until ZATCA clears it, then allows it', async () => {
+    /*
+      THE RULE THAT HAD NEVER BEEN REACHED IN EITHER DIALECT.
+
+      A credit note against a standard tax invoice may not be shared before the authority
+      clears that invoice — the buyer cannot recover the VAT on a correction ZATCA never
+      saw. Postgres has had the rule since 0034 and enforced it WRONGLY: the guard looked
+      the clearance up against `new.id`, the CREDIT NOTE's id, where no submission can
+      ever be, so every credit note against a standard invoice was refused however settled
+      the invoice was. SQLite did not implement the rule at all, so this suite could not
+      see the difference, and the live harness found it while proving that a
+      row-level-security policy narrows.
+
+      Both halves are asserted here: the refusal while the invoice is uncleared, and the
+      admission once the authority's answer has been recorded.
+    */
+    const draft = crypto.randomUUID();
+    const today = new Date().toISOString().slice(0, 10);
+    const due = new Date(Date.now() + 30 * 86_400_000).toISOString().slice(0, 10);
+    await s.db.run(
+      `insert into invoices (id, tenant_id, client_id, matter_id, invoice_number, issue_date, due_date,
+                             currency, subtotal, vat_rate, vat_amount, total, amount_paid,
+                             internal_status, client_status, storage_key, created_at, updated_at)
+       values (?, ?, ?, ?, 'INV-2026-0901-DRAFT', ?, ?, 'SAR', 50000, 0.15, 7500, 57500, 0,
+               'draft', null, ?, ?, ?)`,
+      [draft, IDS.tenantKgm, CLIENT_GULF, IDS.matterGulf, today, due,
+       `demo/${draft}.pdf`, new Date().toISOString(), new Date().toISOString()],
+    );
+    await s.db.run(
+      `insert into invoice_lines (id, invoice_id, position, description, quantity, unit_price, amount,
+                                  vat_category, vat_rate, vat_amount, discount_amount)
+       values (?, ?, 1, 'Regulatory filing — phase one', 1, 50000, 50000, 'standard', 0.15, 7500, 0)`,
+      [crypto.randomUUID(), draft],
+    );
+
+    const issue = await noura.post(`/api/firm/billing/invoices/${draft}/issue`, { subtype: 'standard' });
+    expect(issue.status, JSON.stringify(issue.body)).toBe(201);
+    expect((issue.body.data as { fiscalStatus: string }).fiscalStatus).toBe('pending_clearance');
+
+    const early = await noura.post(`/api/firm/billing/invoices/${draft}/credit-notes`, {
+      reason: 'The filing was withdrawn — the fee has to come back.',
+      amount: 5_000, vatAmount: 750, creditNumber: 'CN-2026-0901',
+    });
+    expect(early.status, JSON.stringify(early.body)).toBe(400);
+    expect(early.body.error.code).toBe('credit_note_not_cleared');
+    // The refusal wrote nothing: a credit note that was never admitted is not a row.
+    const none = await row<{ n: number }>(
+      `select count(*) as n from credit_notes where invoice_id = ?`, [draft]);
+    expect(Number(none.n)).toBe(0);
+
+    // The authority's answer, recorded against the invoice — not against the credit note.
+    const cleared = await noura.post(`/api/firm/billing/invoices/${draft}/submissions`, {
+      submissionType: 'clearance', status: 'cleared', httpStatus: 200, responseCode: '200',
+    });
+    expect(cleared.status, JSON.stringify(cleared.body)).toBe(201);
+
+    const allowed = await noura.post(`/api/firm/billing/invoices/${draft}/credit-notes`, {
+      reason: 'The filing was withdrawn — the fee has to come back.',
+      amount: 5_000, vatAmount: 750, creditNumber: 'CN-2026-0901',
+    });
+    expect(allowed.status, JSON.stringify(allowed.body)).toBe(201);
+    const note = allowed.body.data as { xml: string };
+    // A standard invoice's correction keeps the standard subtype in the type code, and
+    // names the document it corrects.
+    expect(note.xml).toContain('<cbc:InvoiceTypeCode name="0100000">381</cbc:InvoiceTypeCode>');
+    expect(note.xml).toContain('<cac:BillingReference>');
   });
 
   it('refuses a credit note against an invoice that was never issued, and one that exceeds it', async () => {

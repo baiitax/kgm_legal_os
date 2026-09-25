@@ -2333,8 +2333,23 @@ export class FirmRepo {
    * document then cannot be a standard invoice, which the route enforces rather than
    * issuing a tax invoice with a blank VAT number.
    */
+  /**
+   * The buyer as the invoice needs them, with the registration that decides whether the
+   * document is standard or simplified.
+   *
+   * MAPPED, not raw, and that is the whole point of this comment. The route asks for
+   * `client.vatNumber`; the column is `vat_number`. A support read that handed back the
+   * row exactly as the driver returned it made every buyer look as though it had no VAT
+   * number — so every standard invoice was refused as `buyer_vat_required`, and the
+   * only visible symptom would have been a firm that cannot issue B2B invoices.
+   *
+   * The 41 behavioural tests did not catch it because every invoice they issue is
+   * simplified: the buyer in the fixture is an individual, and the gate that reads this
+   * field was never asked to admit anybody. The LIVE harness caught it, on the real
+   * database, the first time a standard invoice was attempted against it.
+   */
   async getClientForInvoice(tenantId: string, clientId: string) {
-    return this.q().get<Row>(
+    const r = await this.q().get<Row>(
       `select c.id, c.name, c.name_ar, c.email, c.city, c.country,
               p.vat_number, p.commercial_registration
          from clients c
@@ -2342,6 +2357,19 @@ export class FirmRepo {
         where c.id = ? and c.tenant_id = ?`,
       [clientId, tenantId],
     );
+    if (!r) return null;
+    return {
+      id: String(r.id),
+      name: req(r.name),
+      nameAr: toStr(r.name_ar),
+      email: toStr(r.email),
+      city: toStr(r.city),
+      country: toStr(r.country),
+      // Null when there is none: an individual has no VAT registration, and that is a
+      // fact about the buyer rather than a missing value to be defaulted away.
+      vatNumber: toStr(r.vat_number),
+      commercialRegistration: toStr(r.commercial_registration),
+    };
   }
 
   /** The lines as the document needs them, in position order and no other order. */
@@ -2791,12 +2819,33 @@ export class FirmRepo {
    * cannot answer the one that matters.
    */
   async ledgerBalance(ledgerId: string, asOf?: string | null): Promise<number> {
-    const r = await this.q().get<Row>(
-      `select coalesce(sum(case when direction = 'credit' then amount else -amount end), 0) as balance
-         from ledger_entries
-        where ledger_id = ? and (? is null or entry_at <= ?)`,
-      [ledgerId, asOf ?? null, asOf ?? null],
-    );
+    /*
+      TWO STATEMENTS, NOT ONE WITH A NULL TEST.
+
+      `where ledger_id = ? and (? is null or entry_at <= ?)` reads perfectly in SQLite
+      and fails in Postgres, which refuses to infer a type for a parameter that is only
+      ever tested for nullness: `could not determine data type of parameter $2`. The live
+      verifier hit this on the overdraft guard's own balance read — the check that decides
+      whether a client's money may be spent could not compute the balance at all, and the
+      caller was told "internal error".
+
+      The two cases are different questions anyway — the running balance, and the balance
+      as it stood on a date — so they are asked separately, and the parameter that a date
+      comparison types is only ever used in a date comparison.
+    */
+    const r = asOf
+      ? await this.q().get<Row>(
+        `select coalesce(sum(case when direction = 'credit' then amount else -amount end), 0) as balance
+           from ledger_entries
+          where ledger_id = ? and entry_at <= ?`,
+        [ledgerId, asOf],
+      )
+      : await this.q().get<Row>(
+        `select coalesce(sum(case when direction = 'credit' then amount else -amount end), 0) as balance
+           from ledger_entries
+          where ledger_id = ?`,
+        [ledgerId],
+      );
     return round2(toNumber(r?.balance));
   }
 
