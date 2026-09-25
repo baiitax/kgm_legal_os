@@ -344,15 +344,21 @@ export class PostgresDb implements Db {
    * A test-supplied pool is left alone — closing it would break the test, not the bug.
    */
   async drain(): Promise<void> {
-    if (this.injectedPool) return;
+    if (this.injectedPool) { this.lastDrain = 'skipped: injected pool'; return; }
     if (this.draining) return this.draining;
     const pool = this.currentPool;
-    if (!pool) return;
+    if (!pool) { this.lastDrain = 'skipped: no pool'; return; }
     this.draining = this.closeIfIdle(pool).finally(() => {
       this.draining = undefined;
     });
     return this.draining;
   }
+
+  /** TEMPORARY (next commit): what the last drain decided, for the header above. */
+  drainReport(): string {
+    return this.lastDrain;
+  }
+  private lastDrain = 'not run';
 
   /** The body of a drain, once one is in flight. */
   private async closeIfIdle(pool: pg.Pool): Promise<void> {
@@ -369,12 +375,18 @@ export class PostgresDb implements Db {
       microseconds in practice; the ceiling is here so a leaked scope cannot pin a
       function open.
     */
-    if (!(await this.awaitScopes(2_000))) {
+    const scopesFree = await this.awaitScopes(2_000);
+    if (!scopesFree) {
+      this.lastDrain = `skipped: ${this.outstanding} scope(s) open after 2s`;
       console.warn(`[db] drain skipped: ${this.outstanding} request scope(s) still open after 2s`);
       return;
     }
-    if (this.currentPool !== pool) return;
-    if (pool.idleCount !== pool.totalCount || pool.waitingCount > 0) return;
+    if (this.currentPool !== pool) { this.lastDrain = 'skipped: pool already replaced'; return; }
+    if (pool.idleCount !== pool.totalCount || pool.waitingCount > 0) {
+      this.lastDrain = `skipped: ${pool.totalCount - pool.idleCount} checked out, ${pool.waitingCount} waiting`;
+      return;
+    }
+    this.lastDrain = `closed ${pool.totalCount} idle client(s)`;
     this.currentPool = undefined;
     /* `end()` waits for a checked-out client to come back. Everything should have been
        released by now; the ceiling is here so that a leak cannot pin a function open. */
