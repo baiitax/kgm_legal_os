@@ -2168,6 +2168,1131 @@ export class FirmRepo {
       [tenantId],
     );
   }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+   * P0.2 · THE FISCAL DOCUMENT
+   * ══════════════════════════════════════════════════════════════════════════ */
+
+  async listFiscalIdentities(tenantId: string) {
+    return this.q().all<Row>(
+      `select ${FISCAL_IDENTITY_COLUMNS} from fiscal_identity
+        where tenant_id = ? order by created_at desc`,
+      [tenantId],
+    );
+  }
+
+  /** The identity in force: the one that has not been superseded. */
+  async fiscalIdentityFor(tenantId: string) {
+    return this.q().get<Row>(
+      `select ${FISCAL_IDENTITY_COLUMNS} from fiscal_identity
+        where tenant_id = ? and superseded_by is null order by created_at desc limit 1`,
+      [tenantId],
+    );
+  }
+
+  /**
+   * Record or replace the seller identity.
+   *
+   * A REPLACEMENT SUPERSEDES, IT DOES NOT EDIT. An invoice issued in March under VAT
+   * number X must still be explainable in September after the firm's registration
+   * changed, and an UPDATE would rewrite the identity that document was issued
+   * under. So the previous row is marked superseded and a new row is written.
+   */
+  async upsertFiscalIdentity(input: FiscalIdentityInput): Promise<string> {
+    const now = new Date().toISOString();
+    const existing = await this.fiscalIdentityFor(input.tenantId);
+    const id = newId();
+
+    if (existing) {
+      await this.q().run(
+        `update fiscal_identity
+            set superseded_by = ?, updated_at = ?
+          where id = ? and tenant_id = ? and superseded_by is null`,
+        [id, now, String(existing.id), input.tenantId],
+      );
+    }
+
+    await this.q().run(
+      `insert into fiscal_identity
+         (id, tenant_id, registered_name, registered_name_ar, vat_registration_number,
+          commercial_registration, registered_address, registered_address_ar, city,
+          postal_code, country, environment, onboarding_status, certificate_expires_at,
+          superseded_by, created_at, updated_at)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null, ?, ?)`,
+      [
+        id, input.tenantId, input.registeredName, input.registeredNameAr ?? null,
+        input.vatRegistrationNumber, input.commercialRegistration, input.registeredAddress,
+        input.registeredAddressAr ?? null, input.city ?? null, input.postalCode ?? null,
+        input.country ?? 'SA', input.environment, input.onboardingStatus,
+        input.certificateExpiresAt ?? null, now, now,
+      ],
+    );
+    return id;
+  }
+
+  async listFiscalDevices(tenantId: string) {
+    return this.q().all<Row>(
+      `select id, tenant_id, fiscal_identity_id, device_label, device_serial,
+              invoice_counter_value, last_invoice_hash, is_active, created_at, updated_at
+         from fiscal_devices where tenant_id = ? order by created_at`,
+      [tenantId],
+    );
+  }
+
+  async createFiscalDevice(input: {
+    tenantId: string; fiscalIdentityId: string; deviceLabel: string; deviceSerial: string;
+  }): Promise<string> {
+    const now = new Date().toISOString();
+    const id = newId();
+    await this.q().run(
+      `insert into fiscal_devices
+         (id, tenant_id, fiscal_identity_id, device_label, device_serial,
+          invoice_counter_value, last_invoice_hash, is_active, created_at, updated_at)
+       values (?, ?, ?, ?, ?, 0, null, ?, ?, ?)`,
+      [id, input.tenantId, input.fiscalIdentityId, input.deviceLabel, input.deviceSerial, true, now, now],
+    );
+    return id;
+  }
+
+  /**
+   * May this firm issue a tax invoice at all?
+   *
+   * The same four conditions `kgm_fiscal_ready` applies in the database. Asked HERE
+   * as well so the UI can say "this firm is not onboarded" before somebody fills in
+   * an invoice form, rather than surfacing a refusal at the send button. Both
+   * answers exist on purpose: the database's is the one that binds.
+   */
+  async fiscalReady(tenantId: string): Promise<boolean> {
+    const r = await this.q().get<Row>(
+      `select count(*) as n
+         from fiscal_identity fi
+         join fiscal_devices fd on fd.fiscal_identity_id = fi.id
+        where fi.tenant_id = ?
+          and fi.superseded_by is null
+          and fi.onboarding_status = 'production_csid'
+          and (fi.certificate_expires_at is null or fi.certificate_expires_at > ?)
+          and fd.is_active = ?`,
+      [tenantId, new Date().toISOString(), true],
+    );
+    return toNumber(r?.n) > 0;
+  }
+
+  /**
+   * Take the next place in the device's chain.
+   *
+   * ONE STATEMENT, and that is not a style preference. The ICV is a shared counter:
+   * a read-then-write from here would let two concurrent issues take the same
+   * number, and a duplicated ICV is a broken chain that cannot be repaired without
+   * reissuing documents. PostgreSQL does it with `returning`
+   * (`kgm_next_fiscal_number`); SQLite does it in the same shape, because
+   * better-sqlite3 executes the statement synchronously and the increment is atomic
+   * within it.
+   */
+  /**
+   * Whether an ISSUED invoice of this tenant already carries this number.
+   *
+   * The unique index would refuse the second issue anyway, but a driver-level refusal
+   * reaches the caller as an opaque 500 — and the honest answer here is a conflict the
+   * caller can act on: the number is taken, choose the next one.
+   */
+  async invoiceNumberInUse(tenantId: string, invoiceNumber: string, exceptInvoiceId: string): Promise<boolean> {
+    const row = await this.q().get<Row>(
+      `select id from invoices
+        where tenant_id = ? and invoice_number = ? and invoice_uuid is not null and id <> ?
+        limit 1`,
+      [tenantId, invoiceNumber, exceptInvoiceId],
+    );
+    return row !== undefined && row !== null;
+  }
+
+  async allocateFiscalNumber(deviceId: string): Promise<{ icv: number; previousHash: string | null }> {
+    const now = new Date().toISOString();
+    const row = await this.q().get<Row>(
+      `update fiscal_devices
+          set invoice_counter_value = invoice_counter_value + 1, updated_at = ?
+        where id = ? and is_active = ?
+        returning invoice_counter_value, last_invoice_hash`,
+      [now, deviceId, true],
+    );
+    if (!row) {
+      throw Object.assign(new Error('the fiscal device is not active'), { code: 'fiscal_device_inactive' });
+    }
+    return {
+      icv: toNumber(row.invoice_counter_value),
+      previousHash: toStr(row.last_invoice_hash),
+    };
+  }
+
+
+  /**
+   * The buyer, as the tax document must name them.
+   *
+   * The VAT number is read from the PARTY record, not from the client record, because
+   * `clients` is a commercial relationship and `parties` is the identity that holds the
+   * registration. The join is left so a client with no party link still resolves — the
+   * document then cannot be a standard invoice, which the route enforces rather than
+   * issuing a tax invoice with a blank VAT number.
+   */
+  async getClientForInvoice(tenantId: string, clientId: string) {
+    return this.q().get<Row>(
+      `select c.id, c.name, c.name_ar, c.email, c.city, c.country,
+              p.vat_number, p.commercial_registration
+         from clients c
+         left join parties p on p.id = c.party_id
+        where c.id = ? and c.tenant_id = ?`,
+      [clientId, tenantId],
+    );
+  }
+
+  /** The lines as the document needs them, in position order and no other order. */
+  async listInvoiceLines(invoiceId: string) {
+    return this.q().all<Row>(
+      `select id, position, description, description_ar, quantity, unit_price, amount,
+              vat_category, vat_rate, vat_amount, discount_amount
+         from invoice_lines where invoice_id = ? order by position`,
+      [invoiceId],
+    );
+  }
+
+  /** Which client a matter belongs to — the link every disbursement carries. */
+  async getMatterClient(tenantId: string, matterId: string) {
+    const r = await this.q().get<Row>(
+      `select id as matter_id, client_id, matter_number, title
+         from matters where id = ? and tenant_id = ?`,
+      [matterId, tenantId],
+    );
+    return r ? { matterId: String(r.matter_id), clientId: String(r.client_id), matterNumber: String(r.matter_number), title: String(r.title) } : null;
+  }
+
+  async getTimeEntry(tenantId: string, entryId: string) {
+    return this.q().get<Row>(
+      `select id, matter_id, staff_id, entry_date, minutes, narrative, billable,
+              hourly_rate_sar, amount_sar, invoice_id, status, approved_at
+         from time_entries where id = ? and tenant_id = ?`,
+      [entryId, tenantId],
+    );
+  }
+
+  async getExpense(tenantId: string, expenseId: string) {
+    return this.q().get<Row>(
+      `select id, matter_id, client_id, submitted_by_staff, incurred_on, category,
+              description, net_amount_sar, vat_amount_sar, total_amount_sar, status,
+              receipt_document_id, reimbursable, invoice_id
+         from expenses where id = ? and tenant_id = ?`,
+      [expenseId, tenantId],
+    );
+  }
+
+  async getEngagementLetter(tenantId: string, letterId: string) {
+    return this.q().get<Row>(
+      `select id, matter_id, client_id, scope, calculation_method, fee_amount_sar,
+              signed_by_client_at, signed_by_client_name, document_id, status, superseded_by
+         from engagement_letters where id = ? and tenant_id = ? and superseded_by is null`,
+      [letterId, tenantId],
+    );
+  }
+
+  /**
+   * Where the chain stands, and the next place in it.
+   *
+   * The next ICV is returned as `icv + 1` WITHOUT consuming it: the caller builds the
+   * document with that number and only then calls `allocateFiscalNumber`, which is what
+   * actually takes it. The read is therefore advisory — which is correct, because the
+   * document must be built before it can be hashed, and the allocation must be the last
+   * thing that happens, so a build failure leaves no gap in the sequence.
+   */
+  async fiscalDeviceChainHead(deviceId: string) {
+    const r = await this.q().get<Row>(
+      `select invoice_counter_value, last_invoice_hash, device_serial
+         from fiscal_devices where id = ? and is_active = ?`,
+      [deviceId, true],
+    );
+    if (!r) {
+      throw Object.assign(new Error('the fiscal device is not active'), { code: 'fiscal_device_inactive' });
+    }
+    return {
+      icv: toNumber(r.invoice_counter_value),
+      previousHash: toStr(r.last_invoice_hash),
+      deviceSerial: String(r.device_serial),
+    };
+  }
+
+  /**
+   * Write the fiscal identity of an invoice, and advance the device's chain head.
+   *
+   * THE CHAIN HEAD IS MOVED IN THE SAME CALL, and only after the invoice row has
+   * accepted its own fields. If the invoice write is refused — by the shape guard,
+   * by the QR guard, by RLS — the device is left where it was, and the next attempt
+   * takes the same ICV rather than leaving a permanently unreachable number in the
+   * sequence. A gap in the ICV sequence is the first thing a ZATCA reviewer notices.
+   */
+  async recordInvoiceIssue(input: {
+    tenantId: string; invoiceId: string; deviceId: string; icv: number;
+    previousHash: string; hash: string; qr: string; subtype: string;
+    uuid: string; supplyAt: string; buyerName: string; buyerVat: string | null;
+    xmlStorageKey: string; invoiceNumber: string;
+  }): Promise<number> {
+    const now = new Date().toISOString();
+    /*
+      THE OFFICIAL NUMBER IS SEALED IN THE SAME WRITE as the UUID and the hash. The
+      guard on this table freezes the number the moment the document exists, so a
+      number corrected a second later would be refused by the database — and rightly:
+      an invoice's number is part of its identity, not metadata about it.
+    */
+    const r = await this.q().run(
+      `update invoices
+          set invoice_uuid = ?, invoice_type = ?, icv = ?, previous_invoice_hash = ?,
+              invoice_hash = ?, qr_payload = ?, xml_storage_key = ?, supply_at = ?,
+              buyer_name = ?, buyer_vat_number = ?, fiscal_device_id = ?,
+              invoice_number = ?,
+              fiscal_status = ?, fiscal_status_at = ?, updated_at = ?
+        where id = ? and tenant_id = ? and invoice_uuid is null`,
+      [
+        input.uuid, input.subtype, input.icv, input.previousHash, input.hash, input.qr,
+        input.xmlStorageKey, input.supplyAt, input.buyerName, input.buyerVat, input.deviceId,
+        input.invoiceNumber,
+        input.subtype === 'standard' ? 'pending_clearance' : 'pending_reporting', now, now,
+        input.invoiceId, input.tenantId,
+      ],
+    );
+    if (r.changes > 0) {
+      await this.q().run(
+        `update fiscal_devices set last_invoice_hash = ?, updated_at = ? where id = ?`,
+        [input.hash, now, input.deviceId],
+      );
+    }
+    return r.changes;
+  }
+
+  /*
+    THE PROJECTION CARRIES client_id AND matter_id, AND THAT IS A SECURITY DECISION,
+    not a convenience. Every caller of this method uses the matter id to put the invoice
+    through `requireMatter` and the client id to resolve the buyer. An earlier version
+    omitted both, which meant `if (matterId)` was never true: the ISSUE ROUTE SKIPPED ITS
+    MATTER-SCOPE CHECK ENTIRELY, and the credit-note route resolved its client as the
+    string 'undefined'. A projection that leaves out the field a gate reads turns the
+    gate off silently — the failure is not an error, it is an absence.
+  */
+  async getInvoiceFiscal(tenantId: string, invoiceId: string) {
+    return this.q().get<Row>(
+      `select i.id, i.invoice_number, i.invoice_uuid, i.invoice_type, i.icv,
+              i.client_id, i.matter_id,
+              i.previous_invoice_hash, i.invoice_hash, i.qr_payload, i.xml_storage_key,
+              i.supply_at, i.buyer_name, i.buyer_vat_number, i.fiscal_status,
+              i.fiscal_status_at, i.fiscal_device_id, i.internal_status, i.client_status,
+              i.subtotal, i.vat_amount, i.total, i.amount_paid, i.issue_date, i.due_date,
+              i.currency, d.device_label, d.device_serial
+         from invoices i
+         left join fiscal_devices d on d.id = i.fiscal_device_id
+        where i.id = ? and i.tenant_id = ?`,
+      [invoiceId, tenantId],
+    );
+  }
+
+  async listSubmissions(tenantId: string, invoiceId: string) {
+    return this.q().all<Row>(
+      `select id, submission_type, attempt, status, http_status, response_code,
+              warnings, errors, next_retry_at, submitted_at, resolved_at, created_at
+         from invoice_submissions
+        where invoice_id = ? and tenant_id = ?
+        order by created_at desc, attempt desc`,
+      [invoiceId, tenantId],
+    );
+  }
+
+  /**
+   * Record what was sent to ZATCA and what came back.
+   *
+   * An attempt is its own row, always — including a retry, including a timeout, and
+   * including a failure whose cause was on this side. The alternative (updating the
+   * previous attempt in place) would erase the evidence of the attempt that failed,
+   * which is the attempt that explains why the invoice is late.
+   *
+   * The attempt NUMBER is derived rather than supplied, so a caller cannot write two
+   * "attempt 1" rows and make the trail read as though the first call succeeded.
+   */
+  async recordSubmission(input: {
+    tenantId: string; invoiceId: string; submissionType: string; attempt: number;
+    status: string; httpStatus?: number | null; responseCode?: string | null;
+    requestBodyHash?: string | null; responseBody?: string | null;
+    warnings?: string | null; errors?: string | null; nextRetryAt?: string | null;
+  }): Promise<{ id: string; nextAttempt: number }> {
+    const now = new Date().toISOString();
+    const previous = await this.q().get<Row>(
+      `select coalesce(max(attempt), 0) as n from invoice_submissions
+        where invoice_id = ? and submission_type = ?`,
+      [input.invoiceId, input.submissionType],
+    );
+    const attempt = toNumber(previous?.n) + 1;
+    const id = newId();
+    const resolved = ['cleared', 'reported', 'rejected'].includes(input.status) ? now : null;
+
+    await this.q().run(
+      `insert into invoice_submissions
+         (id, tenant_id, invoice_id, submission_type, attempt, status, http_status,
+          response_code, request_body_hash, response_body, warnings, errors,
+          next_retry_at, submitted_at, resolved_at, created_at)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id, input.tenantId, input.invoiceId, input.submissionType, attempt, input.status,
+        input.httpStatus ?? null, input.responseCode ?? null, input.requestBodyHash ?? null,
+        input.responseBody ?? null, input.warnings ?? null, input.errors ?? null,
+        input.nextRetryAt ?? null, now, resolved, now,
+      ],
+    );
+    return { id, nextAttempt: attempt + 1 };
+  }
+
+  async setFiscalStatus(tenantId: string, invoiceId: string, status: string): Promise<number> {
+    const now = new Date().toISOString();
+    const r = await this.q().run(
+      `update invoices set fiscal_status = ?, fiscal_status_at = ?, updated_at = ?
+        where id = ? and tenant_id = ?`,
+      [status, now, now, invoiceId, tenantId],
+    );
+    return r.changes;
+  }
+
+  /**
+   * Simplified invoices whose 24-hour reporting window is still open, or has closed.
+   *
+   * The window runs from the moment of supply, which is why `supply_at` is a
+   * timestamp and why the guard refuses a simplified issue without one. This is the
+   * query the reporting job runs, and `overdue` is returned rather than filtered
+   * away: an invoice past its window is the one that costs money.
+   */
+  async listInvoicesNeedingReporting(tenantId: string) {
+    return this.q().all<Row>(
+      `select i.id, i.invoice_number, i.invoice_uuid, i.supply_at, i.total,
+              i.fiscal_status, i.icv,
+              case when i.supply_at <= ? then 1 else 0 end as overdue
+         from invoices i
+        where i.tenant_id = ?
+          and i.invoice_type = 'simplified'
+          and i.fiscal_status in ('pending_reporting', 'failed')
+        order by i.supply_at`,
+      [new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(), tenantId],
+    );
+  }
+
+  /**
+   * A credit note, as a fiscal document in its own right.
+   *
+   * It takes its own place in the same chain as the invoice it corrects — same
+   * device, next ICV, chained to the current head — because a credit note that is
+   * not in the chain is not a document ZATCA can see, and a correction it cannot see
+   * leaves the original invoice standing.
+   */
+  async createCreditNote(input: {
+    tenantId: string; invoiceId: string; clientId: string; creditNumber: string;
+    reason: string; amount: number; vatAmount: number; total: number;
+    deviceId: string; icv: number; previousHash: string; hash: string; qr: string;
+    uuid: string; issuedByStaff: string | null;
+  }): Promise<string> {
+    const now = new Date().toISOString();
+    const id = newId();
+    await this.q().run(
+      `insert into credit_notes
+         (id, tenant_id, invoice_id, client_id, credit_number, reason, amount, vat_amount,
+          total, currency, fiscal_device_id, invoice_uuid, icv, previous_invoice_hash,
+          invoice_hash, qr_payload, xml_storage_key, fiscal_status, issued_by_staff,
+          issued_at, created_at)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, 'SAR', ?, ?, ?, ?, ?, ?, null, ?, ?, ?, ?)`,
+      [
+        id, input.tenantId, input.invoiceId, input.clientId, input.creditNumber, input.reason,
+        round2(input.amount), round2(input.vatAmount), round2(input.total), input.deviceId,
+        input.uuid, input.icv, input.previousHash, input.hash, input.qr,
+        'pending_clearance', input.issuedByStaff, now, now,
+      ],
+    );
+    await this.q().run(
+      `update fiscal_devices set last_invoice_hash = ?, updated_at = ? where id = ?`,
+      [input.hash, now, input.deviceId],
+    );
+    return id;
+  }
+
+  async listCreditNotes(tenantId: string, invoiceId: string) {
+    return this.q().all<Row>(
+      `select id, credit_number, reason, amount, vat_amount, total, invoice_uuid, icv,
+              invoice_hash, fiscal_status, issued_at, created_at
+         from credit_notes where tenant_id = ? and invoice_id = ? order by created_at`,
+      [tenantId, invoiceId],
+    );
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+   * P1.1 · CLIENT MONEY
+   * ══════════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Every client the firm holds money for, with the balance DERIVED.
+   *
+   * The balance is summed from the entries in the same query rather than read from a
+   * column, because there is no column. That is the point: a stored balance is a
+   * second source of truth, and the moment it disagrees with the entries the ledger
+   * is unarguable in exactly the situation where it needs to be.
+   */
+  async listClientLedgers(tenantId: string) {
+    return this.q().all<Row>(
+      `select l.id, l.client_id, l.currency, l.status, l.frozen_reason, l.opened_at,
+              c.name as client_name, c.name_ar as client_name_ar,
+              coalesce(sum(case when e.direction = 'credit' then e.amount else -e.amount end), 0) as balance,
+              count(e.id) as entry_count,
+              max(e.entry_at) as last_movement_at
+         from client_ledgers l
+         join clients c on c.id = l.client_id
+         left join ledger_entries e on e.ledger_id = l.id
+        where l.tenant_id = ?
+        group by l.id, l.client_id, l.currency, l.status, l.frozen_reason, l.opened_at,
+                 c.name, c.name_ar
+        order by c.name`,
+      [tenantId],
+    );
+  }
+
+  async getClientLedger(tenantId: string, clientId: string) {
+    return this.q().get<Row>(
+      `select l.id, l.client_id, l.currency, l.status, l.frozen_reason, l.opened_at, l.closed_at,
+              c.name as client_name, c.name_ar as client_name_ar
+         from client_ledgers l
+         join clients c on c.id = l.client_id
+        where l.tenant_id = ? and l.client_id = ?`,
+      [tenantId, clientId],
+    );
+  }
+
+  /** A ledger exists from the first movement, not from the first intention. */
+  async ensureClientLedger(tenantId: string, clientId: string): Promise<string> {
+    const existing = await this.getClientLedger(tenantId, clientId);
+    if (existing) return String(existing.id);
+    const id = newId();
+    const now = new Date().toISOString();
+    await this.q().run(
+      `insert into client_ledgers
+         (id, tenant_id, client_id, currency, status, frozen_reason, opened_at,
+          closed_at, created_at, updated_at)
+       values (?, ?, ?, 'SAR', 'open', null, ?, null, ?, ?)`,
+      [id, tenantId, clientId, now, now, now],
+    );
+    return id;
+  }
+
+  async listLedgerEntries(tenantId: string, clientId: string, limit = 200) {
+    return this.q().all<Row>(
+      `select e.id, e.entry_type, e.direction, e.amount, e.currency, e.invoice_id,
+              e.matter_id, e.description, e.reference, e.evidence_document_id,
+              e.reverses_entry_id, e.reversal_reason, e.entry_at, e.recorded_at,
+              u.email as recorded_by_email,
+              i.invoice_number, m.matter_number
+         from ledger_entries e
+         left join users u on u.id = e.recorded_by_user_id
+         left join invoices i on i.id = e.invoice_id
+         left join matters m on m.id = e.matter_id
+        where e.tenant_id = ? and e.client_id = ?
+        order by e.entry_at desc, e.recorded_at desc
+        limit ${Math.min(Math.max(limit, 1), 500)}`,
+      [tenantId, clientId],
+    );
+  }
+
+  /**
+   * Post a movement.
+   *
+   * The direction is DERIVED from the type here rather than taken from the caller,
+   * matching `guard_ledger_entry_shape`. A caller that could choose the direction
+   * could record a payment to a client as a receipt from them, which doubles a
+   * discrepancy instead of causing one, and is the single most expensive typing
+   * mistake a client account can make.
+   */
+  async recordLedgerEntry(input: LedgerEntryInput): Promise<string> {
+    const ledgerId = await this.ensureClientLedger(input.tenantId, input.clientId);
+
+    let direction: 'credit' | 'debit';
+    if (input.entryType === 'reversal') {
+      const target = await this.q().get<Row>(
+        `select direction from ledger_entries where id = ? and tenant_id = ?`,
+        [input.reversesEntryId ?? '', input.tenantId],
+      );
+      if (!target) {
+        throw Object.assign(new Error('reversal target not found'), { code: 'ledger_not_found' });
+      }
+      direction = toStr(target.direction) === 'credit' ? 'debit' : 'credit';
+    } else {
+      direction = ['receipt', 'interest'].includes(input.entryType) ? 'credit' : 'debit';
+    }
+
+    const id = newId();
+    const now = new Date().toISOString();
+    await this.q().run(
+      `insert into ledger_entries
+         (id, tenant_id, ledger_id, client_id, entry_type, direction, amount, currency,
+          invoice_id, matter_id, description, reference, evidence_document_id,
+          reverses_entry_id, reversal_reason, entry_at, recorded_by_user_id, recorded_at)
+       values (?, ?, ?, ?, ?, ?, ?, 'SAR', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id, input.tenantId, ledgerId, input.clientId, input.entryType, direction,
+        round2(input.amount), input.invoiceId ?? null, input.matterId ?? null,
+        input.description, input.reference ?? null, input.evidenceDocumentId ?? null,
+        input.reversesEntryId ?? null, input.reversalReason ?? null,
+        input.entryAt ?? now, input.recordedByUserId ?? null, now,
+      ],
+    );
+    /*
+      AN APPLICATION MOVES THE INVOICE'S PAID FIGURE, and nothing else on this side does.
+
+      The ledger holds the money; the invoice holds what it has been paid. When the two
+      disagree the client is shown a balance the firm's own records do not support, and
+      the database's cap on an application — `total - amount_paid` — silently becomes
+      wrong, which would let the same money be applied twice.
+
+      `client_status` is derived here in the same form the client-facing payment path
+      writes it, because the database guard compares the column against
+      `derive_invoice_client_status` and refuses a write that disagrees with it.
+    */
+    if (input.entryType === 'application_to_fee' && input.invoiceId) {
+      await this.applyMoneyToInvoice(input.tenantId, input.invoiceId, round2(input.amount));
+    }
+
+    return id;
+  }
+
+  /**
+   * Add money already held for a client to one of that client's invoices.
+   *
+   * Private and deliberately narrow: called only from `recordLedgerEntry`, after the
+   * ledger row exists, so an invoice can never show money that no entry accounts for.
+   * The database caps the application as well; this is the bookkeeping half of the
+   * same decision.
+   */
+  private async applyMoneyToInvoice(tenantId: string, invoiceId: string, amount: number): Promise<void> {
+    const now = new Date().toISOString();
+    await this.q().run(
+      `update invoices
+          set amount_paid = round(coalesce(amount_paid, 0) + ?, 2),
+              internal_status = case
+                when round(coalesce(amount_paid, 0) + ?, 2) >= total - 0.001 and total > 0 then 'paid'
+                else 'partially_paid' end,
+              client_status = case
+                when round(coalesce(amount_paid, 0) + ?, 2) >= total - 0.001 and total > 0 then 'paid'
+                else 'partially_paid' end,
+              updated_at = ?
+        where id = ? and tenant_id = ? and invoice_uuid is not null`,
+      [amount, amount, amount, now, invoiceId, tenantId],
+    );
+  }
+
+  /**
+   * The balance, summed from the entries.
+   *
+   * `asOf` is not a convenience. The question asked in a review is almost never
+   * "what is the balance now" but "what was it on the date of the payment we are
+   * arguing about", and a balance function that can only answer the first question
+   * cannot answer the one that matters.
+   */
+  async ledgerBalance(ledgerId: string, asOf?: string | null): Promise<number> {
+    const r = await this.q().get<Row>(
+      `select coalesce(sum(case when direction = 'credit' then amount else -amount end), 0) as balance
+         from ledger_entries
+        where ledger_id = ? and (? is null or entry_at <= ?)`,
+      [ledgerId, asOf ?? null, asOf ?? null],
+    );
+    return round2(toNumber(r?.balance));
+  }
+
+  async listReconciliations(tenantId: string) {
+    return this.q().all<Row>(
+      `select id, currency, as_of, ledger_total, bank_balance, difference,
+              bank_statement_reference, clients_with_balance, status, notes,
+              performed_at, created_at
+         from ledger_reconciliations where tenant_id = ? order by as_of desc`,
+      [tenantId],
+    );
+  }
+
+  /**
+   * Record a reconciliation.
+   *
+   * The DIFFERENCE IS COMPUTED HERE, not accepted from the caller, and the status is
+   * derived from it — `balanced` only when the difference is nil, and an explanation
+   * required otherwise. A reconciliation endpoint that took `difference` as an input
+   * would let a caller post a balancing figure, which is precisely the act the whole
+   * control exists to prevent.
+   */
+  async createReconciliation(input: {
+    tenantId: string; asOf: string; ledgerTotal: number; bankBalance: number;
+    bankStatementReference?: string | null; bankStatementDocumentId?: string | null;
+    clientsWithBalance: number; status: string; notes?: string | null;
+    performedByUserId?: string | null;
+  }): Promise<string> {
+    const difference = round2(input.ledgerTotal - input.bankBalance);
+    const status = Math.abs(difference) < 0.01 ? 'balanced' : (input.status === 'balanced' ? 'difference' : input.status);
+    const id = newId();
+    const now = new Date().toISOString();
+    await this.q().run(
+      `insert into ledger_reconciliations
+         (id, tenant_id, currency, as_of, ledger_total, bank_balance, difference,
+          bank_statement_reference, bank_statement_document_id, clients_with_balance,
+          status, notes, performed_by_user_id, performed_at, created_at)
+       values (?, ?, 'SAR', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id, input.tenantId, input.asOf, round2(input.ledgerTotal), round2(input.bankBalance),
+        difference, input.bankStatementReference ?? null, input.bankStatementDocumentId ?? null,
+        input.clientsWithBalance, status, input.notes ?? null,
+        input.performedByUserId ?? null, now, now,
+      ],
+    );
+    return id;
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+   * P1.2 · P1.4 · WHAT A FEE RESTS ON
+   * ══════════════════════════════════════════════════════════════════════════ */
+
+  async engagementForMatter(tenantId: string, matterId: string) {
+    return this.q().get<Row>(
+      `select id, matter_id, client_id, scope, scope_ar, fee_amount_sar, calculation_method,
+              signed_by_client_at, signed_by_client_name, document_id, identity_verified_at,
+              capacity_verified, status, created_at
+         from engagement_letters
+        where tenant_id = ? and matter_id = ? and status = 'signed' and superseded_by is null
+        order by signed_by_client_at desc limit 1`,
+      [tenantId, matterId],
+    );
+  }
+
+  async listEngagementLetters(tenantId: string, matterId: string) {
+    return this.q().all<Row>(
+      `select id, scope, scope_ar, fee_amount_sar, calculation_method, signed_by_client_at,
+              signed_by_client_name, document_id, identity_verified_at, capacity_verified,
+              status, superseded_by, created_at
+         from engagement_letters where tenant_id = ? and matter_id = ? order by created_at desc`,
+      [tenantId, matterId],
+    );
+  }
+
+  async upsertEngagementLetter(input: {
+    tenantId: string; matterId: string; clientId: string; scope: string;
+    scopeAr?: string | null; feeAmountSar?: number | null; calculationMethod: string;
+    status: string; createdByUserId?: string | null;
+  }): Promise<string> {
+    const id = newId();
+    const now = new Date().toISOString();
+    await this.q().run(
+      `insert into engagement_letters
+         (id, tenant_id, matter_id, client_id, scope, scope_ar, fee_amount_sar,
+          calculation_method, signed_by_client_at, signed_by_client_name, document_id,
+          identity_verified_at, capacity_verified, status, superseded_by,
+          created_by_user_id, created_at)
+       values (?, ?, ?, ?, ?, ?, ?, ?, null, null, null, null, ?, ?, null, ?, ?)`,
+      [
+        id, input.tenantId, input.matterId, input.clientId, input.scope, input.scopeAr ?? null,
+        input.feeAmountSar ?? null, input.calculationMethod,
+        false, input.status, input.createdByUserId ?? null, now,
+      ],
+    );
+    return id;
+  }
+
+  /**
+   * Sign it, which is the moment the matter becomes billable.
+   *
+   * The three things Rule 11 asks to be established BEFORE the work is accepted go
+   * in the same statement as the signature: identity, capacity, and — indirectly —
+   * conflict, because `matters.conflict_cleared` is already derived from the check
+   * ledger by P0.1 and this does not invent a second answer to that question.
+   *
+   * `document_id` is required by a CHECK when the status is 'signed'. That is
+   * deliberate: a signature with no document behind it is an assertion, and the
+   * whole point of the engagement gate is that it rests on a writing.
+   */
+  async signEngagementLetter(input: {
+    tenantId: string; letterId: string; signedByName: string; documentId: string;
+    identityVerifiedAt: string; capacityVerified: boolean;
+  }): Promise<number> {
+    const r = await this.q().run(
+      `update engagement_letters
+          set status = 'signed', signed_by_client_at = ?, signed_by_client_name = ?,
+              document_id = ?, identity_verified_at = ?, capacity_verified = ?
+        where id = ? and tenant_id = ? and status <> 'signed' and superseded_by is null`,
+      [
+        new Date().toISOString(), input.signedByName, input.documentId,
+        input.identityVerifiedAt, input.capacityVerified, input.letterId, input.tenantId,
+      ],
+    );
+    return r.changes;
+  }
+
+  async billingTermsForMatter(tenantId: string, matterId: string) {
+    return this.q().get<Row>(
+      `select id, matter_id, basis, fee_amount_sar, cap_amount_sar, retainer_amount_sar,
+              stages, agreed_discount_pct, vat_applicable, effective_from, effective_to,
+              superseded_by, notes, created_at
+         from matter_billing_terms
+        where tenant_id = ? and matter_id = ? and superseded_by is null
+        order by effective_from desc limit 1`,
+      [tenantId, matterId],
+    );
+  }
+
+  /**
+   * Set the basis. A CHANGE SUPERSEDES rather than edits.
+   *
+   * An hour recorded in March was recorded against March's terms. If the fee basis
+   * is edited in June, the March hour becomes unexplainable — so a renegotiation
+   * writes a new row with a new effective date and retires the old one. That is also
+   * what makes "which terms applied on this date" answerable at all.
+   */
+  async setBillingTerms(input: {
+    tenantId: string; matterId: string; basis: string; feeAmountSar?: number | null;
+    capAmountSar?: number | null; retainerAmountSar?: number | null; stages?: string | null;
+    agreedDiscountPct: number; effectiveFrom: string; notes?: string | null;
+    createdByUserId?: string | null;
+  }): Promise<string> {
+    const id = newId();
+    const now = new Date().toISOString();
+    await this.q().run(
+      `update matter_billing_terms set superseded_by = ?
+        where tenant_id = ? and matter_id = ? and superseded_by is null`,
+      [id, input.tenantId, input.matterId],
+    );
+    await this.q().run(
+      `insert into matter_billing_terms
+         (id, tenant_id, matter_id, basis, fee_amount_sar, cap_amount_sar, retainer_amount_sar,
+          stages, agreed_discount_pct, vat_applicable, effective_from, effective_to,
+          superseded_by, notes, created_by_user_id, created_at)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null, null, ?, ?, ?)`,
+      [
+        id, input.tenantId, input.matterId, input.basis, input.feeAmountSar ?? null,
+        input.capAmountSar ?? null, input.retainerAmountSar ?? null, input.stages ?? null,
+        round2(input.agreedDiscountPct), true, input.effectiveFrom, input.notes ?? null,
+        input.createdByUserId ?? null, now,
+      ],
+    );
+    return id;
+  }
+
+  /** The same question the trigger asks, asked early so a screen can answer it. */
+  async matterBillable(matterId: string): Promise<boolean> {
+    const r = await this.q().get<Row>(
+      `select
+         (select count(*) from engagement_letters
+           where matter_id = ? and status = 'signed' and superseded_by is null) as letters,
+         (select count(*) from matter_billing_terms
+           where matter_id = ? and superseded_by is null
+             and effective_from <= ? and (effective_to is null or effective_to >= ?)) as terms`,
+      [matterId, matterId, today(), today()],
+    );
+    return toNumber(r?.letters) > 0 && toNumber(r?.terms) > 0;
+  }
+
+  async listRateCards(tenantId: string) {
+    return this.q().all<Row>(
+      `select id, level, staff_id, practice_area, hourly_rate_sar, effective_from,
+              effective_to, created_at
+         from rate_cards where tenant_id = ? order by effective_from desc, level`,
+      [tenantId],
+    );
+  }
+
+  async createRateCard(input: {
+    tenantId: string; level: string | null; staffId: string | null;
+    hourlyRateSar: number; effectiveFrom: string; createdByUserId?: string | null;
+  }): Promise<string> {
+    const id = newId();
+    await this.q().run(
+      `insert into rate_cards
+         (id, tenant_id, level, staff_id, practice_area, hourly_rate_sar,
+          effective_from, effective_to, created_by_user_id, created_at)
+       values (?, ?, ?, ?, null, ?, ?, null, ?, ?)`,
+      [
+        id, input.tenantId, input.level, input.staffId, round2(input.hourlyRateSar),
+        input.effectiveFrom, input.createdByUserId ?? null, new Date().toISOString(),
+      ],
+    );
+    return id;
+  }
+
+  /**
+   * What this member's hour is worth, on the date it was worked.
+   *
+   * A staff-specific card beats a level card, and the most recent effective date
+   * wins among equals. Returns null when nothing matches, which the caller must
+   * treat as READY TO RECORD AT ZERO and never as "use the last known rate": an hour
+   * billed at a rate somebody guessed is worse than an hour that needs a rate card
+   * entering before it can be billed.
+   */
+  async rateFor(staffId: string, onDate: string): Promise<number | null> {
+    const r = await this.q().get<Row>(
+      `select hourly_rate_sar from rate_cards
+        where staff_id = ?
+          and effective_from <= ? and (effective_to is null or effective_to >= ?)
+        order by effective_from desc limit 1`,
+      [staffId, onDate, onDate],
+    );
+    if (r) return toNumber(r.hourly_rate_sar);
+
+    const fallback = await this.q().get<Row>(
+      `select rc.hourly_rate_sar
+         from rate_cards rc
+         join staff s on s.tenant_id = rc.tenant_id
+        where s.id = ? and rc.staff_id is null and rc.level is not null
+          and rc.effective_from <= ? and (rc.effective_to is null or rc.effective_to >= ?)
+        order by rc.effective_from desc limit 1`,
+      [staffId, onDate, onDate],
+    );
+    return fallback ? toNumber(fallback.hourly_rate_sar) : null;
+  }
+
+  async listTimeEntries(tenantId: string, opts: { matterId?: string | null; limit?: number } = {}) {
+    const limit = Math.min(Math.max(opts.limit ?? 200, 1), 500);
+    const where = ['t.tenant_id = ?'];
+    const params: Param[] = [tenantId];
+    if (opts.matterId) {
+      where.push('t.matter_id = ?');
+      params.push(opts.matterId);
+    }
+    return this.q().all<Row>(
+      `select t.id, t.matter_id, t.staff_id, t.entry_date, t.minutes, t.narrative,
+              t.narrative_ar, t.billable, t.hourly_rate_sar, t.amount_sar, t.invoice_id,
+              t.status, t.approved_by_user_id, t.approved_at, t.written_off_reason,
+              t.created_at, t.updated_at,
+              s.full_name as staff_name, s.full_name_ar as staff_name_ar,
+              m.matter_number, m.title as matter_title
+         from time_entries t
+         join staff s on s.id = t.staff_id
+         join matters m on m.id = t.matter_id
+        where ${where.join(' and ')}
+        order by t.entry_date desc, t.created_at desc
+        limit ${limit}`,
+      params,
+    );
+  }
+
+  /**
+   * Record an hour.
+   *
+   * `amountSar` is computed here from minutes × rate, never taken from the caller:
+   * a client's fee is the product of a recorded duration and a recorded rate, and a
+   * caller that could supply a third number could bill anything.
+   */
+  async recordTimeEntry(input: TimeEntryInput): Promise<string> {
+    /*
+      A non-billable hour is stored at zero, RATE INCLUDED. Storing the rate it would
+      have had leaves a number on the row that a later reader will price the hour by —
+      and "not billable" is a decision already taken, not a discount waiting to be
+      reversed.
+    */
+    const rate = input.billable ? round2(input.hourlyRateSar) : 0;
+    const amount = input.billable ? round2((input.minutes / 60) * rate) : 0;
+    const id = newId();
+    const now = new Date().toISOString();
+    await this.q().run(
+      `insert into time_entries
+         (id, tenant_id, matter_id, staff_id, entry_date, minutes, narrative, narrative_ar,
+          billable, hourly_rate_sar, amount_sar, invoice_id, status,
+          approved_by_user_id, approved_at, written_off_reason, created_at, updated_at)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null, ?, ?, ?, null, ?, ?)`,
+      [
+        id, input.tenantId, input.matterId, input.staffId, input.entryDate, input.minutes,
+        input.narrative, input.narrativeAr ?? null, input.billable, rate,
+        amount,
+        // A non-billable hour is never 'draft': it is finished when it is written,
+        // because there is no invoice waiting for it.
+        input.billable ? 'submitted' : 'non_billable',
+        input.approvedByUserId ?? null, null, now, now,
+      ],
+    );
+    return id;
+  }
+
+  /**
+   * Adjust an hour: approve it, change it, or write it off.
+   *
+   * WHAT AN ADJUSTMENT CANNOT DO is un-bill an entry that is on an issued invoice —
+   * `guard_billed_entry_immutable` refuses that on both engines, and it is refused
+   * because the invoice is a tax document whose own lines would then be wrong.
+   * Corrections after issue go through a credit note.
+   */
+  async adjustTimeEntry(input: {
+    tenantId: string; entryId: string; status?: string | null; minutes?: number | null;
+    narrative?: string | null; writtenOffReason?: string | null; approvedByUserId?: string | null;
+  }): Promise<number> {
+    const now = new Date().toISOString();
+    const sets: string[] = ['updated_at = ?'];
+    const params: Param[] = [now];
+
+    if (input.status) {
+      sets.push('status = ?');
+      params.push(input.status);
+      if (input.status === 'approved') {
+        sets.push('approved_by_user_id = ?', 'approved_at = ?');
+        params.push(input.approvedByUserId ?? null, now);
+      }
+      if (input.status === 'written_off') {
+        sets.push('written_off_reason = ?');
+        params.push(input.writtenOffReason ?? null);
+      }
+    }
+    if (input.minutes !== null && input.minutes !== undefined) {
+      /*
+        Changing the duration changes the money, so the amount is recomputed from the
+        ROW's own stored rate in the same statement. Taking a rate from the caller
+        here would let an adjustment restate an hour at a rate the member never had.
+      */
+      sets.push('minutes = ?', 'amount_sar = round((? / 60.0) * hourly_rate_sar, 2)');
+      params.push(input.minutes, input.minutes);
+    }
+    if (input.narrative) {
+      sets.push('narrative = ?');
+      params.push(input.narrative);
+    }
+
+    params.push(input.entryId, input.tenantId);
+    const r = await this.q().run(
+      `update time_entries set ${sets.join(', ')} where id = ? and tenant_id = ?`,
+      params,
+    );
+    return r.changes;
+  }
+
+  async listExpenses(tenantId: string, opts: { matterId?: string | null; limit?: number } = {}) {
+    const limit = Math.min(Math.max(opts.limit ?? 200, 1), 500);
+    const where = ['e.tenant_id = ?'];
+    const params: Param[] = [tenantId];
+    if (opts.matterId) {
+      where.push('e.matter_id = ?');
+      params.push(opts.matterId);
+    }
+    return this.q().all<Row>(
+      `select e.id, e.matter_id, e.client_id, e.submitted_by_staff, e.incurred_on, e.category,
+              e.description, e.description_ar, e.net_amount_sar, e.vat_amount_sar,
+              e.total_amount_sar, e.vat_category, e.receipt_document_id, e.reimbursable,
+              e.invoice_id, e.status, e.approved_by_user_id, e.approved_at, e.rejection_reason,
+              e.created_at, e.updated_at,
+              s.full_name as staff_name, m.matter_number, m.title as matter_title
+         from expenses e
+         join staff s on s.id = e.submitted_by_staff
+         join matters m on m.id = e.matter_id
+        where ${where.join(' and ')}
+        order by e.incurred_on desc, e.created_at desc
+        limit ${limit}`,
+      params,
+    );
+  }
+
+  async recordExpense(input: ExpenseInput): Promise<string> {
+    const id = newId();
+    const now = new Date().toISOString();
+    await this.q().run(
+      `insert into expenses
+         (id, tenant_id, matter_id, client_id, submitted_by_staff, incurred_on, category,
+          description, description_ar, net_amount_sar, vat_amount_sar, total_amount_sar,
+          vat_category, receipt_document_id, reimbursable, invoice_id, status,
+          approved_by_user_id, approved_at, rejection_reason, created_at, updated_at)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null, 'submitted',
+               null, null, null, ?, ?)`,
+      [
+        id, input.tenantId, input.matterId, input.clientId, input.submittedByStaff,
+        input.incurredOn, input.category, input.description, input.descriptionAr ?? null,
+        round2(input.netAmountSar), round2(input.vatAmountSar), round2(input.totalAmountSar),
+        input.vatCategory, input.receiptDocumentId ?? null, input.reimbursable, now, now,
+      ],
+    );
+    return id;
+  }
+
+  async decideExpense(input: {
+    tenantId: string; expenseId: string; decision: 'approved' | 'rejected';
+    approvedByUserId: string; rejectionReason?: string | null;
+  }): Promise<number> {
+    const now = new Date().toISOString();
+    const r = await this.q().run(
+      `update expenses
+          set status = ?, approved_by_user_id = ?, approved_at = ?, rejection_reason = ?,
+              updated_at = ?
+        where id = ? and tenant_id = ? and status = 'submitted'`,
+      [
+        input.decision, input.approvedByUserId, now,
+        input.decision === 'rejected' ? (input.rejectionReason ?? null) : null,
+        now, input.expenseId, input.tenantId,
+      ],
+    );
+    return r.changes;
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+   * P1.3 · THE TWO CEILINGS THAT HAD NO GUARD
+   * ══════════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Reduce an invoice's subtotal by a discount.
+   *
+   * THREE THINGS HAPPEN, AND THE ORDER MATTERS. The permission is checked by the
+   * route (it is the route that knows the principal); the CEILING is checked by the
+   * route through `assertWithinAuthority`; and the DATABASE checks it again through
+   * `guard_invoice_discount_ceiling`, which reads the member id from a session GUC.
+   *
+   * That third check is why the GUC is set before this statement runs: on PostgreSQL
+   * a discount that did not come through a member's authority is refused at the
+   * table, and the refusal names the member. This method does not attempt the
+   * discount without one — it REQUIRES the membership id, so there is no path here
+   * that produces a `ceiling_actor_unknown` at the database.
+   *
+   * Only the subtotal moves: `vat_amount` and `total` are recomputed from it in the
+   * same statement, because a discount that left the VAT as it was would reduce the
+   * fee and leave the tax on the old figure.
+   */
+  async applyDiscount(input: {
+    tenantId: string; invoiceId: string; newSubtotal: number;
+    membershipId: string; discountPct: number;
+  }): Promise<number> {
+    const now = new Date().toISOString();
+    const r = await this.q().run(
+      `update invoices
+          set subtotal = ?,
+              vat_amount = round(? * vat_rate, 2),
+              total = round(? + round(? * vat_rate, 2), 2),
+              updated_at = ?
+        where id = ? and tenant_id = ?
+          and internal_status in ('draft','pending_internal_approval')
+          and invoice_uuid is null`,
+      [
+        round2(input.newSubtotal), round2(input.newSubtotal), round2(input.newSubtotal),
+        round2(input.newSubtotal), now, input.invoiceId, input.tenantId,
+      ],
+    );
+    return r.changes;
+  }
+
+  /**
+   * Abandon a claim on a client.
+   *
+   * A write-off does not change what was billed — the invoice stands, and the tax on
+   * it stands with it — it records that the firm has stopped pursuing the balance.
+   * So the only thing that moves is the status, and the amount approved is the
+   * OUTSTANDING figure rather than the invoice total, for the same reason invoice
+   * approval uses the outstanding: a member with a 5,000 write-off ceiling must not
+   * be able to abandon a 40,000 balance on an invoice that happens to be for 40,000.
+   */
+  async writeOffInvoice(input: {
+    tenantId: string; invoiceId: string; amountSar: number; reason: string;
+    approvedByStaff: string;
+  }): Promise<number> {
+    const now = new Date().toISOString();
+    const r = await this.q().run(
+      `update invoices
+          set internal_status = 'written_off',
+              client_status = 'cancelled',
+              notes_internal = coalesce(notes_internal || ' | ', '') || ?,
+              updated_at = ?
+        where id = ? and tenant_id = ?
+          and internal_status in ('sent','partially_paid','overdue')`,
+      [`WRITE-OFF ${round2(input.amountSar).toFixed(2)} SAR by ${input.approvedByStaff}: ${input.reason}`,
+        now, input.invoiceId, input.tenantId],
+    );
+    return r.changes;
+  }
 }
 
 // ============================================================================
@@ -2250,6 +3375,11 @@ function toAuditEvent(r: Row) {
     // but it is not a licence to deanonymize request metadata in bulk.
     metadata,
   };
+}
+
+/** Today, as a DATE — the same value `current_date` resolves to in the trigger. */
+function today(): string {
+  return new Date().toISOString().slice(0, 10);
 }
 
 /** Money comparisons happen on the rounded cent; see PermissionEngine. */
@@ -2411,4 +3541,94 @@ export function clientRelationshipEndedOn(input: {
   // window is treated as open — the conservative direction, and the reason this
   // returns null rather than a guessed date.
   return null;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * P0.2 · P1 — THE FISCAL DOCUMENT, CLIENT MONEY, AND WHAT A FEE RESTS ON
+ *
+ * These methods are `firm_repo.prototype` additions rather than a second class,
+ * because they share the query scope (`this.q()`), the column coercion helpers and
+ * the tenant discipline of everything above. What they do NOT share is a table:
+ * every statement below names one of the twelve tables 0034–0036 created.
+ *
+ * THE RULE EVERY METHOD HERE FOLLOWS, AND WHY IT IS STATED ONCE AT THE TOP
+ *
+ *   The database is the authority on legality and this layer is the authority on
+ *   bookkeeping. A fiscal issue is refused by `guard_invoice_fiscal_issue` whether or
+ *   not this code checks anything — what the code adds is the CHAIN: allocating the
+ *   ICV, building the QR, hashing the XML and writing the three of them in one
+ *   statement. If this layer and the database disagree, the database wins and the
+ *   caller gets a refusal with the database's own message, which is deliberate: the
+ *   messages are written to be read by the person at the desk.
+ * ══════════════════════════════════════════════════════════════════════════════ */
+
+/** Columns the fiscal identity list returns. Named, never `select *`. */
+const FISCAL_IDENTITY_COLUMNS =
+  `id, tenant_id, registered_name, registered_name_ar, vat_registration_number,
+   commercial_registration, registered_address, registered_address_ar, city,
+   postal_code, country, environment, onboarding_status, certificate_expires_at,
+   superseded_by, created_at, updated_at`;
+
+export interface FiscalIdentityInput {
+  tenantId: string;
+  registeredName: string;
+  registeredNameAr?: string | null;
+  vatRegistrationNumber: string;
+  commercialRegistration: string;
+  registeredAddress: string;
+  registeredAddressAr?: string | null;
+  city?: string | null;
+  postalCode?: string | null;
+  country?: string;
+  environment: 'sandbox' | 'simulation' | 'production';
+  onboardingStatus: 'not_started' | 'csr_generated' | 'compliance_csid'
+    | 'compliance_passed' | 'production_csid' | 'failed';
+  certificateExpiresAt?: string | null;
+}
+
+export interface LedgerEntryInput {
+  tenantId: string;
+  clientId: string;
+  entryType: 'receipt' | 'application_to_fee' | 'disbursement' | 'refund' | 'bank_charge'
+    | 'interest' | 'reversal';
+  amount: number;
+  description: string;
+  reference?: string | null;
+  matterId?: string | null;
+  invoiceId?: string | null;
+  evidenceDocumentId?: string | null;
+  reversesEntryId?: string | null;
+  reversalReason?: string | null;
+  entryAt?: string;
+  recordedByUserId?: string | null;
+}
+
+export interface TimeEntryInput {
+  tenantId: string;
+  matterId: string;
+  staffId: string;
+  entryDate: string;
+  minutes: number;
+  narrative: string;
+  narrativeAr?: string | null;
+  billable: boolean;
+  hourlyRateSar: number;
+  approvedByUserId?: string | null;
+}
+
+export interface ExpenseInput {
+  tenantId: string;
+  matterId: string;
+  clientId: string;
+  submittedByStaff: string;
+  incurredOn: string;
+  category: string;
+  description: string;
+  descriptionAr?: string | null;
+  netAmountSar: number;
+  vatAmountSar: number;
+  totalAmountSar: number;
+  vatCategory: string;
+  receiptDocumentId?: string | null;
+  reimbursable: boolean;
 }

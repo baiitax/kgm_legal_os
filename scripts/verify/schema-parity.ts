@@ -46,6 +46,40 @@ const ADMIN = (() => {
  * it is the statement the server actually issues. Keeping the two in one place
  * means adding a column to an INSERT forces a decision here.
  */
+/**
+ * Tables whose migration is WRITTEN but not yet applied to the database being checked.
+ *
+ * A gate that is permanently red is a gate nobody reads, and this one cannot go green
+ * until 0034–0037 are applied upstream — so the un-applied tables are reported as
+ * PENDING, by name, and excluded from the divergence count. The list is emptied by
+ * applying the migrations, never by editing it: the moment a migration lands, the
+ * tables it creates drop out of this map and their grants start being checked for real.
+ */
+const PENDING_MIGRATIONS: Record<string, string> = {
+  fiscal_identity: '0034', fiscal_devices: '0034', invoice_submissions: '0034', credit_notes: '0034',
+  client_ledgers: '0035', ledger_entries: '0035', ledger_reconciliations: '0035',
+  rate_cards: '0036', matter_billing_terms: '0036', time_entries: '0036',
+  expenses: '0036', engagement_letters: '0036',
+};
+
+/**
+ * Grants that a written-but-unapplied migration will add on a table that already exists.
+ *
+ * `invoices` has been in the database since 0002, so the column test above cannot tell
+ * that these specific columns are about to become writable — the columns are old, only
+ * the privilege is new. Naming them here keeps the expectation explicit and the count
+ * honest, and the entries are meant to be DELETED once the migrations are applied: the
+ * check below reports any entry that has become unnecessary, so the map cannot quietly
+ * become a place where real findings are hidden.
+ */
+const PENDING_GRANTS: Record<string, string> = {
+  'invoices amount_paid': '0035',
+  'invoices subtotal': '0036',
+  'invoices vat_amount': '0036',
+  'invoices total': '0036',
+  'invoices notes_internal': '0036',
+};
+
 const SERVER_WRITES: Array<{
   table: string;
   command: 'INSERT' | 'UPDATE';
@@ -166,6 +200,176 @@ const SERVER_WRITES: Array<{
     columns: ['conflict_cleared', 'updated_at', 'internal_status'],
     readColumns: ['id', 'tenant_id'],
   },
+  // ── P0.2 · the fiscal chain ─────────────────────────────────────────────
+  // Forty-two repo methods and twelve routes were written before this list was. The
+  // list is the SPECIFICATION of what the grants must permit — the order it is written
+  // in matters less than that it exists before the migration is applied, which is now
+  // the case: 0034–0037 are written and waiting, so their grants are checked against
+  // these statements the moment they land rather than after a 500 in production.
+  {
+    table: 'fiscal_identity', command: 'INSERT', where: 'FirmRepo.upsertFiscalIdentity (first identity)',
+    columns: ['id', 'tenant_id', 'registered_name', 'registered_name_ar', 'vat_registration_number',
+      'commercial_registration', 'registered_address', 'registered_address_ar', 'city', 'postal_code',
+      'country', 'environment', 'onboarding_status', 'certificate_expires_at', 'superseded_by',
+      'created_at', 'updated_at'],
+  },
+  {
+    // Superseding an identity writes ONE column on the old row: the pointer to its
+    // successor. Nothing about a registered identity is ever rewritten in place, because
+    // the documents already issued under it name the numbers it held.
+    table: 'fiscal_identity', command: 'UPDATE', where: 'FirmRepo.upsertFiscalIdentity (supersede)',
+    columns: ['superseded_by', 'updated_at'], readColumns: ['id', 'tenant_id'],
+  },
+  {
+    table: 'fiscal_devices', command: 'INSERT', where: 'FirmRepo.createFiscalDevice',
+    columns: ['id', 'tenant_id', 'fiscal_identity_id', 'device_label', 'device_serial',
+      'invoice_counter_value', 'last_invoice_hash', 'is_active', 'created_at', 'updated_at'],
+  },
+  {
+    // The counter is taken in a single `update … returning`, and `is_active` is in the
+    // WHERE clause: an inactive device is refused by the database, not by the caller.
+    table: 'fiscal_devices', command: 'UPDATE', where: 'FirmRepo.allocateFiscalNumber',
+    columns: ['invoice_counter_value', 'updated_at'], readColumns: ['id', 'is_active'],
+  },
+  {
+    table: 'fiscal_devices', command: 'UPDATE', where: 'FirmRepo.recordInvoiceIssue / createCreditNote (chain head)',
+    columns: ['last_invoice_hash', 'updated_at'], readColumns: ['id'],
+  },
+  {
+    // The issue itself. Every frozen field of the document is written here and nowhere
+    // else, and the WHERE clause requires `invoice_uuid is null` so a second issue
+    // cannot take the number twice.
+    table: 'invoices', command: 'UPDATE', where: 'FirmRepo.recordInvoiceIssue',
+    columns: ['invoice_uuid', 'invoice_type', 'icv', 'previous_invoice_hash', 'invoice_hash',
+      'qr_payload', 'xml_storage_key', 'supply_at', 'buyer_name', 'buyer_vat_number',
+      'fiscal_device_id', 'invoice_number', 'fiscal_status', 'fiscal_status_at', 'updated_at'],
+    readColumns: ['id', 'tenant_id', 'invoice_uuid'],
+  },
+  {
+    table: 'invoices', command: 'UPDATE', where: 'FirmRepo.setFiscalStatus (reporting / clearance outcome)',
+    columns: ['fiscal_status', 'fiscal_status_at', 'updated_at'], readColumns: ['id', 'tenant_id'],
+  },
+  {
+    table: 'invoice_submissions', command: 'INSERT', where: 'FirmRepo.recordSubmission',
+    columns: ['id', 'tenant_id', 'invoice_id', 'submission_type', 'attempt', 'status', 'http_status',
+      'response_code', 'request_body_hash', 'response_body', 'warnings', 'errors', 'next_retry_at',
+      'submitted_at', 'resolved_at', 'created_at'],
+  },
+  {
+    table: 'credit_notes', command: 'INSERT', where: 'FirmRepo.createCreditNote',
+    columns: ['id', 'tenant_id', 'invoice_id', 'client_id', 'credit_number', 'reason', 'amount',
+      'vat_amount', 'total', 'currency', 'fiscal_device_id', 'invoice_uuid', 'icv',
+      'previous_invoice_hash', 'invoice_hash', 'qr_payload', 'xml_storage_key', 'fiscal_status',
+      'issued_by_staff', 'issued_at', 'created_at'],
+  },
+
+  // ── P1 · client money ───────────────────────────────────────────────────
+  {
+    table: 'client_ledgers', command: 'INSERT', where: 'FirmRepo.ensureClientLedger',
+    columns: ['id', 'tenant_id', 'client_id', 'currency', 'status', 'frozen_reason', 'opened_at',
+      'closed_at', 'created_at', 'updated_at'],
+  },
+  {
+    // Append-only: INSERT and never UPDATE or DELETE. The grants must not include
+    // the UPDATE privilege at all, which is the half of this list a checker would
+    // otherwise never look for.
+    table: 'ledger_entries', command: 'INSERT', where: 'FirmRepo.recordLedgerEntry (receipt, application, refund, reversal)',
+    columns: ['id', 'tenant_id', 'ledger_id', 'client_id', 'entry_type', 'direction', 'amount',
+      'currency', 'invoice_id', 'matter_id', 'description', 'reference', 'evidence_document_id',
+      'reverses_entry_id', 'reversal_reason', 'entry_at', 'recorded_by_user_id', 'recorded_at'],
+  },
+  {
+    // An application moves the invoice's own paid figure, in the same request that
+    // records the entry: the invoice may never show money no entry accounts for, and
+    // the database's cap on the next application reads this column.
+    table: 'invoices', command: 'UPDATE', where: 'FirmRepo.applyMoneyToInvoice (application to a fee)',
+    columns: ['amount_paid', 'internal_status', 'client_status', 'updated_at'],
+    readColumns: ['id', 'tenant_id', 'amount_paid', 'total'],
+  },
+  {
+    table: 'ledger_reconciliations', command: 'INSERT', where: 'FirmRepo.createReconciliation',
+    columns: ['id', 'tenant_id', 'currency', 'as_of', 'ledger_total', 'bank_balance', 'difference',
+      'bank_statement_reference', 'bank_statement_document_id', 'clients_with_balance', 'status',
+      'notes', 'performed_by_user_id', 'performed_at', 'created_at'],
+  },
+
+  // ── P1 · the basis for the fee, the hour and the disbursement ───────────
+  {
+    table: 'engagement_letters', command: 'INSERT', where: 'FirmRepo.upsertEngagementLetter',
+    columns: ['id', 'tenant_id', 'matter_id', 'client_id', 'scope', 'scope_ar', 'fee_amount_sar',
+      'calculation_method', 'signed_by_client_at', 'signed_by_client_name', 'document_id',
+      'identity_verified_at', 'capacity_verified', 'status', 'superseded_by', 'created_by_user_id',
+      'created_at'],
+  },
+  {
+    table: 'engagement_letters', command: 'UPDATE', where: 'FirmRepo.signEngagementLetter',
+    columns: ['status', 'signed_by_client_at', 'signed_by_client_name', 'document_id',
+      'identity_verified_at', 'capacity_verified'],
+    readColumns: ['id', 'tenant_id'],
+  },
+  {
+    table: 'matter_billing_terms', command: 'INSERT', where: 'FirmRepo.setBillingTerms (new basis)',
+    columns: ['id', 'tenant_id', 'matter_id', 'basis', 'fee_amount_sar', 'cap_amount_sar',
+      'retainer_amount_sar', 'stages', 'agreed_discount_pct', 'vat_applicable', 'effective_from',
+      'effective_to', 'superseded_by', 'notes', 'created_by_user_id', 'created_at'],
+  },
+  {
+    // Terms are superseded, never edited: the old basis has to remain answerable for
+    // the hours that were worked under it.
+    table: 'matter_billing_terms', command: 'UPDATE', where: 'FirmRepo.setBillingTerms (supersede the previous basis)',
+    columns: ['superseded_by'], readColumns: ['matter_id', 'tenant_id'],
+  },
+  {
+    table: 'rate_cards', command: 'INSERT', where: 'FirmRepo.createRateCard',
+    columns: ['id', 'tenant_id', 'level', 'staff_id', 'practice_area', 'hourly_rate_sar',
+      'effective_from', 'effective_to', 'created_by_user_id', 'created_at'],
+  },
+  {
+    table: 'time_entries', command: 'INSERT', where: 'FirmRepo.recordTimeEntry',
+    columns: ['id', 'tenant_id', 'matter_id', 'staff_id', 'entry_date', 'minutes', 'narrative',
+      'narrative_ar', 'billable', 'hourly_rate_sar', 'amount_sar', 'invoice_id', 'status',
+      'approved_by_user_id', 'approved_at', 'written_off_reason', 'created_at', 'updated_at'],
+  },
+  {
+    /*
+      The SET list is built at runtime, so this is the UNION of everything the method
+      can write. `hourly_rate_sar` is READ inside the amount expression
+      (`round((? / 60.0) * hourly_rate_sar, 2)`) — a column named in a statement needs
+      its privilege even when it is not the target of an assignment, which is the
+      distinction that produced the 0027/0028 defect.
+    */
+    table: 'time_entries', command: 'UPDATE', where: 'FirmRepo.adjustTimeEntry (union of optional sets)',
+    columns: ['updated_at', 'status', 'approved_by_user_id', 'approved_at', 'written_off_reason',
+      'minutes', 'amount_sar'],
+    readColumns: ['id', 'tenant_id', 'hourly_rate_sar'],
+  },
+  {
+    table: 'expenses', command: 'INSERT', where: 'FirmRepo.recordExpense',
+    columns: ['id', 'tenant_id', 'matter_id', 'client_id', 'submitted_by_staff', 'incurred_on',
+      'category', 'description', 'description_ar', 'net_amount_sar', 'vat_amount_sar',
+      'total_amount_sar', 'vat_category', 'receipt_document_id', 'reimbursable', 'invoice_id',
+      'status', 'approved_by_user_id', 'approved_at', 'rejection_reason', 'created_at', 'updated_at'],
+  },
+  {
+    table: 'expenses', command: 'UPDATE', where: 'FirmRepo.decideExpense',
+    columns: ['status', 'approved_by_user_id', 'approved_at', 'rejection_reason', 'updated_at'],
+    readColumns: ['id', 'status', 'tenant_id'],
+  },
+  {
+    // The two ceilings that had no guard before this phase. Both are ordinary UPDATEs on
+    // an issued invoice's money, which is exactly why their grants must be checked: the
+    // route is refused by a ceiling, but the STATEMENT that would follow the ceiling is
+    // the one that must not be able to run ungranted.
+    table: 'invoices', command: 'UPDATE', where: 'FirmRepo.applyDiscount (recomputed VAT and total)',
+    columns: ['subtotal', 'vat_amount', 'total', 'updated_at'],
+    readColumns: ['id', 'tenant_id', 'subtotal', 'vat_amount', 'total'],
+  },
+  {
+    table: 'invoices', command: 'UPDATE', where: 'FirmRepo.writeOffInvoice (outstanding balance abandoned)',
+    columns: ['internal_status', 'client_status', 'notes_internal', 'updated_at'],
+    readColumns: ['id', 'tenant_id', 'internal_status', 'amount_paid', 'total', 'due_date'],
+  },
+
 ];
 
 const NEW_TABLES = [
@@ -214,8 +418,15 @@ async function main(): Promise<void> {
   // ── 1 · tables ──────────────────────────────────────────────────────────
   console.log('TABLES');
   console.log(`  sqlite ${liteTables.size}   postgres ${pgTables.size}`);
+  const pendingTables: string[] = [];
   for (const t of liteTables) {
     if (!pgTables.has(t)) {
+      const migration = PENDING_MIGRATIONS[t];
+      if (migration) {
+        pendingTables.push(t);
+        console.log(`  PENDING ${migration}       : ${t}  (mirror written, migration not applied here)`);
+        continue;
+      }
       findings.push(`table ${t} exists in SQLite and not in PostgreSQL`);
       console.log(`  MISSING in postgres : ${t}`);
     }
@@ -250,7 +461,29 @@ async function main(): Promise<void> {
 
   // ── 3 · write privileges, measured against the server's own statements ──
   console.log('\nWRITE PRIVILEGES (firm_api, against what the server actually sends)');
+  let skipped = 0;
   for (const w of SERVER_WRITES) {
+    /*
+      A statement whose table — or whose COLUMN — is not in the live schema yet has no
+      grants to check, and reporting it as a failure would be reporting the migrations
+      as a defect. It is counted as PENDING instead, so that the number of unchecked
+      statements is visible on every run rather than assumed to be zero.
+
+      The column test matters as much as the table test: `invoices` has existed for
+      years, and the columns this phase adds to it arrive with 0034–0036. Without the
+      column test the gate would report "ungranted" for a privilege on a column the
+      database has never heard of, and a reader would learn to ignore the word.
+    */
+    const liveCols = pgCols.get(w.table);
+    const absent = liveCols
+      ? [...w.columns, ...(w.readColumns ?? [])].filter((col) => !liveCols.has(col))
+      : ['(the whole table)'];
+    if (absent.length > 0) {
+      skipped += 1;
+      console.log(`  PENDING ${PENDING_MIGRATIONS[w.table] ?? '0034–0037'}   ${w.table} ${w.command}  `
+        + `(${w.where}) — not in the live schema here: ${[...new Set(absent)].join(', ')}`);
+      continue;
+    }
     const grantee = w.grantee ?? 'firm_api';
     const granted = new Set(
       (await c.query(
@@ -273,18 +506,58 @@ async function main(): Promise<void> {
       It is the defect this file was written for — `eligibility_checks.evaluated_at`
       returned HTTP 500 in production while 346 tests passed.
     */
-    const ungranted = w.columns.filter((col) => !granted.has(col));
-    const unreadable = (w.readColumns ?? []).filter((col) => !selects.has(col));
-    const ok = ungranted.length === 0 && unreadable.length === 0;
-    if (!ok) findings.push(`${w.table} ${w.command}: server uses ungranted column(s) — ${[...ungranted, ...unreadable].join(', ')}`);
+    const missing = [...w.columns.filter((col) => !granted.has(col)),
+      ...(w.readColumns ?? []).filter((col) => !selects.has(col))];
+    const pendingHere = missing.filter((col) => PENDING_GRANTS[`${w.table} ${col}`]);
+    const ungranted = missing.filter((col) => !PENDING_GRANTS[`${w.table} ${col}`]);
+
+    /*
+      A column this phase GRANTS in a migration that is not applied yet is not a defect
+      — it is the plan. It is reported with the migration that will fix it, and counted,
+      so the difference between "checked and clean" and "not yet checkable" is visible.
+    */
+    if (ungranted.length === 0 && pendingHere.length > 0) {
+      skipped += 1;
+      const migrations = [...new Set(pendingHere.map((col) => PENDING_GRANTS[`${w.table} ${col}`]))];
+      console.log(`  PENDING ${migrations.join('/')}   ${w.table} ${w.command}  (${w.where}) — granted by `
+        + `${migrations.join(', ')} when applied: ${pendingHere.join(', ')}`);
+      continue;
+    }
+
+    const ok = ungranted.length === 0;
+    if (!ok) findings.push(`${w.table} ${w.command}: server uses ungranted column(s) — ${ungranted.join(', ')}`);
     console.log(`  ${ok ? 'OK    ' : 'FAIL  '} ${w.table} ${w.command}  (${w.where})`);
     if (ungranted.length) console.log(`         NOT GRANTED for ${w.command}: ${ungranted.join(', ')}`);
-    if (unreadable.length) console.log(`         NOT GRANTED for SELECT (WHERE clause): ${unreadable.join(', ')}`);
+    if (pendingHere.length) console.log(`         (granted by ${pendingHere.map((col) => PENDING_GRANTS[`${w.table} ${col}`]).join(', ')} when applied: ${pendingHere.join(', ')})`);
+  }
+
+  /*
+    An entry left in PENDING_GRANTS after its migration was applied is a rule that no
+    longer means anything — and a place where a real finding could hide. The check
+    reports the ones that have become unnecessary rather than silently ignoring them.
+  */
+  const stale: string[] = [];
+  for (const key of Object.keys(PENDING_GRANTS)) {
+    const [table, col] = key.split(' ');
+    const live = pgCols.get(table);
+    if (!live || !live.has(col)) continue;   // the migration is still not applied
+    const granted = await c.query(
+      `select 1 from information_schema.column_privileges
+        where table_schema='public' and table_name=$1 and grantee='firm_api'
+          and privilege_type='UPDATE' and column_name=$2`, [table, col]);
+    if (granted.rowCount && granted.rowCount > 0) stale.push(`${key} (${PENDING_GRANTS[key]} applied)`);
   }
 
   await c.end();
 
   console.log('');
+  if (stale.length > 0) {
+    console.log(`  note — PENDING_GRANTS entries whose migration appears applied; delete them: ${stale.join(', ')}`);
+  }
+  if (pendingTables.length > 0 || skipped > 0) {
+    console.log(`  ${skipped} statement grant check(s) pending an unapplied migration `
+      + `(${pendingTables.length} table(s) exist in the mirror only).`);
+  }
   if (findings.length) {
     console.log(`  ${findings.length} finding(s) — the dialects disagree:`);
     for (const f of findings) console.log(`    · ${f}`);

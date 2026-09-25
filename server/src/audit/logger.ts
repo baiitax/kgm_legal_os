@@ -18,7 +18,8 @@ import { ipHashFor, geoHint, parseUserAgent } from '../lib/http.js';
 
 export type AuditAction =
   | 'LOGIN' | 'LOGIN_FAILED' | 'LOGOUT' | 'LOGOUT_ALL_OTHERS' | 'SESSION_EXPIRED'
-  | 'SESSION_REVOKED' | 'ACCOUNT_LOCKED' | 'RATE_LIMITED'
+  | 'SESSION_REVOKED' | 'ACCOUNT_LOCKED' | 'RATE_CARD_RECORDED'
+  | 'RATE_LIMITED'
   | 'PASSWORD_RESET_REQUESTED' | 'PASSWORD_RESET_COMPLETED' | 'PASSWORD_CHANGED'
   | 'EMAIL_VERIFICATION_SENT' | 'EMAIL_VERIFIED'
   | 'INVITATION_CREATED' | 'INVITATION_ACCEPTED' | 'INVITATION_EXPIRED' | 'INVITATION_REVOKED'
@@ -82,7 +83,46 @@ export type AuditAction =
   | 'LICENCE_RECORDED' | 'LICENCE_STATUS_CHANGED' | 'LICENCE_VERIFIED'
   | 'PRIOR_OFFICE_RECORDED' | 'TENANT_RELATIONSHIP_DECLARED'
   | 'ELIGIBILITY_EVALUATED' | 'ELIGIBILITY_DENIED'
-  | 'MULTI_FIRM_AFFILIATION_DENIED';
+  | 'MULTI_FIRM_AFFILIATION_DENIED'
+  /*
+    ── 0034–0036 · the fiscal document, client money and the fee (P0.2, P1) ─────
+
+    The financial actions are split by the QUESTION a reviewer asks, not by the table
+    they touch. Four of them exist because a single "invoice" action could not answer
+    the questions that actually get asked after a tax dispute:
+
+      INVOICE_ISSUED      — this document entered the chain, and here is its hash.
+                            Without it the chain has links and no provenance.
+      INVOICE_SUBMITTED   — what we sent to ZATCA.
+      INVOICE_CLEARED     — what they said back, and therefore whether the buyer may
+                            claim the input VAT.
+      INVOICE_REJECTED    — a rejection is a different fact from a failure, and the
+                            two are triaged differently at 9am.
+
+    A rejection that is not recorded is how a firm discovers in an audit that it has
+    been issuing non-compliant documents for a month.
+
+    The trust actions are separate from the billing actions for the same reason the
+    ledger is a separate table: money held for a client and money owed by a client are
+    different obligations, and a log that conflates them cannot be used to answer
+    either. TRUST_DISCREPANCY_FOUND is written by the reconciliation, and it is the
+    row that makes an unexplained difference a recorded event rather than a figure in
+    a spreadsheet.
+
+    ENGAGEMENT_GATE_DENIED is the Rule 12 refusal. It is a denial like any other, but
+    it names the rule, and the pattern of them over a year tells a firm who is
+    recording billable time on files that have no contract.
+  */
+  | 'FISCAL_IDENTITY_RECORDED' | 'FISCAL_DEVICE_RECORDED'
+  | 'INVOICE_ISSUED' | 'INVOICE_SUBMITTED' | 'INVOICE_CLEARED' | 'INVOICE_REPORTED'
+  | 'INVOICE_REJECTED' | 'CREDIT_NOTE_ISSUED'
+  | 'TRUST_RECEIPT_RECORDED' | 'TRUST_APPLIED_TO_INVOICE' | 'TRUST_DISBURSEMENT_RECORDED'
+  | 'TRUST_REFUND_PAID' | 'TRUST_LEDGER_FROZEN' | 'TRUST_DISCREPANCY_FOUND'
+  | 'LEDGER_RECONCILED'
+  | 'TIME_ENTRY_RECORDED' | 'TIME_ENTRY_ADJUSTED' | 'TIME_WRITTEN_OFF'
+  | 'EXPENSE_RECORDED' | 'EXPENSE_APPROVED' | 'EXPENSE_REJECTED'
+  | 'BILLING_TERMS_SET' | 'ENGAGEMENT_LETTER_RECORDED' | 'ENGAGEMENT_LETTER_SIGNED'
+  | 'ENGAGEMENT_GATE_DENIED' | 'WRITE_OFF_APPROVED' | 'DISCOUNT_APPLIED';
 
 export interface AuditActor {
   /**

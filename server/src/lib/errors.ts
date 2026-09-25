@@ -62,6 +62,53 @@ export type ErrorCode =
    * wording of it.
    */
   | 'already_concluded'
+  /*
+    ── 0034–0036 · the fiscal document, client money and the fee ─────────────────
+
+    Every one of these names an obstacle the person holding the money can act on.
+    That is the rule the conflict-gate codes above follow: a refusal that says only
+    "forbidden" tells a finance manager the door is shut without saying which key
+    opens it, and they will route around the control instead of through it — which is
+    how a firm ends up with client money outside the ledger.
+  */
+  /** The invoice is not (yet) a tax invoice, so it may not reach the client. */
+  | 'invoice_not_issued'
+  | 'invoice_number_taken'
+  /** A standard invoice that ZATCA has not cleared — the buyer cannot claim the VAT. */
+  | 'invoice_not_cleared'
+  /** The firm has no onboarded production fiscal identity and device. */
+  | 'fiscal_identity_incomplete'
+  /** A UUID without a counter, a hash or a QR is not an issued document. */
+  | 'fiscal_chain_incomplete'
+  /** A standard invoice must name the buyer's VAT registration number. */
+  | 'buyer_vat_required'
+  /** An issued invoice is immutable; the remedy is a credit note. */
+  | 'issued_invoice_immutable'
+  | 'issued_invoice_not_deletable'
+  | 'invoice_lines_do_not_reconcile'
+  | 'credit_note_exceeds_invoice'
+  | 'credit_note_against_unissued_invoice'
+  /* client money */
+  | 'ledger_is_append_only'
+  | 'ledger_not_found'
+  | 'ledger_not_open'
+  | 'ledger_direction_wrong'
+  | 'ledger_evidence_required'
+  | 'already_reversed'
+  | 'trust_application_exceeds_invoice'
+  | 'trust_application_wrong_client'
+  /** The firm spent money that belonged to a client. The end of a practice. */
+  | 'client_funds_overdrawn'
+  | 'reconciliation_is_append_only'
+  | 'reconciliation_does_not_balance'
+  /* the fee */
+  | 'engagement_gate'
+  | 'billing_cap_exceeded'
+  | 'billing_terms_disagree'
+  | 'expense_receipt_required'
+  | 'expense_wrong_client'
+  | 'entry_already_billed'
+  | 'ceiling_actor_unknown'
   // validation
   | 'validation_failed'
   | 'upload_too_large'
@@ -219,5 +266,57 @@ export function toPortalError(err: unknown): PortalError {
       break;
   }
 
+  /*
+    ── THE DATABASE'S OWN REFUSALS ───────────────────────────────────────────────
+
+    The guards in 0034–0036 raise their refusal with a token at the front of the
+    message — `client_funds_overdrawn: …`, `entry_already_billed: …` — and the SQLite
+    mirror raises the identical strings so both engines say the same thing. Those
+    messages are a REFUSAL VOCABULARY, not diagnostics, and until this mapping existed
+    they arrived at the API edge as an opaque driver error and left as a 500.
+
+    That is the worst of both answers: the person at the desk loses the reason, and a
+    legitimate business refusal is recorded in the logs as a server fault. The mapping
+    is exact — the token must be followed by a colon AND must be one of the declared
+    refusals — so an unrelated SQLite failure still surfaces as a 500 and still gets
+    investigated. Mapping on a loose pattern would hide real breakage.
+  */
+  const refusal = typeof e?.message === 'string' ? REFUSAL_PATTERN.exec(e.message) : null;
+  if (refusal) {
+    const [token, detail] = [refusal[1], refusal[2] ?? ''];
+    return new PortalError(REFUSAL_STATUS[token] ?? 400, token as ErrorCode, detail.trim(), {
+      cause: err,
+      auditReason: token,
+    });
+  }
+
   return new PortalError(500, 'internal_error', 'internal error', { cause: err });
 }
+
+/**
+ * A guard's message, as `<refusal>: <what the person at the desk can do about it>`.
+ * Anchored at the start of the message so a token that merely appears inside a stack
+ * trace or a nested cause cannot be mistaken for the refusal itself.
+ */
+const REFUSAL_PATTERN = /^([a-z][a-z0-9_]{4,60}):\s*([\s\S]*)$/;
+
+/**
+ * Which refusal deserves which status.
+ *
+ * A conflict is a refusal about the STATE of the record — an issued invoice, a billed
+ * entry, a ledger already reversed. Everything else is a 400: the request asked for
+ * something the firm's own rules do not permit, and the answer names which rule.
+ * Nothing here is a 403, because a guard refusing a well-formed request is the
+ * database doing its job, not an authorization decision — those are made above it.
+ */
+const REFUSAL_STATUS: Record<string, number> = {
+  issued_invoice_immutable: 409,
+  issued_invoice_not_deletable: 409,
+  entry_already_billed: 409,
+  entry_invoice_immutable: 409,
+  already_reversed: 409,
+  ledger_is_append_only: 409,
+  reconciliation_is_append_only: 409,
+  invoice_not_issued: 409,
+  invoice_number_taken: 409,
+};

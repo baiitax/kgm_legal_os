@@ -503,6 +503,22 @@ create table if not exists invoices (
   approved_by_staff text,
   approved_at text,
   notes_internal text,
+  /* 0034 · the fiscal document. Nullable because a draft has no fiscal existence. */
+  fiscal_device_id text references fiscal_devices(id),
+  invoice_uuid text,
+  invoice_type text,
+  icv integer,
+  previous_invoice_hash text,
+  invoice_hash text,
+  qr_payload text,
+  xml_storage_key text,
+  supply_at text,
+  buyer_vat_number text,
+  buyer_name text,
+  buyer_address text,
+  buyer_address_ar text,
+  fiscal_status text,
+  fiscal_status_at text,
   created_at text not null,
   updated_at text not null,
   unique (tenant_id, invoice_number)
@@ -541,7 +557,13 @@ create table if not exists invoice_lines (
   description_ar text,
   quantity real not null default 1,
   unit_price real not null,
-  amount real not null
+  amount real not null,
+  /* 0034 · per-line VAT treatment. A single invoice-level rate cannot express a
+     mixed invoice (a zero-rated export and a standard-rated consultation). */
+  vat_category text not null default 'standard',
+  vat_rate real not null default 0.15,
+  vat_amount real not null default 0,
+  discount_amount real not null default 0
 );
 
 create table if not exists payments (

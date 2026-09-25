@@ -6,7 +6,7 @@ import type {
   Db, Param, Queryable, RequestContext, Row, RunResult, Scope,
 } from './types.js';
 import { SQLITE_SCHEMA } from './schema.sqlite.js';
-import { FIRM_RBAC_SCHEMA } from './schema.firm.sqlite.js';
+import { FIRM_RBAC_SCHEMA, FISCAL_TRUST_BILLING_SCHEMA } from './schema.firm.sqlite.js';
 
 /**
  * SQLite driver (demo / development / test).
@@ -68,6 +68,15 @@ export class SqliteDb implements Db {
     // byte-identical to the version its 185 tests were written against.
     this.db.exec(SQLITE_SCHEMA);
     this.db.exec(FIRM_RBAC_SCHEMA);
+    /*
+      0034-0036 · the fiscal document, client money and the billing basis. A third
+      literal rather than more lines in the second, because the second is the RBAC
+      mirror and this is a different phase of the schema; keeping them separate makes
+      it obvious which migration a table came from when one of them fails to apply.
+      It must run AFTER FIRM_RBAC_SCHEMA: `time_entries` references `staff`, and
+      `expenses` references `documents`.
+    */
+    this.db.exec(FISCAL_TRUST_BILLING_SCHEMA);
     this.ensureColumns();
   }
 
@@ -103,6 +112,28 @@ export class SqliteDb implements Db {
     // schema's clients table — the conflict engine reads them, but the portal owns
     // the table, which is exactly the kind of split that gets missed.
     add('clients', 'party_id', 'text');
+    // 0034 · the fiscal document. Added to an existing `invoices` table here rather
+    // than only in the schema file, for the reason above: a database created before
+    // this migration keeps its old column set unless the column is added explicitly.
+    add('invoices', 'fiscal_device_id', 'text');
+    add('invoices', 'invoice_uuid', 'text');
+    add('invoices', 'invoice_type', 'text');
+    add('invoices', 'icv', 'integer');
+    add('invoices', 'previous_invoice_hash', 'text');
+    add('invoices', 'invoice_hash', 'text');
+    add('invoices', 'qr_payload', 'text');
+    add('invoices', 'xml_storage_key', 'text');
+    add('invoices', 'supply_at', 'text');
+    add('invoices', 'buyer_vat_number', 'text');
+    add('invoices', 'buyer_name', 'text');
+    add('invoices', 'buyer_address', 'text');
+    add('invoices', 'buyer_address_ar', 'text');
+    add('invoices', 'fiscal_status', 'text');
+    add('invoices', 'fiscal_status_at', 'text');
+    add('invoice_lines', 'vat_category', "text not null default 'standard'");
+    add('invoice_lines', 'vat_rate', 'real not null default 0.15');
+    add('invoice_lines', 'vat_amount', 'real not null default 0');
+    add('invoice_lines', 'discount_amount', 'real not null default 0');
     add('clients', 'relationship_ended_on', 'text');
     this.db.exec(
       `update roles set requires_practising_licence = 1

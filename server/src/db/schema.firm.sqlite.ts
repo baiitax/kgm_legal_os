@@ -743,3 +743,621 @@ create trigger if not exists matter_conflict_gate
   )
   begin select raise(ABORT, 'conflict gate: a matter may not leave conflict_check without an excluding conflict check (Rule 11), and conflict_cleared may not be asserted against the record'); end;
 `;
+
+export const FISCAL_TRUST_BILLING_SCHEMA = `
+/* ═══════════════════════════════════════════════════════════════════════════════
+ * 0034 · FISCAL IDENTITY AND A LEGALLY VALID TAX INVOICE  (P0.2)
+ * 0035 · CLIENT MONEY                                     (P1.1)
+ * 0036 · WHAT A FEE RESTS ON                              (P1.2, P1.3, P1.4)
+ * ═══════════════════════════════════════════════════════════════════════════════
+ *
+ * The SQLite side of the three migrations above. The production source of truth is
+ * supabase/migrations/0034–0036; this is the demo driver's equivalent, and the rule
+ * that keeps it honest is that THE REFUSAL MESSAGES ARE IDENTICAL. A test may assert
+ * on 'invoice_not_issued' and mean the same thing on both engines, which is what
+ * makes the SQLite suite a regression gate for behaviour rather than for syntax.
+ *
+ * TWO GUARDS ARE DELIBERATELY ABSENT HERE, AND THE REASON MATTERS.
+ *
+ *  · 'guard_invoice_discount_ceiling' reads 'current_setting('kgm.membership_id')',
+ *    the session GUC the firm-side driver sets so that a trigger can know WHOSE
+ *    authority a discount is measured against. SQLite has no session variables, and
+ *    the alternative — threading the membership id through every statement — would
+ *    change the statements themselves and defeat the point of a shared repository.
+ *    The ceiling is therefore enforced on this driver at the SERVER layer only,
+ *    which is where the three-step gate lives anyway; on PostgreSQL it is enforced
+ *    at both. 'scripts/verify/sqlite-mirror.ts' reports the gap rather than hiding it.
+ *
+ *  · The ICV/hash chain has no trigger on either engine. It is allocated by
+ *    'kgm_next_fiscal_number' on PostgreSQL and by the repository's own
+ *    read-modify-write on SQLite; the invariant is asserted by test in both cases
+ *    rather than by the database in one and not the other.
+ */
+
+-- ── the seller ───────────────────────────────────────────────────────────────
+create table if not exists fiscal_identity (
+  id                      text primary key,
+  tenant_id               text not null references tenants(id),
+  registered_name         text not null,
+  registered_name_ar      text,
+  vat_registration_number text not null,
+  commercial_registration text not null,
+  registered_address      text not null,
+  registered_address_ar   text,
+  city                    text,
+  postal_code             text,
+  country                 text not null default 'SA',
+  environment             text not null default 'simulation',
+  onboarding_status       text not null default 'not_started',
+  certificate_expires_at  text,
+  superseded_by           text,
+  created_at              text not null default (datetime('now')),
+  updated_at              text not null default (datetime('now')),
+  unique (tenant_id, vat_registration_number)
+);
+
+create table if not exists fiscal_devices (
+  id                    text primary key,
+  tenant_id             text not null references tenants(id),
+  fiscal_identity_id    text not null references fiscal_identity(id),
+  device_label          text not null,
+  device_serial         text not null,
+  invoice_counter_value integer not null default 0,
+  last_invoice_hash     text,
+  is_active             integer not null default 1,
+  created_at            text not null default (datetime('now')),
+  updated_at            text not null default (datetime('now')),
+  unique (tenant_id, device_serial)
+);
+
+create table if not exists invoice_submissions (
+  id                text primary key,
+  tenant_id         text not null references tenants(id),
+  invoice_id        text not null references invoices(id),
+  submission_type   text not null,
+  attempt           integer not null default 1,
+  status            text not null default 'pending',
+  http_status       integer,
+  response_code     text,
+  request_body_hash text,
+  response_body     text,
+  warnings          text,
+  errors            text,
+  next_retry_at     text,
+  submitted_at      text,
+  resolved_at       text,
+  created_at        text not null default (datetime('now'))
+);
+
+create table if not exists credit_notes (
+  id                    text primary key,
+  tenant_id             text not null references tenants(id),
+  invoice_id            text not null references invoices(id),
+  client_id             text not null references clients(id),
+  credit_number         text not null,
+  reason                text not null,
+  amount                real not null,
+  vat_amount            real not null,
+  total                 real not null,
+  currency              text not null default 'SAR',
+  fiscal_device_id      text not null references fiscal_devices(id),
+  invoice_uuid          text,
+  icv                   integer,
+  previous_invoice_hash text,
+  invoice_hash          text,
+  qr_payload            text,
+  xml_storage_key       text,
+  fiscal_status         text,
+  issued_by_staff       text,
+  issued_at             text,
+  created_at            text not null default (datetime('now')),
+  unique (tenant_id, credit_number)
+);
+
+-- ── the gates ────────────────────────────────────────────────────────────────
+/*
+  Is this firm able to issue a tax invoice at all? The same four conditions as
+  'kgm_fiscal_ready' on PostgreSQL, written as a view so the trigger below can read
+  it without a function.
+*/
+create view if not exists fiscal_ready as
+  select fi.tenant_id as tenant_id,
+         max(case when fi.superseded_by is null
+                   and fi.onboarding_status = 'production_csid'
+                   and (fi.certificate_expires_at is null or fi.certificate_expires_at > datetime('now'))
+                   and fd.is_active = 1
+                  then 1 else 0 end) as ready
+    from fiscal_identity fi
+    join fiscal_devices fd on fd.fiscal_identity_id = fi.id
+   group by fi.tenant_id;
+
+/*
+  THE CLIENT-FACING STATUS DOES NOT NEED A UUID TO BE REACHED — IT NEEDS A UUID TO BE
+  PERMITTED. This is the arm that makes the rest of the gate mean anything, and it is
+  first for the same reason it is first in 0034.
+*/
+create trigger if not exists invoice_fiscal_issue_guard
+  before insert on invoices
+  when new.internal_status in ('sent','partially_paid','paid','overdue')
+   and new.invoice_uuid is null
+  begin
+    select raise(ABORT, 'invoice_not_issued: an invoice may not reach a client before it is issued as a tax invoice');
+  end;
+
+create trigger if not exists invoice_fiscal_issue_guard_u
+  before update on invoices
+  when new.internal_status in ('sent','partially_paid','paid','overdue')
+   and new.invoice_uuid is null
+  begin
+    select raise(ABORT, 'invoice_not_issued: an invoice may not reach a client before it is issued as a tax invoice');
+  end;
+
+/* The identity, the type, the chain and the QR — when a UUID is present at all. */
+create trigger if not exists invoice_fiscal_shape_guard
+  before insert on invoices
+  when new.invoice_uuid is not null
+   and (new.invoice_type is null
+        or new.icv is null
+        or new.invoice_hash is null
+        or new.qr_payload is null
+        or new.fiscal_device_id is null
+        or coalesce((select ready from fiscal_ready where tenant_id = new.tenant_id), 0) = 0)
+  begin
+    select raise(ABORT, 'fiscal_identity_incomplete: a tax invoice needs an onboarded fiscal identity, a device, an ICV, a hash and a QR code');
+  end;
+
+create trigger if not exists invoice_fiscal_shape_guard_u
+  before update on invoices
+  when new.invoice_uuid is not null
+   and (new.invoice_type is null
+        or new.icv is null
+        or new.invoice_hash is null
+        or new.qr_payload is null
+        or new.fiscal_device_id is null)
+  begin
+    select raise(ABORT, 'fiscal_identity_incomplete: a tax invoice needs a device, an ICV, a hash and a QR code');
+  end;
+
+/*
+  An issued invoice is immutable. The same field list as 0034, for the same reason:
+  the penalty for amending one starts at SAR 10,000 per document.
+*/
+create trigger if not exists invoice_fiscal_immutable_guard
+  before update on invoices
+  when old.invoice_uuid is not null
+   and (new.invoice_uuid is not old.invoice_uuid
+     or new.invoice_type is not old.invoice_type
+     or new.icv is not old.icv
+     or new.fiscal_device_id is not old.fiscal_device_id
+     or new.invoice_hash is not old.invoice_hash
+     or new.previous_invoice_hash is not old.previous_invoice_hash
+     or new.qr_payload is not old.qr_payload
+     or new.buyer_vat_number is not old.buyer_vat_number
+     or new.buyer_name is not old.buyer_name
+     or new.supply_at is not old.supply_at
+     or new.issue_date is not old.issue_date
+     or new.subtotal is not old.subtotal
+     or new.vat_amount is not old.vat_amount
+     or new.total is not old.total
+     or new.client_id is not old.client_id
+     or new.invoice_number is not old.invoice_number)
+  begin
+    select raise(ABORT, 'issued_invoice_immutable: an issued tax invoice may not be amended — issue a credit note instead');
+  end;
+
+create trigger if not exists invoice_no_delete_guard
+  before delete on invoices
+  when old.invoice_uuid is not null
+  begin
+    select raise(ABORT, 'issued_invoice_not_deletable: an issued tax invoice is retained for six years and corrected by credit note, never deleted');
+  end;
+
+create trigger if not exists invoice_lines_no_delete_guard
+  before delete on invoice_lines
+  when (select invoice_uuid from invoices where id = old.invoice_id) is not null
+  begin
+    select raise(ABORT, 'issued_invoice_not_deletable: the lines of an issued tax invoice may not be removed');
+  end;
+
+/*
+  And the lines may not be REWRITTEN either: the totals of an issued invoice are frozen
+  above, so a line whose unit price changed afterwards would leave the document
+  disagreeing with the lines it was computed from. Adding a line falsifies it the same
+  way, which is why the insert trigger exists as well as the update one.
+*/
+create trigger if not exists invoice_lines_no_update_guard
+  before update on invoice_lines
+  when (select invoice_uuid from invoices where id = old.invoice_id) is not null
+  begin
+    select raise(ABORT, 'issued_invoice_immutable: the lines of an issued tax invoice may not be added to or amended — issue a credit note instead');
+  end;
+
+create trigger if not exists invoice_lines_no_insert_guard
+  before insert on invoice_lines
+  when (select invoice_uuid from invoices where id = new.invoice_id) is not null
+  begin
+    select raise(ABORT, 'issued_invoice_immutable: the lines of an issued tax invoice may not be added to or amended — issue a credit note instead');
+  end;
+
+/* The invoice's own arithmetic must agree with its lines, at issue. */
+create trigger if not exists invoice_lines_reconcile_guard
+  before update on invoices
+  when new.invoice_uuid is not null
+   and new.invoice_uuid is not old.invoice_uuid
+   and (
+     abs(new.subtotal - coalesce((select sum(round(quantity * unit_price - discount_amount, 2))
+                                    from invoice_lines where invoice_id = new.id), 0)) > 0.01
+     or abs(new.vat_amount - coalesce((select sum(vat_amount)
+                                         from invoice_lines where invoice_id = new.id), 0)) > 0.01
+   )
+  begin
+    select raise(ABORT, 'invoice_lines_do_not_reconcile: the invoice totals must equal the sum of its lines');
+  end;
+
+/* A credit note may not exceed what it corrects. */
+create trigger if not exists credit_note_within_invoice_guard
+  before insert on credit_notes
+  when new.total > coalesce((select total from invoices where id = new.invoice_id), 0)
+                   - coalesce((select sum(total) from credit_notes where invoice_id = new.invoice_id), 0) + 0.01
+  begin
+    select raise(ABORT, 'credit_note_exceeds_invoice: the credits against an invoice may not exceed it');
+  end;
+
+create trigger if not exists credit_note_against_unissued_guard
+  before insert on credit_notes
+  when (select invoice_uuid from invoices where id = new.invoice_id) is null
+  begin
+    select raise(ABORT, 'credit_note_against_unissued_invoice: there is nothing to credit — the invoice was never issued');
+  end;
+
+-- ── client money (0035) ──────────────────────────────────────────────────────
+create table if not exists client_ledgers (
+  id            text primary key,
+  tenant_id     text not null references tenants(id),
+  client_id     text not null references clients(id),
+  currency      text not null default 'SAR',
+  status        text not null default 'open',
+  frozen_reason text,
+  opened_at     text not null default (datetime('now')),
+  closed_at     text,
+  created_at    text not null default (datetime('now')),
+  updated_at    text not null default (datetime('now')),
+  unique (tenant_id, client_id, currency)
+);
+
+create table if not exists ledger_entries (
+  id                   text primary key,
+  tenant_id            text not null references tenants(id),
+  ledger_id            text not null references client_ledgers(id),
+  client_id            text not null references clients(id),
+  entry_type           text not null,
+  direction            text not null,
+  amount               real not null,
+  currency             text not null default 'SAR',
+  invoice_id           text references invoices(id),
+  matter_id            text references matters(id),
+  description          text not null,
+  reference            text,
+  evidence_document_id text references documents(id),
+  reverses_entry_id    text references ledger_entries(id),
+  reversal_reason      text,
+  entry_at             text not null,
+  recorded_by_user_id  text references users(id),
+  recorded_at          text not null default (datetime('now'))
+);
+
+create index if not exists ledger_entries_ledger_idx on ledger_entries(ledger_id, entry_at);
+create index if not exists ledger_entries_invoice_idx on ledger_entries(invoice_id);
+
+create table if not exists ledger_reconciliations (
+  id                         text primary key,
+  tenant_id                  text not null references tenants(id),
+  currency                   text not null default 'SAR',
+  as_of                      text not null,
+  ledger_total               real not null,
+  bank_balance               real not null,
+  difference                 real not null,
+  bank_statement_reference   text,
+  bank_statement_document_id text references documents(id),
+  clients_with_balance       integer not null default 0,
+  status                     text not null,
+  notes                      text,
+  performed_by_user_id       text references users(id),
+  performed_at               text not null default (datetime('now')),
+  created_at                 text not null default (datetime('now')),
+  unique (tenant_id, as_of, currency)
+);
+
+/* Append-only. No escape hatch, on either engine. */
+create trigger if not exists ledger_entry_append_only_guard
+  before update on ledger_entries
+  begin select raise(ABORT, 'ledger_is_append_only: a client-money entry may not be updated — post a reversal instead'); end;
+
+create trigger if not exists ledger_entry_append_only_delete_guard
+  before delete on ledger_entries
+  begin select raise(ABORT, 'ledger_is_append_only: a client-money entry may not be deleted — post a reversal instead'); end;
+
+create trigger if not exists ledger_entry_shape_guard
+  before insert on ledger_entries
+  when (select status from client_ledgers where id = new.ledger_id) <> 'open'
+   and (select status from client_ledgers where id = new.ledger_id) is not null
+  begin
+    select raise(ABORT, 'ledger_not_open: no further movement may be recorded on a frozen or closed ledger');
+  end;
+
+create trigger if not exists ledger_direction_guard
+  before insert on ledger_entries
+  when (new.entry_type in ('receipt','interest') and new.direction <> 'credit')
+    or (new.entry_type in ('application_to_fee','disbursement','refund','bank_charge') and new.direction <> 'debit')
+  begin
+    select raise(ABORT, 'ledger_direction_wrong: the entry type determines whether the entry is a credit or a debit');
+  end;
+
+create trigger if not exists ledger_evidence_guard
+  before insert on ledger_entries
+  when new.entry_type in ('disbursement','refund','bank_charge') and new.evidence_document_id is null
+  begin
+    select raise(ABORT, 'ledger_evidence_required: the movement must attach the document that proves it');
+  end;
+
+/*
+  Client money may only be applied to an ISSUED invoice of THE SAME CLIENT, never
+  beyond what is outstanding, and never twice over. The four conditions are the same
+  four as 0034's 'guard_ledger_application'.
+*/
+create trigger if not exists ledger_application_guard
+  before insert on ledger_entries
+  when new.entry_type = 'application_to_fee'
+   and (
+     new.invoice_id is null
+     or coalesce((select client_id from invoices where id = new.invoice_id), '') <> new.client_id
+     or coalesce((select tenant_id from invoices where id = new.invoice_id), '') <> new.tenant_id
+     or coalesce((select internal_status from invoices where id = new.invoice_id), '') in
+        ('', 'draft', 'pending_internal_approval', 'cancelled', 'written_off')
+     or coalesce((select fiscal_status from invoices where id = new.invoice_id), '') in ('', 'rejected', 'failed')
+     or (new.amount + coalesce((select sum(amount) from ledger_entries
+                                 where invoice_id = new.invoice_id and entry_type = 'application_to_fee'), 0))
+        > coalesce((select total - amount_paid from invoices where id = new.invoice_id), 0) + 0.01
+   )
+  begin
+    select raise(ABORT, 'trust_application_refused: client money may only be applied to an issued, fiscally valid invoice of the same client, and never beyond its outstanding balance');
+  end;
+
+/* THE ONE THAT MATTERS MOST: a client's balance may never go below zero. */
+create trigger if not exists ledger_no_overdraft_guard
+  before insert on ledger_entries
+  when coalesce((select sum(case when direction = 'credit' then amount else -amount end)
+                   from ledger_entries where ledger_id = new.ledger_id), 0)
+       + case when new.direction = 'credit' then new.amount else -new.amount end
+       < -0.01
+  begin
+    select raise(ABORT, 'client_funds_overdrawn: client money may never be spent on the firm''s behalf');
+  end;
+
+create trigger if not exists reconciliation_append_only_guard
+  before update on ledger_reconciliations
+  begin select raise(ABORT, 'reconciliation_is_append_only: perform a new reconciliation rather than amending this one'); end;
+
+create trigger if not exists reconciliation_append_only_delete_guard
+  before delete on ledger_reconciliations
+  begin select raise(ABORT, 'reconciliation_is_append_only: perform a new reconciliation rather than amending this one'); end;
+
+-- ── the billing basis (0036) ─────────────────────────────────────────────────
+create table if not exists rate_cards (
+  id                 text primary key,
+  tenant_id          text not null references tenants(id),
+  level              text,
+  staff_id           text references staff(id),
+  practice_area      text,
+  hourly_rate_sar    real not null,
+  effective_from     text not null,
+  effective_to       text,
+  created_by_user_id text references users(id),
+  created_at         text not null default (datetime('now'))
+);
+
+create table if not exists matter_billing_terms (
+  id                  text primary key,
+  tenant_id           text not null references tenants(id),
+  matter_id           text not null references matters(id),
+  basis               text not null,
+  fee_amount_sar      real,
+  cap_amount_sar      real,
+  retainer_amount_sar real,
+  stages              text,
+  agreed_discount_pct real not null default 0,
+  vat_applicable      integer not null default 1,
+  effective_from      text not null,
+  effective_to        text,
+  superseded_by       text,
+  notes               text,
+  created_by_user_id  text references users(id),
+  created_at          text not null default (datetime('now'))
+);
+
+create table if not exists time_entries (
+  id                  text primary key,
+  tenant_id           text not null references tenants(id),
+  matter_id           text not null references matters(id),
+  staff_id            text not null references staff(id),
+  entry_date          text not null,
+  minutes             integer not null,
+  narrative           text not null,
+  narrative_ar        text,
+  billable            integer not null default 1,
+  hourly_rate_sar     real not null,
+  amount_sar          real not null,
+  invoice_id          text references invoices(id),
+  status              text not null default 'draft',
+  approved_by_user_id text references users(id),
+  approved_at         text,
+  written_off_reason  text,
+  created_at          text not null default (datetime('now')),
+  updated_at          text not null default (datetime('now'))
+);
+
+create table if not exists expenses (
+  id                   text primary key,
+  tenant_id            text not null references tenants(id),
+  matter_id            text not null references matters(id),
+  client_id            text not null references clients(id),
+  submitted_by_staff   text not null references staff(id),
+  incurred_on          text not null,
+  category             text not null,
+  description          text not null,
+  description_ar       text,
+  net_amount_sar       real not null,
+  vat_amount_sar       real not null default 0,
+  total_amount_sar     real not null,
+  vat_category         text not null default 'standard',
+  receipt_document_id  text references documents(id),
+  reimbursable         integer not null default 1,
+  invoice_id           text references invoices(id),
+  status               text not null default 'submitted',
+  approved_by_user_id  text references users(id),
+  approved_at          text,
+  rejection_reason     text,
+  created_at           text not null default (datetime('now')),
+  updated_at           text not null default (datetime('now'))
+);
+
+create table if not exists engagement_letters (
+  id                   text primary key,
+  tenant_id            text not null references tenants(id),
+  matter_id            text not null references matters(id),
+  client_id            text not null references clients(id),
+  scope                text not null,
+  scope_ar             text,
+  fee_amount_sar       real,
+  calculation_method   text not null,
+  signed_by_client_at  text,
+  signed_by_client_name text,
+  document_id          text references documents(id),
+  identity_verified_at text,
+  capacity_verified    integer not null default 0,
+  status               text not null default 'draft',
+  superseded_by        text,
+  created_by_user_id   text references users(id),
+  created_at           text not null default (datetime('now'))
+);
+
+create unique index if not exists engagement_letters_active_idx
+  on engagement_letters(matter_id) where status = 'signed';
+
+/*
+  Rule 12 as a trigger: billable time requires a signed engagement AND current terms.
+  Both halves — an engagement with no stated basis for the fee is not the written
+  agreement the rule asks for.
+*/
+create trigger if not exists time_entry_billable_guard
+  before insert on time_entries
+  when new.billable = 1
+   and (
+     not exists (select 1 from engagement_letters el
+                  where el.matter_id = new.matter_id and el.status = 'signed' and el.superseded_by is null)
+     or not exists (select 1 from matter_billing_terms mbt
+                     where mbt.matter_id = new.matter_id
+                       and mbt.superseded_by is null
+                       and mbt.effective_from <= new.entry_date
+                       and (mbt.effective_to is null or mbt.effective_to >= new.entry_date))
+   )
+  begin
+    select raise(ABORT, 'engagement_gate: billable time requires a signed engagement letter and current billing terms on this matter (Rule 12)');
+  end;
+
+create trigger if not exists time_entry_cap_guard
+  before insert on time_entries
+  when new.billable = 1
+   and coalesce((select basis from matter_billing_terms
+                  where matter_id = new.matter_id and superseded_by is null
+                    and effective_from <= new.entry_date
+                    and (effective_to is null or effective_to >= new.entry_date)
+                  order by effective_from desc limit 1), '') = 'capped'
+   and new.amount_sar + coalesce((select sum(amount_sar) from time_entries
+                                   where matter_id = new.matter_id and billable = 1
+                                     and status in ('submitted','approved','billed')), 0)
+       > coalesce((select cap_amount_sar from matter_billing_terms
+                    where matter_id = new.matter_id and superseded_by is null
+                      and effective_from <= new.entry_date
+                      and (effective_to is null or effective_to >= new.entry_date)
+                    order by effective_from desc limit 1), 0) + 0.01
+  begin
+    select raise(ABORT, 'billing_cap_exceeded: the entry takes the matter past its agreed fee cap');
+  end;
+
+create trigger if not exists expense_shape_guard
+  before insert on expenses
+  when (new.reimbursable = 1 and new.status in ('approved','billed') and new.receipt_document_id is null)
+    or coalesce((select client_id from matters where id = new.matter_id), '') <> new.client_id
+  begin
+    select raise(ABORT, 'expense_refused: a disbursement must belong to the matter''s client, and a reimbursable one must attach its receipt');
+  end;
+
+/*
+  BILLING IS CLOSED ONCE THE INVOICE IS ISSUED — the mirror of
+  guard_billed_entry_immutable and the two figure guards in 0036. (No backticks:
+  this file is a TypeScript template literal, and one would end the schema.)
+
+  Two rules, because they fail for two different reasons. An entry that is on an issued
+  invoice may not be un-billed or moved to another invoice: the invoice is a tax
+  document that cannot be amended, so moving the entry would make its own totals wrong.
+  And its figures may not be rewritten either — an invoice whose lines were computed
+  from a duration that has since changed is a document with no defensible basis.
+*/
+create trigger if not exists time_entry_billed_immutable_guard
+  before update on time_entries
+  when old.status = 'billed' and new.status <> 'billed'
+  begin
+    select raise(ABORT, 'entry_already_billed: this entry is on an issued invoice — correct it with a credit note, not by un-billing it');
+  end;
+
+create trigger if not exists entry_invoice_move_guard
+  before update on time_entries
+  when old.invoice_id is not null and new.invoice_id is not old.invoice_id
+  begin
+    select raise(ABORT, 'entry_invoice_immutable: a billed entry may not be moved to another invoice');
+  end;
+
+create trigger if not exists time_entry_billed_figures_guard
+  before update on time_entries
+  when old.status = 'billed' and (
+       new.minutes is not old.minutes
+    or new.amount_sar is not old.amount_sar
+    or new.hourly_rate_sar is not old.hourly_rate_sar
+    or new.matter_id is not old.matter_id
+    or new.entry_date is not old.entry_date
+    or new.billable is not old.billable
+  )
+  begin
+    select raise(ABORT, 'entry_already_billed: this hour is on an issued invoice — its duration, rate, date, matter and billability are frozen; correct the invoice with a credit note and record new time');
+  end;
+
+create trigger if not exists expense_billed_immutable_guard
+  before update on expenses
+  when old.status = 'billed' and new.status <> 'billed'
+  begin
+    select raise(ABORT, 'entry_already_billed: this disbursement is on an issued invoice — correct it with a credit note, not by un-billing it');
+  end;
+
+create trigger if not exists expense_invoice_move_guard
+  before update on expenses
+  when old.invoice_id is not null and new.invoice_id is not old.invoice_id
+  begin
+    select raise(ABORT, 'entry_invoice_immutable: a billed disbursement may not be moved to another invoice');
+  end;
+
+create trigger if not exists expense_billed_figures_guard
+  before update on expenses
+  when old.status = 'billed' and (
+       new.net_amount_sar is not old.net_amount_sar
+    or new.vat_amount_sar is not old.vat_amount_sar
+    or new.total_amount_sar is not old.total_amount_sar
+    or new.matter_id is not old.matter_id
+    or new.category is not old.category
+    or new.reimbursable is not old.reimbursable
+  )
+  begin
+    select raise(ABORT, 'entry_already_billed: this disbursement is on an issued invoice — its amounts, category, matter and rechargeability are frozen; correct the invoice with a credit note');
+  end;
+
+`;

@@ -22,6 +22,9 @@ import { PERMISSIONS, ROLE_TEMPLATES, TEMPLATE_GRANTS } from '../domain/firm-cat
 // A seed that reimplemented it would produce a register that does not match its own
 // contents — the failure mode the whole two-dialect discipline exists to prevent.
 import { normalizeArabicName } from '../domain/arabic-names.js';
+import {
+  buildQrPayload, buildInvoiceXml, invoiceHash, GENESIS_PIH,
+} from '../domain/zatca.js';
 
 /**
  * Deterministic UUID derived from a stable label.
@@ -31,6 +34,27 @@ import { normalizeArabicName } from '../domain/arabic-names.js';
  * that would silently swallow a re-insert while leaving a random surrogate id
  * dangling. Deriving ids from labels makes the whole seed idempotent.
  */
+/*
+  THE ISSUANCE PASS.
+
+  `buildDemoSeed` returns INSERTS, and inserts are applied table by table in dependency
+  order — which means every invoice is written before any of its lines. Issuing an
+  invoice is a different act from creating one, and it must happen after the lines
+  exist, so it is a second phase: the builder fills this list while it emits the
+  invoices, and the seeder applies it once the inserts are done.
+
+  It is not a workaround. It is the same two-step the product performs — draft, then
+  issue — and the demo data now demonstrates the lifecycle instead of asserting its
+  result.
+*/
+export interface DemoIssuance { id: string; set: Record<string, unknown>; }
+let issuances: DemoIssuance[] = [];
+
+/** The issuance phase produced by the most recent `buildDemoSeed()` call. */
+export function demoIssuances(): readonly DemoIssuance[] {
+  return issuances;
+}
+
 export function detId(label: string): string {
   const h = crypto.createHash('sha256').update(`kgm-demo:${label}`).digest('hex');
   const bytes = [...h.slice(0, 32).matchAll(/../g)].map((m) => parseInt(m[0], 16));
@@ -100,6 +124,7 @@ export const DEMO_FIRM_ACCOUNTS = [
   { email: 'faisal@kgm.example.test', password: DEMO_FIRM_PASSWORD, who: 'Faisal Al-Harbi — Lawyer (Commercial Litigation, Real Estate)' },
   { email: 'mariam@kgm.example.test', password: DEMO_FIRM_PASSWORD, who: 'Mariam Al-Zahrani — Paralegal (Commercial Litigation)' },
   { email: 'omar@kgm.example.test',   password: DEMO_FIRM_PASSWORD, who: 'Omar Al-Dossary — Compliance (assigned matters only)' },
+  { email: 'partner@najd.example.test', password: DEMO_FIRM_PASSWORD, who: 'Sultan Al-Otaibi — Najd Legal Partners (a second firm: no fiscal identity)' },
   { email: 'sara@kgm.example.test',   password: DEMO_FIRM_PASSWORD, who: 'Sara Al-Otaibi — Finance (billing.read_all, 25,000 SAR ceiling)' },
 ] as const;
 
@@ -157,6 +182,7 @@ export interface SeedRow {
 }
 
 export function buildDemoSeed(): SeedRow[] {
+  issuances = [];
   const now = new Date().toISOString();
   const rows: SeedRow[] = [];
   const add = (table: string, row: Record<string, unknown>) => rows.push({ table, row });
@@ -613,6 +639,11 @@ export function buildDemoSeed(): SeedRow[] {
     { id: 'c1000000-0000-4000-8000-000000000005', matter: IDS.matterGulf, client: IDS.clientGulf, tenant: IDS.tenantKgm,
       title: 'Share Purchase Agreement', titleAr: 'اتفاقية شراء الأسهم', type: 'contract', cat: 'from_firm',
       origin: 'firm', mime: 'application/pdf', size: 512_004, vis: 'visible', requested: 0, file: 'spa.pdf' },
+    // The receipt behind a disbursement (0036). A reimbursable expense must carry the
+    // document being passed on, so the demo needs one that is actually a receipt.
+    { id: 'c1000000-0000-4000-8000-000000000007', matter: IDS.matterGulf, client: IDS.clientGulf, tenant: IDS.tenantKgm,
+      title: 'Court fee receipt', titleAr: 'إيصال رسوم المحكمة', type: 'receipt', cat: 'from_firm',
+      origin: 'firm', mime: 'application/pdf', size: 64_220, vis: 'visible', requested: 0, file: 'court-fee-receipt.pdf' },
     { id: 'c1000000-0000-4000-8000-000000000006', matter: IDS.matterLayla, client: IDS.clientLayla, tenant: IDS.tenantNajd,
       title: 'Distribution Agreement', titleAr: 'اتفاقية التوزيع', type: 'contract', cat: 'from_firm',
       origin: 'firm', mime: 'application/pdf', size: 233_871, vis: 'visible', requested: 0, file: 'distribution.pdf' },
@@ -661,32 +692,265 @@ export function buildDemoSeed(): SeedRow[] {
     if (paid > 0) return 'partially_paid';
     return due < date(0) ? 'overdue' : 'awaiting_payment';
   };
+  /*
+    THE FISCAL CHAIN, COMPUTED BEFORE ANYTHING IS EMITTED.
+
+    `invoices.fiscal_device_id` references the device, and the device carries the
+    chain head — the last ICV and the last hash — which is only known once every
+    invoice has been hashed. So the chain is derived first into `fiscalFor`, then the
+    device row is emitted with its final values, then the invoices are emitted with
+    theirs. The alternative (emit the device at counter 0 and update it afterwards)
+    is what the server does at run time; a fixture that shipped a device claiming
+    counter 0 while five documents cite ICVs 1–5 would be a demo that contradicts
+    itself the moment anybody read the device row.
+  */
+  const fiscalFor = new Map<string, {
+    icv: number; previousHash: string; hash: string; qr: string;
+    subtype: 'standard' | 'simplified'; supplyAt: string;
+  }>();
+  /*
+    The buyer's VAT registration, indexed by client, taken from the PARTY record the
+    clients link to. Built here rather than hardcoded below so the fiscal chain and the
+    client register cannot drift apart.
+  */
+  const buyerVatByClient = new Map<string, string>();
+  for (const [clientId, partyId] of [
+    [IDS.clientAhmed, IDS.partyAhmed],
+    [IDS.clientGulf, IDS.partyGulf],
+  ] as const) {
+    const partyRow = parties.find((p) => p.id === partyId);
+    if (partyRow?.vat) buyerVatByClient.set(clientId, partyRow.vat);
+  }
+
+  let chainHead = GENESIS_PIH;
+  let icvCounter = 0;
   for (const inv of invoices) {
-    const vat = Math.round(inv.sub * 0.15 * 100) / 100;
-    const total = Math.round((inv.sub + vat) * 100) / 100;
+    if (inv.internal === 'pending_internal_approval') continue;   // never issued at all
+    const lineAmounts = inv.lines.map((l) => (l as [string, string, number, number])[2] * (l as [string, string, number, number])[3]);
+    const sub = Math.round(lineAmounts.reduce((a, b) => a + b, 0) * 100) / 100;
+    const vat = Math.round(sub * 0.15 * 100) / 100;
+    const total = Math.round((sub + vat) * 100) / 100;
+    const supplyAt = iso(inv.issue, 9);
+    /*
+      STANDARD OR SIMPLIFIED IS DECIDED BY THE BUYER, NOT BY PREFERENCE — and it is
+      decided from the BUYER'S OWN RECORD, which is the only way the fixture can be
+      consistent with the gate the issue route applies.
+
+      A client whose party carries a VAT registration is a business and gets a standard
+      invoice, which must be CLEARED before it is shared with them. A private individual
+      with no registration gets a simplified one, REPORTED within 24 hours. Gulf Horizon
+      has a registration on its party record; Ahmed Al-Saud, an individual, does not.
+
+      An earlier version of this fixture issued Ahmed a STANDARD invoice carrying a VAT
+      number that appears nowhere on his client or party record, which meant the seeded
+      document disagreed with the buyer the product would have looked up — and the
+      issue route then refused to produce the same document the fixture had already
+      produced. The buyer's VAT number is read from the register here for the same
+      reason it is read from the register at run time.
+    */
+    const buyerVat = buyerVatByClient.get(inv.client) ?? null;
+    const subtype = buyerVat ? 'standard' as const : 'simplified' as const;
+    const buyerName = inv.client === IDS.clientGulf ? 'Gulf Horizon Trading Co.' : 'Ahmed Al-Saud';
+
+    icvCounter += 1;
+    const icv = icvCounter;
+    const previousHash = chainHead;
+
+    /*
+      The QR is built from the invoice's own figures, then the XML is built carrying
+      that same QR, then the XML is hashed — which is the order the regulation
+      implies, because the hash is over the document and the document contains the
+      QR. A generator that hashed first and embedded the QR afterwards would produce
+      a document whose own hash does not match it.
+    */
+    const qr = buildQrPayload({
+      sellerName: 'شركة كيه جي إم للمحاماة',
+      vatRegistrationNumber: '300000000000003',
+      timestamp: supplyAt,
+      totalWithVat: total.toFixed(2),
+      vatTotal: vat.toFixed(2),
+    });
+
+    const xml = buildInvoiceXml({
+      documentTypeCode: '388',
+      subtype,
+      invoiceNumber: inv.number,
+      uuid: detId(`invoice:${inv.id}`),
+      issueDate: date(inv.issue),
+      issueTime: '09:00:00',
+      supplyDate: subtype === 'standard' ? date(inv.issue) : null,
+      currency: 'SAR',
+      icv,
+      previousInvoiceHash: previousHash,
+      seller: {
+        name: 'KGM Law Firm', nameAr: 'شركة كيه جي إم للمحاماة',
+        vatRegistrationNumber: '300000000000003', commercialRegistration: '1010345678',
+        address: '1234 King Fahd Road', city: 'Riyadh', postalCode: '12211', country: 'SA',
+      },
+      buyer: { name: buyerName, vatNumber: buyerVat, address: null },
+      lines: inv.lines.map((l, i) => {
+        const [desc, descAr, qty, unit] = l as [string, string, number, number];
+        const amount = Math.round(qty * unit * 100) / 100;
+        return {
+          position: i + 1, description: desc, descriptionAr: descAr,
+          quantity: String(qty), unitPrice: unit.toFixed(2),
+          lineExtensionAmount: amount.toFixed(2), vatCategory: 'standard' as const,
+          vatRate: '0.15', vatAmount: (Math.round(amount * 0.15 * 100) / 100).toFixed(2),
+        };
+      }),
+      subtotal: sub.toFixed(2), vatTotal: vat.toFixed(2), total: total.toFixed(2),
+      qrPayload: qr,
+    });
+
+    const hash = invoiceHash(xml);
+    chainHead = hash;
+    fiscalFor.set(inv.id, { icv, previousHash, hash, qr, subtype, supplyAt });
+  }
+
+  add('fiscal_identity', {
+    id: detId('fiscal:kgm'), tenant_id: IDS.tenantKgm,
+    registered_name: 'KGM Law Firm', registered_name_ar: 'شركة كيه جي إم للمحاماة',
+    vat_registration_number: '300000000000003', commercial_registration: '1010345678',
+    registered_address: '1234 King Fahd Road, Al Olaya', registered_address_ar: '١٢٣٤ طريق الملك فهد، العليا',
+    city: 'Riyadh', postal_code: '12211', country: 'SA',
+    /*
+      A PRODUCTION CSID THAT DOES NOT EXIST, in a database that is entirely synthetic
+      and says so. The alternative — leaving the demo firm un-onboarded — would mean
+      none of the demo's invoices could be sent, and the product's central financial
+      gate would never be exercised on the demo at all. What is NOT faked is the
+      environment field: it says 'production' because that is what the fixture claims
+      to be, and the SECOND tenant in the same fixture has no fiscal identity at all,
+      which is what the live harness uses to prove the refusal.
+    */
+    environment: 'production', onboarding_status: 'production_csid',
+    certificate_expires_at: iso(400),
+    superseded_by: null, created_at: iso(-200), updated_at: iso(-200),
+  });
+
+  add('fiscal_devices', {
+    id: detId('fiscal_device:kgm-1'), tenant_id: IDS.tenantKgm,
+    fiscal_identity_id: detId('fiscal:kgm'),
+    device_label: 'Head office — Riyadh', device_serial: '1-KGM-RUH-0001',
+    invoice_counter_value: icvCounter, last_invoice_hash: icvCounter ? chainHead : null,
+    is_active: 1, created_at: iso(-200), updated_at: now,
+  });
+
+  for (const inv of invoices) {
+    const f = fiscalFor.get(inv.id);
+    const lineAmounts = inv.lines.map((l) => (l as [string, string, number, number])[2] * (l as [string, string, number, number])[3]);
+    const vat = Math.round(Math.round(lineAmounts.reduce((a, b) => a + b, 0) * 100) / 100 * 0.15 * 100) / 100;
+    const sub = Math.round(lineAmounts.reduce((a, b) => a + b, 0) * 100) / 100;
+    const total = Math.round((sub + vat) * 100) / 100;
     // A settled invoice is settled for the VAT-INCLUSIVE total; `inv.paid`
     // holds the part-payment figure for the partially paid one.
     const paid = inv.internal === 'paid' ? total : inv.paid;
     add('invoices', {
+      /*
+        CREATED FIRST, ISSUED LATER — and the order is the product's order, not a
+        convenience. A document exists as a draft, its lines are added, and only then is
+        it issued: the fiscal fields below are empty HERE and filled by the issuance pass
+        in `demoIssuances()`, which runs after the lines have been written.
+
+        The alternative — emitting a finished, issued invoice in one insert — can no
+        longer be done at all, because 0034 refuses an invoice at sent/paid/overdue with
+        no fiscal identity AND refuses a line being added to an invoice that already has
+        one. A fixture that could only work around those two guards would be a fixture
+        demonstrating that the guards do not hold.
+      */
       id: inv.id, tenant_id: inv.tenant, client_id: inv.client, matter_id: inv.matter,
       invoice_number: inv.number, issue_date: date(inv.issue), due_date: date(inv.due),
-      currency: 'SAR', subtotal: inv.sub, vat_rate: 0.15, vat_amount: vat, total,
-      amount_paid: paid, internal_status: inv.internal,
-      client_status: derive(inv.internal, paid, total, date(inv.due)),
+      currency: 'SAR', subtotal: sub, vat_rate: 0.15, vat_amount: vat, total,
+      /*
+        The state before issue. An invoice that WILL be issued waits here as a draft
+        nobody can see; its internal and client statuses arrive with the issuance, and
+        the client status is the one the derivation produces rather than a second
+        opinion about it. An invoice with no fiscal identity to come — the one waiting
+        for partner sign-off — keeps the status it is waiting in, because "draft" and
+        "awaiting approval" are different answers to the question the approver asks.
+      */
+      amount_paid: paid,
+      internal_status: f ? 'draft' : inv.internal,
+      client_status: f ? null : derive(inv.internal, paid, total, date(inv.due)),
       storage_key: `${inv.tenant}/${inv.client}/financial/${inv.id}/invoice.pdf`,
       approved_by_staff: inv.internal === 'pending_internal_approval' ? null : staff[4].id,
       approved_at: inv.internal === 'pending_internal_approval' ? null : now,
       notes_internal: inv.internal === 'pending_internal_approval'
         ? 'INTERNAL: awaiting partner sign-off. Do NOT release.' : null,
+      fiscal_device_id: null, invoice_uuid: null, invoice_type: null, icv: null,
+      previous_invoice_hash: null, invoice_hash: null, qr_payload: null,
+      xml_storage_key: null, supply_at: null,
+      buyer_vat_number: null, buyer_name: null, buyer_address: null, buyer_address_ar: null,
+      fiscal_status: null, fiscal_status_at: null,
       created_at: now, updated_at: now,
     });
+    if (f) {
+      /*
+        THE ISSUANCE, deferred. Every field the document's identity consists of, plus the
+        status it reaches once issued — so the draft that stays a draft keeps NO fiscal
+        identity at all, and the issue route can be demonstrated on it.
+      */
+      issuances.push({
+        id: inv.id,
+        set: {
+          internal_status: inv.internal,
+          client_status: derive(inv.internal, paid, total, date(inv.due)),
+          fiscal_device_id: detId('fiscal_device:kgm-1'),
+          invoice_uuid: detId(`invoice:${inv.id}`),
+          invoice_type: f.subtype,
+          icv: f.icv,
+          previous_invoice_hash: f.previousHash,
+          invoice_hash: f.hash,
+          qr_payload: f.qr,
+          xml_storage_key: `${inv.tenant}/${inv.client}/financial/${inv.id}/invoice.xml`,
+          supply_at: f.supplyAt,
+          // The buyer's VAT number is what MAKES an invoice standard rather than
+          // simplified, so it is present exactly when the type says so — and it is the
+          // same figure stamped into the document above, because a row that disagreed
+          // with its own XML would be a tax record nobody could reconcile.
+          buyer_vat_number: buyerVatByClient.get(inv.client) ?? null,
+          buyer_name: inv.client === IDS.clientGulf ? 'Gulf Horizon Trading Co.' : 'Ahmed Al-Saud',
+          fiscal_status: f.subtype === 'standard' ? 'cleared' : 'reported',
+          fiscal_status_at: iso(inv.issue, 9, 5),
+          updated_at: now,
+        },
+      });
+    }
     inv.lines.forEach((l, i) => {
       const [desc, descAr, qty, unit] = l as [string, string, number, number];
+      const amount = Math.round(qty * unit * 100) / 100;
       add('invoice_lines', {
         id: detId(`invoice_line:${inv.id}:${i + 1}`), invoice_id: inv.id, position: i + 1, description: desc,
         description_ar: descAr, quantity: qty, unit_price: unit, amount: qty * unit,
+        vat_category: 'standard', vat_rate: 0.15,
+        vat_amount: Math.round(amount * 0.15 * 100) / 100,
+        discount_amount: 0,
       });
     });
+    /*
+      A standard invoice may only be SENT once it is CLEARED, so the demo's sent and
+      settled standard invoices need the clearance that admits them. Without this row
+      the fixture would violate the very gate the migration installs — which is how
+      this was discovered, since the seed began failing the moment 0034 landed.
+    */
+    if (f && f.subtype === 'standard') {
+      add('invoice_submissions', {
+        id: detId(`submission:${inv.id}:clearance`), tenant_id: inv.tenant, invoice_id: inv.id,
+        submission_type: 'clearance', attempt: 1, status: 'cleared', http_status: 200,
+        response_code: 'BR-KSA-200', request_body_hash: keyedHash(`submission:${inv.id}`),
+        response_body: null, warnings: null, errors: null,
+        next_retry_at: null, submitted_at: iso(inv.issue, 9, 3), resolved_at: iso(inv.issue, 9, 5),
+        created_at: iso(inv.issue, 9, 3),
+      });
+    } else if (f) {
+      add('invoice_submissions', {
+        id: detId(`submission:${inv.id}:reporting`), tenant_id: inv.tenant, invoice_id: inv.id,
+        submission_type: 'reporting', attempt: 1, status: 'reported', http_status: 200,
+        response_code: 'BR-KSA-200', request_body_hash: keyedHash(`submission:${inv.id}`),
+        response_body: null, warnings: null, errors: null,
+        next_retry_at: null, submitted_at: iso(inv.issue, 9, 3), resolved_at: iso(inv.issue, 9, 4),
+        created_at: iso(inv.issue, 9, 3),
+      });
+    }
   }
 
   // ---------------------------------------------------------------- payments
@@ -890,6 +1154,28 @@ export function buildDemoSeed(): SeedRow[] {
   ];
 
   /*
+    ── A SECOND FIRM, ON THE SAME SAAS ────────────────────────────────────────────
+
+    Najd Legal Partners is a separate tenant with its own client, its own matter and
+    its own partner, and — the part that matters here — NO FISCAL IDENTITY AT ALL.
+    It has never onboarded an EGS unit with ZATCA and cannot issue a tax invoice.
+
+    That is not a gap in the fixture. It is the fixture's load-bearing negative case:
+    the only way to demonstrate on a live deployment that the fiscal gate REFUSES is
+    to have a firm for which it must, and a demo where every firm is compliant can
+    only ever show the happy path. `scripts/verify/invoice-fiscal-live.mjs` signs in
+    as this partner and attempts a send the firm is not entitled to make.
+  */
+  const najdPeople = [
+    { userId: 'dddddddd-0000-4000-8000-000000000020', staffId: 'f2000000-0000-4000-8000-000000000001',
+      email: 'partner@najd.example.test', template: 'MANAGING_PARTNER', department: 'LEGAL', isDeptLead: 1,
+      title: 'Managing Partner', titleAr: 'الشريك الإداري',
+      name: 'Sultan Al-Otaibi', nameAr: 'سلطان العتيبي',
+      practiceAreas: ['*'],
+      financial: 300000, writeoff: 50000, discount: 20, language: 'ar' },
+  ];
+
+  /*
     The eligibility layer (migration 0027).
 
     Two lawyers hold a valid licence; the paralegal, the compliance officer and
@@ -1011,6 +1297,61 @@ export function buildDemoSeed(): SeedRow[] {
     for (const area of f.practiceAreas) {
       add('membership_practice_areas', {
         membership_id: mId, practice_area: area, granted_at: iso(-120, 8),
+      });
+    }
+  }
+
+  /*
+    ── THE SECOND FIRM'S PARTNER ──────────────────────────────────────────────────
+
+    Seeded explicitly rather than by adding Najd to `firmPeople`, because everything
+    in that array is a KGM member: its membership id, its roles, its departments and
+    its practice areas are all keyed to the KGM tenant. Threading a tenant through
+    eight loops to serve one row would touch every line of a fixture whose ordering
+    already cost one production incident; four explicit inserts touch nothing.
+
+    He is a managing partner with full practice-area scope and real financial
+    authority, so nothing about his own authority refuses him. The ONLY thing that
+    stands between him and sending an invoice is that his firm has no fiscal identity
+    — which is exactly the single variable the fiscal gate is supposed to isolate.
+  */
+  {
+    const najd = najdPeople[0];
+    const najdMembershipId = detId(`firm_membership:${IDS.tenantNajd}:${najd.userId}`);
+    add('staff', {
+      id: najd.staffId, tenant_id: IDS.tenantNajd,
+      full_name: najd.name, full_name_ar: najd.nameAr,
+      internal_role: 'managing_partner', client_visible: 1,
+      email: najd.email, created_at: now,
+    });
+    add('users', {
+      id: najd.userId, email: najd.email, password_hash: firmPw,
+      password_updated_at: now, email_verified_at: now, status: 'active',
+      failed_login_count: 0, locked_until: null, last_login_at: null, last_login_ip_hash: null,
+      mfa_enabled: 0, mfa_method: null, mfa_secret_enc: null, mfa_enabled_at: null,
+      preferred_language: 'ar', preferred_calendar: 'islamic-umalqura',
+      created_at: now, updated_at: now,
+    });
+    add('firm_memberships', {
+      id: najdMembershipId, tenant_id: IDS.tenantNajd, user_id: najd.userId, staff_id: najd.staffId,
+      job_title: najd.title, job_title_ar: najd.titleAr, status: 'active',
+      financial_authority_sar: najd.financial, writeoff_authority_sar: najd.writeoff,
+      discount_authority_pct: najd.discount,
+      joined_at: iso(-90, 8), left_at: null, invited_by_membership_id: null,
+      created_at: now, updated_at: now,
+    });
+    add('membership_roles', {
+      membership_id: najdMembershipId, role_id: tenantRoleId(IDS.tenantNajd, najd.template),
+      granted_by_membership_id: null, grant_origin: 'bootstrap',
+      granted_at: iso(-90, 8), revoked_at: null,
+    });
+    add('department_members', {
+      department_id: deptId(IDS.tenantNajd, najd.department), membership_id: najdMembershipId,
+      is_lead: najd.isDeptLead, joined_at: iso(-90, 8),
+    });
+    for (const area of najd.practiceAreas) {
+      add('membership_practice_areas', {
+        membership_id: najdMembershipId, practice_area: area, granted_at: iso(-90, 8),
       });
     }
   }
@@ -1264,6 +1605,244 @@ export function buildDemoSeed(): SeedRow[] {
     The engine derives this value in production. Nothing in the running system reads
     a seeded `conflict_cleared` to decide anything.
   */
+
+  // ─────────────────────────────────────────────── what a fee rests on (0036)
+  /*
+    THE ENGAGEMENT CONTRACT, AND THE GATE IT OPERATES.
+
+    Only two of the five matters have a signed engagement letter, and that is the
+    point of the fixture rather than an oversight: the other matters are the ones on
+    which billable time is REFUSED, and the demo can show the refusal instead of
+    asserting that it would happen. A fixture where every gate passes demonstrates
+    nothing about the gates.
+  */
+  const engagementDocs: Record<string, string> = {
+    [IDS.matterCommercial]: 'c1000000-0000-4000-8000-000000000002',   // the signed letter, already a document
+    [IDS.matterGulf]: 'c1000000-0000-4000-8000-000000000005',
+  };
+  const engagementLetters = [
+    {
+      matter: IDS.matterCommercial, client: IDS.clientAhmed, fee: null as number | null,
+      scope: 'Representation in the commercial claim against Al-Fajr Contracting, through first instance.',
+      scopeAr: 'التمثيل في الدعوى التجارية ضد شركة الفجر للمقاولات أمام محكمة أول درجة.',
+      method: 'Hourly, at the rates in the firm rate card current at the date each hour is worked.',
+      methodAr: 'بالساعة، وفق جدول الأسعار الساري في تاريخ تسجيل كل ساعة.',
+    },
+    {
+      matter: IDS.matterGulf, client: IDS.clientGulf, fee: null as number | null,
+      scope: 'Advisory and transactional support on the acquisition of the Riyadh distribution business.',
+      scopeAr: 'الدعم الاستشاري والتعاقدي في الاستحواذ على نشاط التوزيع في الرياض.',
+      method: 'Hourly against an agreed cap of SAR 75,000, at which point the work is re-scoped in writing.',
+      methodAr: 'بالساعة بحد أقصى متفق عليه قدره ٧٥٬٠٠٠ ريال، يُعاد عنده تحديد النطاق كتابةً.',
+    },
+  ];
+  for (const el of engagementLetters) {
+    add('engagement_letters', {
+      id: detId(`engagement:${el.matter}`), tenant_id: IDS.tenantKgm, matter_id: el.matter,
+      client_id: el.client, scope: el.scope, scope_ar: el.scopeAr,
+      fee_amount_sar: el.fee, calculation_method: el.method,
+      signed_by_client_at: iso(-45), signed_by_client_name: el.client === IDS.clientGulf ? 'Khalid Al-Mutairi' : 'Ahmed Al-Saud',
+      document_id: engagementDocs[el.matter],
+      // Rule 11's three preconditions, recorded on the gate itself.
+      identity_verified_at: iso(-46), capacity_verified: 1,
+      status: 'signed', superseded_by: null, created_by_user_id: IDS.userSara,
+      created_at: iso(-46), 
+    });
+  }
+
+  const rateCard = [
+    { level: 'managing_partner', rate: 2_400 },
+    { level: 'partner', rate: 1_800 },
+    { level: 'senior_associate', rate: 1_200 },
+    { level: 'associate', rate: 900 },
+    { level: 'paralegal', rate: 350 },
+  ];
+  for (const rc of rateCard) {
+    add('rate_cards', {
+      id: detId(`rate_card:${rc.level}`), tenant_id: IDS.tenantKgm, level: rc.level,
+      staff_id: null, practice_area: null, hourly_rate_sar: rc.rate,
+      effective_from: date(-365), effective_to: null,
+      created_by_user_id: IDS.userSara, created_at: iso(-365),
+    });
+  }
+
+  /*
+    TERMS PER BASIS, so all four the rule's "method of calculation" resolves to are
+    visible in the demo, and so the capped one has something to be capped at.
+  */
+  const billingTerms = [
+    { matter: IDS.matterCommercial, basis: 'hourly', fee: null, cap: null, retainer: null, disc: 0,
+      notes: 'Standard hourly engagement. Rates per the firm card at the date worked.' },
+    { matter: IDS.matterGulf, basis: 'capped', fee: null, cap: 75_000, retainer: null, disc: 5,
+      notes: 'Capped at SAR 75,000 by written agreement of 12 August. Re-scope above the cap.' },
+    { matter: IDS.matterRealEstate, basis: 'fixed', fee: 9_500, cap: null, retainer: null, disc: 0,
+      notes: 'Fixed fee for the lease review, agreed in the engagement letter.' },
+    { matter: IDS.matterNukhba, basis: 'staged', fee: null, cap: null, retainer: null, disc: 0,
+      notes: 'Staged: pleadings, hearing, judgment.',
+      stages: JSON.stringify([{ label: 'Pleadings', amount: 20_000 }, { label: 'Hearing', amount: 15_000 }, { label: 'Judgment', amount: 10_000 }]) },
+  ];
+  for (const bt of billingTerms) {
+    add('matter_billing_terms', {
+      id: detId(`billing_terms:${bt.matter}`), tenant_id: IDS.tenantKgm, matter_id: bt.matter,
+      basis: bt.basis, fee_amount_sar: bt.fee, cap_amount_sar: bt.cap,
+      retainer_amount_sar: bt.retainer, stages: (bt as { stages?: string }).stages ?? null,
+      agreed_discount_pct: bt.disc, vat_applicable: 1,
+      effective_from: date(-45), effective_to: null, superseded_by: null, notes: bt.notes,
+      created_by_user_id: IDS.userSara, created_at: iso(-45),
+    });
+  }
+
+  /*
+    TIME, RECORDED AT THE RATE THAT APPLIED WHEN IT WAS WORKED — copied onto the row,
+    not joined at billing. Prices on the card change; hours already worked do not.
+  */
+  const timeWork = [
+    { matter: IDS.matterCommercial, staff: 1, days: -18, mins: 185, rate: 1_200,
+      narrative: 'Drafting statement of claim and reviewing the supply agreement.',
+      narrativeAr: 'صياغة صحيفة الدعوى ومراجعة اتفاقية التوريد.' },
+    { matter: IDS.matterCommercial, staff: 1, days: -14, mins: 95, rate: 1_200,
+      narrative: 'Attendance at the first case management session.',
+      narrativeAr: 'حضور جلسة إدارة الدعوى الأولى.' },
+    { matter: IDS.matterCommercial, staff: 2, days: -11, mins: 150, rate: 350,
+      narrative: 'Chronology and bundle preparation for the hearing file.',
+      narrativeAr: 'إعداد التسلسل الزمني وحزمة ملف الجلسة.' },
+    { matter: IDS.matterCommercial, staff: 0, days: -9, mins: 60, rate: 2_400,
+      narrative: 'Partner review of the claim before filing.',
+      narrativeAr: 'مراجعة الشريك لصحيفة الدعوى قبل التقديم.' },
+    { matter: IDS.matterGulf, staff: 1, days: -7, mins: 240, rate: 1_200,
+      narrative: 'Due diligence on the target and drafting the disclosure schedule.',
+      narrativeAr: 'العناية الواجبة على الشركة المستهدفة وصياغة جدول الإفصاح.' },
+    { matter: IDS.matterGulf, staff: 0, days: -4, mins: 90, rate: 2_400,
+      narrative: 'Negotiation session with opposing counsel on the price adjustment.',
+      narrativeAr: 'جلسة تفاوض مع محامي الطرف الآخر بشأن تعديل السعر.' },
+  ];
+  for (const t of timeWork) {
+    const amount = Math.round((t.mins / 60) * t.rate * 100) / 100;
+    add('time_entries', {
+      id: detId(`time:${t.matter}:${t.days}:${t.staff}`), tenant_id: IDS.tenantKgm,
+      matter_id: t.matter, staff_id: staff[t.staff].id, entry_date: date(t.days),
+      minutes: t.mins, narrative: t.narrative, narrative_ar: t.narrativeAr,
+      billable: 1, hourly_rate_sar: t.rate, amount_sar: amount,
+      invoice_id: null, status: 'approved',
+      approved_by_user_id: IDS.userSara, approved_at: iso(t.days + 1),
+      written_off_reason: null, created_at: iso(t.days), updated_at: iso(t.days + 1),
+    });
+  }
+  // A NON-BILLABLE HOUR on a matter with no engagement letter. Recorded, and
+  // deliberately not billable — which is the only kind of time this matter may hold.
+  add('time_entries', {
+    id: detId(`time:${IDS.matterEmployment}:pro-bono`), tenant_id: IDS.tenantKgm,
+    matter_id: IDS.matterEmployment, staff_id: staff[1].id, entry_date: date(-6),
+    minutes: 45, narrative: 'Initial assessment of the employment claim (no engagement in place).',
+    narrative_ar: 'التقييم الأولي لمطالبة العمل (لا يوجد خطاب ارتباط).',
+    billable: 0, hourly_rate_sar: 0, amount_sar: 0,
+    invoice_id: null, status: 'non_billable', approved_by_user_id: null, approved_at: null,
+    written_off_reason: null, created_at: iso(-6), updated_at: iso(-6),
+  });
+
+  // Disbursements. The reimbursable one carries its receipt; the internal one does not
+  // need to, because it is not being passed on.
+  add('expenses', {
+    id: detId('expense:gulf:court-fee'), tenant_id: IDS.tenantKgm, matter_id: IDS.matterGulf,
+    client_id: IDS.clientGulf, submitted_by_staff: staff[1].id, incurred_on: date(-7),
+    category: 'court_fee', description: 'Commercial court filing fee — acquisition dispute.',
+    description_ar: 'رسوم تقديم لدى المحكمة التجارية — نزاع الاستحواذ.',
+    net_amount_sar: 1_000, vat_amount_sar: 150, total_amount_sar: 1_150,
+    vat_category: 'standard', receipt_document_id: 'c1000000-0000-4000-8000-000000000007',
+    reimbursable: 1, invoice_id: null, status: 'approved',
+    approved_by_user_id: IDS.userSara, approved_at: iso(-6),
+    rejection_reason: null, created_at: iso(-7), updated_at: iso(-6),
+  });
+  add('expenses', {
+    id: detId('expense:commercial:translation'), tenant_id: IDS.tenantKgm, matter_id: IDS.matterCommercial,
+    client_id: IDS.clientAhmed, submitted_by_staff: staff[2].id, incurred_on: date(-12),
+    category: 'translation', description: 'Certified translation of the supply agreement.',
+    description_ar: 'ترجمة معتمدة لاتفاقية التوريد.',
+    net_amount_sar: 2_400, vat_amount_sar: 360, total_amount_sar: 2_760,
+    vat_category: 'standard', receipt_document_id: null,
+    // Not reimbursable: the firm absorbed it, so there is nothing to evidence to the
+    // client and nothing to recharge.
+    reimbursable: 0, invoice_id: null, status: 'approved',
+    approved_by_user_id: IDS.userSara, approved_at: iso(-11),
+    rejection_reason: null, created_at: iso(-12), updated_at: iso(-11),
+  });
+
+  // ────────────────────────────────────────────────────────────── client money (0035)
+  /*
+    A RETAINER HELD, AND PART OF IT APPLIED.
+
+    Ahmed paid SAR 25,000 on account before any invoice was raised. SAR 4,000 of it
+    has been applied to the lease-review invoice, which is why that invoice shows a
+    part payment — the invoice and the ledger tell the SAME story rather than two
+    stories that happen to be adjacent. The remaining SAR 21,000 is held, and it is
+    the firm's liability, not its cash.
+  */
+  add('client_ledgers', {
+    id: detId(`ledger:${IDS.clientAhmed}`), tenant_id: IDS.tenantKgm, client_id: IDS.clientAhmed,
+    currency: 'SAR', status: 'open', frozen_reason: null,
+    opened_at: iso(-30), closed_at: null, created_at: iso(-30), updated_at: iso(-30),
+  });
+  add('client_ledgers', {
+    id: detId(`ledger:${IDS.clientGulf}`), tenant_id: IDS.tenantKgm, client_id: IDS.clientGulf,
+    currency: 'SAR', status: 'open', frozen_reason: null,
+    opened_at: iso(-25), closed_at: null, created_at: iso(-25), updated_at: iso(-25),
+  });
+
+  add('ledger_entries', {
+    id: detId('ledger_entry:ahmed-receipt'), tenant_id: IDS.tenantKgm,
+    ledger_id: detId(`ledger:${IDS.clientAhmed}`), client_id: IDS.clientAhmed,
+    entry_type: 'receipt', direction: 'credit', amount: 25_000, currency: 'SAR',
+    invoice_id: null, matter_id: null,
+    description: 'Retainer received on account, before any invoice was raised.',
+    reference: 'IBAN transfer ref 88213', evidence_document_id: null,
+    reverses_entry_id: null, reversal_reason: null,
+    entry_at: iso(-30, 11), recorded_by_user_id: IDS.userSara, recorded_at: iso(-30, 11),
+  });
+  add('ledger_entries', {
+    id: detId('ledger_entry:ahmed-application'), tenant_id: IDS.tenantKgm,
+    ledger_id: detId(`ledger:${IDS.clientAhmed}`), client_id: IDS.clientAhmed,
+    entry_type: 'application_to_fee', direction: 'debit', amount: 4_000, currency: 'SAR',
+    invoice_id: 'd1000000-0000-4000-8000-000000000002', matter_id: IDS.matterRealEstate,
+    description: 'Applied against INV-2026-0151 (lease review, phase one).',
+    reference: 'INV-2026-0151', evidence_document_id: null,
+    reverses_entry_id: null, reversal_reason: null,
+    entry_at: iso(-4, 10), recorded_by_user_id: IDS.userSara, recorded_at: iso(-4, 10),
+  });
+  add('ledger_entries', {
+    id: detId('ledger_entry:gulf-receipt'), tenant_id: IDS.tenantKgm,
+    ledger_id: detId(`ledger:${IDS.clientGulf}`), client_id: IDS.clientGulf,
+    entry_type: 'receipt', direction: 'credit', amount: 40_000, currency: 'SAR',
+    invoice_id: null, matter_id: null,
+    description: 'Advance against disbursements on the acquisition matter.',
+    reference: 'IBAN transfer ref 90114', evidence_document_id: null,
+    reverses_entry_id: null, reversal_reason: null,
+    entry_at: iso(-25, 14), recorded_by_user_id: IDS.userSara, recorded_at: iso(-25, 14),
+  });
+
+  /*
+    TWO RECONCILIATIONS, AND THE SECOND ONE DOES NOT BALANCE.
+
+    A demo where every reconciliation agrees is a demo that has never been near a
+    client account. The discrepancy of SAR 1,250 is recorded with its explanation and
+    left open as 'investigated', which is what the schema makes you do — the row
+    cannot claim 'balanced' with a difference on it, and it cannot be amended
+    afterwards to make the difference go away.
+  */
+  add('ledger_reconciliations', {
+    id: detId('reconciliation:kgm:balanced'), tenant_id: IDS.tenantKgm, currency: 'SAR',
+    as_of: iso(-20, 23), ledger_total: 65_000, bank_balance: 65_000, difference: 0,
+    bank_statement_reference: 'SA03 8000 0000 6080 1016 7519 · 30 Jun',
+    bank_statement_document_id: null, clients_with_balance: 2, status: 'balanced',
+    notes: null, performed_by_user_id: IDS.userSara, performed_at: iso(-19), created_at: iso(-19),
+  });
+  add('ledger_reconciliations', {
+    id: detId('reconciliation:kgm:difference'), tenant_id: IDS.tenantKgm, currency: 'SAR',
+    as_of: iso(-2, 23), ledger_total: 61_000, bank_balance: 61_000 - 1_250, difference: 1_250,
+    bank_statement_reference: 'SA03 8000 0000 6080 1016 7519 · 31 Jul',
+    bank_statement_document_id: null, clients_with_balance: 2, status: 'investigated',
+    notes: 'SAR 1,250 bank charge posted by the bank on 30 July that has not yet been recorded against a client ledger. Charged to the firm, not to either client; to be posted as an operating expense.',
+    performed_by_user_id: IDS.userSara, performed_at: iso(-1), created_at: iso(-1),
+  });
 
   return rows;
 }

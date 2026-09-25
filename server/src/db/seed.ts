@@ -1,6 +1,6 @@
 import type { Db } from './types.js';
 import type { StorageDriver } from '../storage/service.js';
-import { buildDemoSeed, demoFileBytes, DEMO_ACCOUNTS, DEMO_PASSWORD,
+import { buildDemoSeed, demoIssuances, demoFileBytes, DEMO_ACCOUNTS, DEMO_PASSWORD,
          DEMO_FIRM_ACCOUNTS, DEMO_FIRM_PASSWORD } from './demo-data.js';
 
 const TABLE_ORDER = [
@@ -23,7 +23,48 @@ const TABLE_ORDER = [
   // after `firm_memberships`, because a check records who performed it.
   'parties', 'party_aliases', 'party_affiliations', 'matter_parties',
   'conflict_checks', 'conflict_hits', 'conflict_waivers',
+  /*
+    0034-0036 · the fiscal document, client money and the billing basis.
+
+    `fiscal_devices` before `invoices` because every issued invoice names the device
+    that issued it, and `invoice_submissions` after `invoices` because a submission
+    is about one. `client_ledgers` before `ledger_entries` for the same reason one
+    level down, and `engagement_letters` + `matter_billing_terms` before
+    `time_entries`, because the gate that admits a billable hour reads both.
+  */
+  'fiscal_identity', 'fiscal_devices', 'rate_cards',
+  'engagement_letters', 'matter_billing_terms',
+  'client_ledgers', 'ledger_entries',
+  'time_entries', 'expenses',
+  'invoice_submissions', 'credit_notes', 'ledger_reconciliations',
 ];
+
+/**
+ * The table whose insertion marks the moment issuing becomes both possible and legal.
+ *
+ * `payments` is the first table the builder emits once every invoice and every one of
+ * its lines has been written, and it is still well before the client ledgers — where an
+ * application of client money to a fee is refused unless the invoice has been ISSUED.
+ * Both constraints are real, and the pass has to land between them.
+ */
+const ISSUANCE_BOUNDARY = 'payments';
+
+/** Applies the deferred issuances: the second half of creating a tax invoice. */
+async function applyDemoIssuances(db: Db): Promise<void> {
+  for (const issuance of demoIssuances()) {
+    const cols = Object.keys(issuance.set);
+    const assignments = cols.map((c) => `${c} = ?`).join(', ');
+    try {
+      await db.run(
+        `update invoices set ${assignments} where id = ? and invoice_uuid is null`,
+        [...cols.map((c) => normalize(issuance.set[c])), issuance.id] as never,
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`seed failed issuing invoice ${issuance.id}: ${msg}`);
+    }
+  }
+}
 
 /**
  * Loads the synthetic demo dataset (§44). Idempotent: existing rows for the
@@ -63,6 +104,25 @@ export async function seedDemoData(
           cols.map((c) => normalize(row[c])) as never,
         );
         inserted++;
+        /*
+          THE ISSUANCE BOUNDARY.
+
+          Invoices are inserted as drafts, their lines are added, and their fiscal
+          identity is written by a second pass — the same two steps the product takes,
+          because 0034 refuses a line added to an invoice that already has a UUID and
+          refuses a sent invoice with no identity.
+
+          The pass runs HERE, at the fiscal device, rather than at the end of the seed,
+          and both halves of that are load-bearing:
+
+            · it must be after the lines, so the reconcile guard can compare the
+              document's totals with them;
+            · it must be before the client ledgers below, because an application of
+              client money to a fee is refused unless the invoice it is applied to has
+              been ISSUED — which is the guard doing its job on the fixture, and it
+              caught exactly this ordering the first time the pass was written.
+        */
+        if (table === ISSUANCE_BOUNDARY) await applyDemoIssuances(q);
       } catch (err) {
         // `on conflict do nothing` covers re-runs; anything else is a real bug.
         const msg = err instanceof Error ? err.message : String(err);
