@@ -380,6 +380,31 @@ export class PostgresDb implements Db {
   }
 
   /**
+   * THE HEAL, BEFORE THE HARM: close a corpse before the request that finds it needs a
+   * connection of its own.
+   *
+   * The end-of-request drain can only heal a container after a request has already failed
+   * on it, which is why the deployed system took four and a half minutes to come back from
+   * a storm: fifteen containers each had to lose a request before they would let go. This
+   * runs at the START of the request instead, so the session is released before the role
+   * check asks for one — the request that finds a corpse is the request that buries it.
+   *
+   * It never waits and never touches a live scope: if anything open is recent, this does
+   * nothing at all. Only a container whose every open scope is a corpse is healed, which
+   * is precisely the container that would otherwise take the fleet down.
+   */
+  heal(): void {
+    if (this.injectedPool || !this.currentPool || this.scopes.size === 0) return;
+    const cutoff = Date.now() - ABANDONED_MS;
+    let abandoned = 0;
+    for (const openedAt of this.scopes.values()) {
+      if (openedAt <= cutoff) abandoned += 1;
+    }
+    if (abandoned !== this.scopes.size) return;
+    this.closeAbandoned(this.currentPool);
+  }
+
+  /**
    * Closes connections whose request is gone for good.
    *
    * Only scopes older than `ABANDONED_MS` are touched. Two seconds of waiting is enough

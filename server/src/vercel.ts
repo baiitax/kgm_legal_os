@@ -149,7 +149,7 @@ function answerNotReady(res: ServerResponse, requestId: string | null): void {
  */
 async function handBackSessions(): Promise<void> {
   try {
-    const db = getDb() as unknown as { drain?: () => Promise<void> };
+    const db = getDb() as unknown as { drain?: () => Promise<void>; heal?: () => void };
     if (typeof db?.drain === 'function') await db.drain();
   } catch (err) {
     /* Failing to close a connection must not fail a request that already succeeded. */
@@ -160,6 +160,10 @@ async function handBackSessions(): Promise<void> {
 export default async function handler(req: IncomingMessage, res: ServerResponse): Promise<void> {
   normalizeRequestUrl(req, res);
   const requestId = (res.getHeader('x-request-id') as string | undefined) ?? null;
+  /* BEFORE the role check, because that check needs a connection of its own: a container
+     still holding a session for a request that was killed has to let go first, or it will
+     refuse everything — including the request that could have freed it. */
+  (getDb() as unknown as { heal?: () => void }).heal?.();
   try {
     try {
       await ensureSafe();

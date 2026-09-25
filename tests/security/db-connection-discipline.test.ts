@@ -429,6 +429,46 @@ describe('what a transient failure looks like to the person at the desk', () => 
     vi.resetModules();
   });
 
+  it('buries the corpse before asking for a connection of its own', async () => {
+    /*
+      The difference between recovering in seconds and recovering in four and a half
+      minutes. `heal()` runs at the START of a request, before the role check — which is
+      itself a request for a connection. A container holding a session for a request that
+      was killed therefore releases it and THEN asks for one, instead of being refused,
+      failing, and only then letting go (measured on the deployment: 277 seconds of
+      refusals, healed one lost request at a time).
+    */
+    const { PostgresDb: Driver, built } = await withMockedPg();
+    const db = new Driver('postgres://portal_api@example.invalid:5432/postgres', 1);
+
+    await db.acquire();
+    const internals = db as unknown as { scopes: Map<unknown, number> };
+    for (const [client] of internals.scopes) internals.scopes.set(client, Date.now() - 60_000);
+
+    db.heal();                                  // synchronous on purpose: no waiting here
+
+    expect(built[0].lastClient?.ended).toBe(true);
+
+    vi.doUnmock('pg');
+    vi.resetModules();
+  });
+
+  it('will not heal a container while a live request is using it', async () => {
+    /* The one thing `heal()` must never do. If any open scope is recent, it does nothing:
+       a container with a live request in it is not a container that needs burying. */
+    const { PostgresDb: Driver, built } = await withMockedPg();
+    const db = new Driver('postgres://portal_api@example.invalid:5432/postgres', 1);
+
+    await db.acquire();                         // this request is in flight
+    db.heal();
+
+    expect(built[0].lastClient?.ended).toBe(false);
+    expect(built[0].ended).toBe(false);
+
+    vi.doUnmock('pg');
+    vi.resetModules();
+  });
+
   it('leaves a slow request alone — only corpses are force-closed', async () => {
     /* The counterpart, and the reason the age is recorded at all: closing the connection
        under a request that is merely slow would break a real request to tidy up a real
