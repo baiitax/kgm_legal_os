@@ -179,6 +179,13 @@ import { isTransientConnectionError } from './transient.js';
  * callers cannot mutate the facts a verdict was derived from; the boot check
  * fills it in after the connection has already been judged.
  */
+/**
+ * How long a request scope may be open before a drain treats it as a corpse rather than a
+ * request in flight. Comfortably longer than any request this API serves (the connect
+ * ladder alone is ten seconds) and far shorter than a container's life.
+ */
+const ABANDONED_MS = 20_000;
+
 type MutableRoleFacts = Omit<RoleFacts, 'assumedRoles'> & { assumedRoles?: readonly AssumedRoleFacts[] };
 
 export class PostgresDb implements Db {
@@ -236,6 +243,24 @@ export class PostgresDb implements Db {
    */
   private outstanding = 0;
   private idleWaiters: (() => void)[] = [];
+
+  /**
+   * THE SCOPES THAT ARE STILL OPEN, AND WHEN THEY OPENED.
+   *
+   * A request that is KILLED mid-flight — the function budget runs out, the platform
+   * recycles the instance — never reaches the code that hands its connection back. The
+   * socket stays attached to the pooler for the life of the container, and the container
+   * is warm: it will serve the next request while still holding a session that no code
+   * path will ever release. Fifteen of those and the whole fleet is refused, which is
+   * exactly the state measured after a storm of concurrent sign-ins:
+   *
+   *     portal_api backends: 15     a new client from anywhere: EMAXCONNSESSION
+   *
+   * The age is recorded so that only genuine corpses are force-closed: a request that is
+   * merely slow is still running, and closing its connection under it would be its own
+   * kind of bug.
+   */
+  private readonly scopes = new Map<pg.PoolClient, number>();
 
   private releaseScope(): void {
     this.outstanding = Math.max(0, this.outstanding - 1);
@@ -354,6 +379,39 @@ export class PostgresDb implements Db {
     return this.draining;
   }
 
+  /**
+   * Closes connections whose request is gone for good.
+   *
+   * Only scopes older than `ABANDONED_MS` are touched. Two seconds of waiting is enough
+   * for the ordinary case — the auth middleware releases its scope a tick after the
+   * response is flushed — so anything still open after twenty seconds is not a request
+   * that is about to finish; it is a request that was killed. Its socket is closed here
+   * and the pool is thrown away, because the alternative is a container that holds a
+   * session until it is reaped, and a fleet that has to be rescued by hand.
+   */
+  private closeAbandoned(pool: pg.Pool): void {
+    const cutoff = Date.now() - ABANDONED_MS;
+    let closed = 0;
+    for (const [client, openedAt] of this.scopes) {
+      if (openedAt > cutoff) continue;
+      this.scopes.delete(client);
+      this.outstanding = Math.max(0, this.outstanding - 1);
+      closed += 1;
+      void client.end().catch(() => {
+        /* already gone */
+      });
+    }
+    if (!closed) return;
+    console.warn(
+      `[db] closed ${closed} abandoned connection(s): a request was killed before it could `
+      + 'hand its session back. Rebuilding the pool.',
+    );
+    this.currentPool = undefined;
+    void pool.end().catch(() => {
+      /* the pool is being abandoned on purpose */
+    });
+  }
+
   /** The body of a drain, once one is in flight. */
   private async closeIfIdle(pool: pg.Pool): Promise<void> {
     /*
@@ -370,7 +428,7 @@ export class PostgresDb implements Db {
       function open.
     */
     if (!(await this.awaitScopes(2_000))) {
-      console.warn(`[db] drain skipped: ${this.outstanding} request scope(s) still open after 2s`);
+      this.closeAbandoned(pool);
       return;
     }
     if (this.currentPool !== pool) return;
@@ -624,8 +682,12 @@ export class PostgresDb implements Db {
   async acquire(): Promise<Scope> {
     const client = await this.connect();
     this.outstanding += 1;
+    this.scopes.set(client, Date.now());
     /* Captured because `scope.end()` below is a method on a different object. */
-    const scopeClosed = () => this.releaseScope();
+    const scopeClosed = () => {
+      this.scopes.delete(client);
+      this.releaseScope();
+    };
     let txDepth = 0;
     let ended = false;
 

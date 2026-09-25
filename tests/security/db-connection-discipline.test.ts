@@ -64,6 +64,12 @@ class FakeClient {
   release() {
     this.released += 1;
   }
+
+  /** A real connection can be closed, and a leaked one has to be. */
+  ended = false;
+  async end(): Promise<void> {
+    this.ended = true;
+  }
 }
 
 class FakePool {
@@ -124,6 +130,7 @@ async function withMockedPg() {
     totalCount = 0;
     waitingCount = 0;
     ended = false;
+    lastClient: FakeClient | undefined;
     private _busy = false;
 
     /** A second request on this container is mid-query: nothing is on the shelf. */
@@ -150,6 +157,7 @@ async function withMockedPg() {
       this.totalCount = Math.max(this.totalCount, 1);
       const pool = this;
       const client = new FakeClient();
+      this.lastClient = client;
       const released = client.release.bind(client);
       client.release = () => {
         released();
@@ -383,6 +391,58 @@ describe('what a transient failure looks like to the person at the desk', () => 
     expect(built[0].ended).toBe(true);
     expect(built).toHaveLength(1);
 
+    vi.doUnmock('pg');
+    vi.resetModules();
+  });
+
+  it('closes a connection whose request was killed, and throws the pool away', async () => {
+    /*
+      THE CORPSE IN THE WARM CONTAINER.
+
+      A request that is killed — budget exhausted, instance recycled — never reaches the
+      code that hands its connection back. Its socket stays attached to the pooler while
+      the container keeps serving new requests, and fifteen of those take the whole fleet
+      down: measured after a storm of concurrent sign-ins, fifteen backends held and a
+      new client refused from anywhere, including outside Vercel. Nothing on the client
+      side can reclaim it; only the container that holds it can let go.
+
+      A scope that has been open for twenty seconds is not a request in flight — this API
+      answers in well under a second and the connect ladder alone accounts for ten — so it
+      is closed, and the pool goes with it.
+    */
+    const { PostgresDb: Driver, built } = await withMockedPg();
+    const db = new Driver('postgres://portal_api@example.invalid:5432/postgres', 1);
+
+    await db.acquire();                         // and then: killed. No `end()` ever runs.
+    const internals = db as unknown as { scopes: Map<unknown, number> };
+    for (const [client] of internals.scopes) internals.scopes.set(client, Date.now() - 60_000);
+
+    await db.drain();
+
+    expect(built[0].lastClient?.ended).toBe(true);
+    expect(built[0].ended).toBe(true);
+
+    await db.all('select 1');                   // the next request gets a fresh pool
+    expect(built).toHaveLength(2);
+
+    vi.doUnmock('pg');
+    vi.resetModules();
+  });
+
+  it('leaves a slow request alone — only corpses are force-closed', async () => {
+    /* The counterpart, and the reason the age is recorded at all: closing the connection
+       under a request that is merely slow would break a real request to tidy up a real
+       one. */
+    const { PostgresDb: Driver, built } = await withMockedPg();
+    const db = new Driver('postgres://portal_api@example.invalid:5432/postgres', 1);
+
+    const scope = await db.acquire();
+    await db.drain();
+
+    expect(built[0].lastClient?.ended).toBe(false);
+    expect(built[0].ended).toBe(false);
+
+    await scope.end();                          // it finishes normally, as most do
     vi.doUnmock('pg');
     vi.resetModules();
   });
