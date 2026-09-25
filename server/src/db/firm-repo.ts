@@ -24,6 +24,11 @@ import type { Db, Param, Queryable, Row } from './types.js';
 import { currentQueryable, currentScope } from './context.js';
 import { toBool, toIso, toNumber, toStr } from './types.js';
 import { newId } from '../lib/crypto.js';
+import {
+  evaluateConflicts, type AffiliationRecord, type ClientRecord, type ConflictFinding,
+  type MatterPartyRecord, type MatterPartyRole, type PartyIdentity, type PriorAppearance,
+} from '../domain/conflict-engine.js';
+import { normalizeArabicName } from '../domain/arabic-names.js';
 
 /** The membership row plus the identity it points at. */
 export interface MembershipRow {
@@ -967,7 +972,7 @@ export class FirmRepo {
     );
     return rows.map((r) => ({
       id: String(r.id),
-      createdAt: toIso(r.created_at),
+      createdAt: req(toIso(r.created_at)),
       lastActivity: toIso(r.last_activity),
       expiresAt: toIso(r.expires_at),
       ipCountry: toStr(r.ip_country),
@@ -1374,6 +1379,744 @@ export class FirmRepo {
     );
   }
 
+  // ── P0.1 · parties and conflicts ──────────────────────────────────────────
+
+  /**
+   * The party register.
+   *
+   * `query` is a plain substring search over the stored normalised name and the
+   * aliases, using `normalizeArabicName` on the input so that a search for
+   * «الأفق» finds a party stored as «شركة الافق للتجارة». It is NOT the conflict
+   * search: that one is exhaustive over the firm's own workload and lives in
+   * `loadConflictDataset`.
+   */
+  async listParties(tenantId: string, opts: { query?: string; limit?: number } = {}): Promise<PartyRow[]> {
+    const limit = Math.min(Math.max(opts.limit ?? 100, 1), 500);
+    const normalized = opts.query ? normalizeArabicName(opts.query) : null;
+    const rows = normalized
+      ? await this.q().all<Row>(
+        `select p.id, p.tenant_id, p.kind, p.name, p.name_ar, p.name_normalized,
+                p.commercial_registration, p.vat_number, p.national_id_masked, p.status,
+                p.notes, p.created_at,
+                (select count(*) from matter_parties mp where mp.party_id = p.id) as matter_count
+           from parties p
+          where p.tenant_id = ?
+            and (p.name_normalized like ?
+                 or exists (select 1 from party_aliases a
+                             where a.party_id = p.id and a.alias_normalized like ?))
+          order by p.name
+          limit ${limit}`,
+        [tenantId, `%${normalized}%`, `%${normalized}%`],
+      )
+      : await this.q().all<Row>(
+        `select p.id, p.tenant_id, p.kind, p.name, p.name_ar, p.name_normalized,
+                p.commercial_registration, p.vat_number, p.national_id_masked, p.status,
+                p.notes, p.created_at,
+                (select count(*) from matter_parties mp where mp.party_id = p.id) as matter_count
+           from parties p
+          where p.tenant_id = ?
+          order by p.name
+          limit ${limit}`,
+        [tenantId],
+      );
+    return rows.map(toPartyRow);
+  }
+
+  async getParty(tenantId: string, partyId: string): Promise<PartyRow | null> {
+    const row = await this.q().get<Row>(
+      `select p.id, p.tenant_id, p.kind, p.name, p.name_ar, p.name_normalized,
+              p.commercial_registration, p.vat_number, p.national_id_masked, p.status,
+              p.notes, p.created_at, 0 as matter_count
+         from parties p where p.id = ? and p.tenant_id = ?`,
+      [partyId, tenantId],
+    );
+    return row ? toPartyRow(row) : null;
+  }
+
+  async createParty(opts: {
+    id: string; tenantId: string; kind: string; name: string; nameAr: string | null;
+    normalized: string; commercialRegistration: string | null; vatNumber: string | null;
+    nationalIdMasked: string | null; nationalIdHash: string | null;
+    notes: string | null; createdByMembershipId: string;
+  }): Promise<void> {
+    const now = new Date().toISOString();
+    await this.q().run(
+      `insert into parties
+         (id, tenant_id, kind, name, name_ar, name_normalized, commercial_registration,
+          vat_number, national_id_masked, national_id_hash, status, notes,
+          created_by_membership_id, created_at, updated_at)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`,
+      [opts.id, opts.tenantId, opts.kind, opts.name, opts.nameAr, opts.normalized,
+       opts.commercialRegistration, opts.vatNumber, opts.nationalIdMasked, opts.nationalIdHash,
+       opts.notes, opts.createdByMembershipId, now, now],
+    );
+  }
+
+  async updateParty(opts: {
+    tenantId: string; partyId: string; name?: string; nameAr?: string | null;
+    normalized?: string; notes?: string | null; kind?: string;
+  }): Promise<void> {
+    const sets: string[] = [];
+    const params: unknown[] = [];
+    if (opts.name !== undefined) { sets.push('name = ?'); params.push(opts.name); }
+    if (opts.nameAr !== undefined) { sets.push('name_ar = ?'); params.push(opts.nameAr); }
+    if (opts.normalized !== undefined) { sets.push('name_normalized = ?'); params.push(opts.normalized); }
+    if (opts.notes !== undefined) { sets.push('notes = ?'); params.push(opts.notes); }
+    if (opts.kind !== undefined) { sets.push('kind = ?'); params.push(opts.kind); }
+    if (!sets.length) return;
+    sets.push('updated_at = ?');
+    params.push(new Date().toISOString(), opts.partyId, opts.tenantId);
+    await this.q().run(
+      `update parties set ${sets.join(', ')} where id = ? and tenant_id = ?`,
+      params as never,
+    );
+  }
+
+  /**
+   * Records a name variant.
+   *
+   * The unique key is (tenant, party, normalised alias), so re-recording a variant
+   * the firm already knows is a no-op rather than a duplicate — but two DIFFERENT
+   * spellings that normalise to the same value are the same variant, which is the
+   * point of normalising at all.
+   */
+  async addPartyAlias(opts: {
+    id: string; tenantId: string; partyId: string; alias: string;
+    normalized: string; script: string; source: string | null; note?: string | null;
+  }): Promise<void> {
+    const now = new Date().toISOString();
+    await this.q().run(
+      `insert into party_aliases
+         (id, tenant_id, party_id, alias, alias_normalized, script, source, note,
+          created_at, updated_at)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       on conflict do nothing`,
+      [opts.id, opts.tenantId, opts.partyId, opts.alias, opts.normalized,
+       opts.script, opts.source, opts.note ?? null, now, now],
+    );
+  }
+
+  async listAliases(tenantId: string, partyId: string): Promise<Array<{
+    id: string; alias: string; script: string; source: string | null; note: string | null;
+  }>> {
+    const rows = await this.q().all<Row>(
+      `select id, alias, script, source, note from party_aliases
+        where tenant_id = ? and party_id = ? order by created_at`,
+      [tenantId, partyId],
+    );
+    return rows.map((r) => ({
+      id: req(r.id), alias: req(r.alias), script: req(r.script),
+      source: r.source == null ? null : req(r.source),
+      note: r.note == null ? null : req(r.note),
+    }));
+  }
+
+  async recordAffiliation(opts: {
+    id: string; tenantId: string; partyId: string; staffId: string; relation: string;
+    startedOn: string | null; endedOn: string | null; note: string | null;
+    recordedByMembershipId: string;
+  }): Promise<void> {
+    const now = new Date().toISOString();
+    await this.q().run(
+      `insert into party_affiliations
+         (id, tenant_id, party_id, staff_id, relation, started_on, ended_on, note,
+          recorded_by_membership_id, created_at, updated_at)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       on conflict do nothing`,
+      [opts.id, opts.tenantId, opts.partyId, opts.staffId, opts.relation,
+       opts.startedOn, opts.endedOn, opts.note, opts.recordedByMembershipId, now, now],
+    );
+  }
+
+  async addMatterParty(opts: {
+    id: string; tenantId: string; matterId: string; partyId: string; role: string;
+    note: string | null; addedByMembershipId: string;
+  }): Promise<void> {
+    const now = new Date().toISOString();
+    await this.q().run(
+      `insert into matter_parties
+         (id, tenant_id, matter_id, party_id, role, note, added_by_membership_id, created_at, updated_at)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       on conflict do nothing`,
+      [opts.id, opts.tenantId, opts.matterId, opts.partyId, opts.role,
+       opts.note, opts.addedByMembershipId, now, now],
+    );
+  }
+
+  async listMatterParties(tenantId: string, matterId: string): Promise<Array<{
+    id: string; partyId: string; role: string; note: string | null; createdAt: string;
+    name: string; nameAr: string | null; kind: string; status: string;
+  }>> {
+    const rows = await this.q().all<Row>(
+      `select mp.id, mp.party_id, mp.role, mp.note, mp.created_at,
+              p.name, p.name_ar, p.kind, p.status
+         from matter_parties mp
+         join parties p on p.id = mp.party_id
+        where mp.tenant_id = ? and mp.matter_id = ?
+        order by mp.created_at`,
+      [tenantId, matterId],
+    );
+    return rows.map((r) => ({
+      id: req(r.id), partyId: req(r.party_id), role: req(r.role),
+      note: r.note == null ? null : req(r.note), createdAt: req(toIso(r.created_at)),
+      name: req(r.name), nameAr: r.name_ar == null ? null : req(r.name_ar),
+      kind: req(r.kind), status: req(r.status),
+    }));
+  }
+
+  /**
+   * Loads everything the conflict engine needs for one matter.
+   *
+   * IT LOADS THE WHOLE FIRM'S RECORD ON PURPOSE, and that is a deliberate refusal to
+   * be clever. The alternative — a candidate query that prefilters parties by a
+   * shared token or a shared identifier — is faster and is exactly the kind of
+   * optimisation that turns a conflict check into "we did not find it", with the
+   * firm's disqualification as the failure mode. A checkpoint that can MISS is worse
+   * than a checkpoint that is slow: the miss is silent, and it is discovered by the
+   * other side.
+   *
+   * The bounded resource is the firm's own workload, not a global corpus: a ten-lawyer
+   * practice has thousands of matters and tens of thousands of party links. When this
+   * stops fitting in memory the answer is a purpose-built index over the same
+   * predicate, not a narrower query — and the numbers are logged so that decision is
+   * made on evidence rather than on a hunch.
+   */
+  async loadConflictDataset(tenantId: string, matterId: string): Promise<{
+    matter: Row | null;
+    parties: MatterPartyRecord[];
+    priorAppearances: PriorAppearance[];
+    clients: ClientRecord[];
+    affiliations: AffiliationRecord[];
+    clientMatters: Array<{ clientId: string; matterId: string; caseNumber: string | null; status: string }>;
+    rowCount: number;
+  }> {
+    const matterRow = await this.q().get<Row>(
+      `select id, tenant_id, client_id, matter_number, case_number, internal_status, closed_at
+         from matters where id = ? and tenant_id = ?`,
+      [matterId, tenantId],
+    );
+    if (!matterRow) {
+      return {
+        matter: null, parties: [], priorAppearances: [], clients: [],
+        affiliations: [], clientMatters: [], rowCount: 0,
+      };
+    }
+
+    const partyRows = await this.q().all<Row>(
+      `select p.id, p.kind, p.name, p.name_ar, p.commercial_registration, p.vat_number,
+              p.national_id_hash, p.status, p.merged_into_party_id
+         from parties p where p.tenant_id = ?`,
+      [tenantId],
+    );
+    const aliasRows = await this.q().all<Row>(
+      `select party_id, alias from party_aliases where tenant_id = ?`,
+      [tenantId],
+    );
+    const aliasesByParty = new Map<string, string[]>();
+    for (const a of aliasRows) {
+      const key = req(a.party_id);
+      const list = aliasesByParty.get(key) ?? [];
+      list.push(req(a.alias));
+      aliasesByParty.set(key, list);
+    }
+    // A merged party resolves to its target, so a register cleaned up by merging
+    // does not stop matching the spellings that were merged away.
+    const mergedInto = new Map<string, string>();
+    const identityOf = (r: Row): PartyIdentity => {
+      const id = req(r.id);
+      return {
+        id,
+        kind: req(r.kind),
+        name: req(r.name),
+        nameAr: r.name_ar == null ? null : req(r.name_ar),
+        aliases: aliasesByParty.get(id) ?? [],
+        commercialRegistration: r.commercial_registration == null ? null : req(r.commercial_registration),
+        vatNumber: r.vat_number == null ? null : req(r.vat_number),
+        nationalIdHash: r.national_id_hash == null ? null : req(r.national_id_hash),
+      };
+    };
+    const partiesById = new Map<string, PartyIdentity>();
+    for (const r of partyRows) {
+      const id = req(r.id);
+      if (r.merged_into_party_id != null) mergedInto.set(id, req(r.merged_into_party_id));
+      partiesById.set(id, identityOf(r));
+    }
+    const resolve = (id: string): PartyIdentity | null => {
+      let cursor = id;
+      for (let hops = 0; hops < 8; hops += 1) {
+        const target = mergedInto.get(cursor);
+        if (!target) break;
+        cursor = target;
+      }
+      return partiesById.get(cursor) ?? partiesById.get(id) ?? null;
+    };
+
+    // The matters on this matter — the screening subjects, minus the client, who is
+    // carried separately because the client of a matter is not a `matter_parties` row.
+    const mpRows = await this.q().all<Row>(
+      `select party_id, role from matter_parties
+        where tenant_id = ? and matter_id = ? and role <> 'client'`,
+      [tenantId, matterId],
+    );
+    const parties: MatterPartyRecord[] = [];
+    for (const r of mpRows) {
+      const identity = resolve(req(r.party_id));
+      if (identity) parties.push({ party: identity, role: req(r.role) as MatterPartyRole });
+    }
+
+    // Every appearance of every party in every matter of this firm, open or closed.
+    // No status filter: Rule 8/4 measures from the END of a former client
+    // relationship, so the closed files are the ones that matter most.
+    const appearanceRows = await this.q().all<Row>(
+      `select mp.party_id, mp.role, m.id as matter_id, m.matter_number, m.case_number,
+              m.internal_status, m.closed_at, m.client_id
+         from matter_parties mp
+         join matters m on m.id = mp.matter_id
+        where mp.tenant_id = ? and m.tenant_id = ? and mp.matter_id <> ?`,
+      [tenantId, tenantId, matterId],
+    );
+    const priorAppearances: PriorAppearance[] = [];
+    for (const r of appearanceRows) {
+      const identity = resolve(req(r.party_id));
+      if (!identity) continue;
+      priorAppearances.push({
+        party: identity,
+        matterId: req(r.matter_id),
+        matterNumber: req(r.matter_number),
+        caseNumber: r.case_number == null ? null : req(r.case_number),
+        role: req(r.role) as MatterPartyRole,
+        matterStatus: req(r.internal_status),
+        closedAt: r.closed_at == null ? null : toIso(r.closed_at),
+      });
+    }
+
+    /*
+      Clients are loaded WHOLLY and matched in TypeScript rather than prefiltered,
+      and the reason is the asymmetry of the two questions. "Was this party ever our
+      client?" decides disqualification; "was this party on a matter with the same
+      case number?" is an exact comparison the database can make. So the fuzzy half
+      runs over a set small enough to be exhaustive — a client list, not a party
+      list — and the exact half runs in SQL.
+    */
+    const clientRows = await this.q().all<Row>(
+      `select c.id, c.party_id, c.client_type, c.name, c.name_ar, c.status,
+              c.relationship_ended_on, c.national_id_hash, c.commercial_reg_masked,
+              (select max(m.closed_at) from matters m where m.client_id = c.id) as last_closed
+         from clients c where c.tenant_id = ?`,
+      [tenantId],
+    );
+    const clients: ClientRecord[] = [];
+    for (const r of clientRows) {
+      const linked = r.party_id == null ? null : resolve(req(r.party_id));
+      const clientId = req(r.id);
+      const identity: PartyIdentity = linked ?? {
+        id: `client:${clientId}`,
+        kind: req(r.client_type) === 'organization' ? 'company' : 'individual',
+        name: req(r.name),
+        nameAr: r.name_ar == null ? null : req(r.name_ar),
+        aliases: aliasesByParty.get(clientId) ?? [],
+        commercialRegistration: null,
+        vatNumber: null,
+        nationalIdHash: r.national_id_hash == null ? null : req(r.national_id_hash),
+      };
+      clients.push({
+        clientId,
+        partyId: linked?.id ?? null,
+        identity,
+        status: req(r.status),
+        // Rule 8/4 measures from the end of the relationship OR from the last work
+        // done for them, so the column is an override and the newest closed matter
+        // is the fallback. `closed_at` populated means the relationship has ended;
+        // an open matter means it has not, whatever the column says — a client with
+        // work in progress is not a former client.
+        relationshipEndedOn: clientRelationshipEndedOn({
+          explicit: r.relationship_ended_on == null ? null : (toIso(r.relationship_ended_on) ?? '').slice(0, 10),
+          lastClosed: r.last_closed == null ? null : (toIso(r.last_closed) ?? '').slice(0, 10),
+          status: req(r.status),
+        }),
+      });
+    }
+
+    // Which matters belong to which client, for المادة ١٠/٤. Not derivable from
+    // matter_parties: the client of a matter is matters.client_id.
+    const clientMatterRows = await this.q().all<Row>(
+      `select id as matter_id, client_id, case_number, internal_status
+         from matters where tenant_id = ?`,
+      [tenantId],
+    );
+    const clientMatters = clientMatterRows.map((r) => ({
+      clientId: req(r.client_id),
+      matterId: req(r.matter_id),
+      caseNumber: r.case_number == null ? null : req(r.case_number),
+      status: req(r.internal_status),
+    }));
+
+    const affiliationRows = await this.q().all<Row>(
+      `select a.party_id, a.staff_id, a.relation, a.ended_on, s.full_name
+         from party_affiliations a
+         join staff s on s.id = a.staff_id
+        where a.tenant_id = ?`,
+      [tenantId],
+    );
+    const affiliations: AffiliationRecord[] = [];
+    for (const r of affiliationRows) {
+      const identity = resolve(req(r.party_id));
+      if (!identity) continue;
+      affiliations.push({
+        staffId: req(r.staff_id),
+        staffName: req(r.full_name),
+        party: identity,
+        relation: req(r.relation) as AffiliationRecord['relation'],
+        endedOn: r.ended_on == null ? null : (toIso(r.ended_on) ?? '').slice(0, 10),
+      });
+    }
+
+    return {
+      matter: matterRow, parties, priorAppearances, clients, affiliations, clientMatters,
+      rowCount: partyRows.length + appearanceRows.length + clientRows.length + affiliationRows.length,
+    };
+  }
+
+  /** The identity of the client of a matter, for the engine's other half. */
+  async clientIdentityForMatter(tenantId: string, clientId: string): Promise<PartyIdentity | null> {
+    const row = await this.q().get<Row>(
+      `select p.id, p.kind, p.name, p.name_ar, p.commercial_registration, p.vat_number,
+              p.national_id_hash
+         from parties p
+         join clients c on c.party_id = p.id
+        where c.id = ? and c.tenant_id = ?`,
+      [clientId, tenantId],
+    );
+    if (row) {
+      const aliases = await this.q().all<Row>(
+        `select alias from party_aliases where tenant_id = ? and party_id = ?`,
+        [tenantId, req(row.id)],
+      );
+      return {
+        id: req(row.id), kind: req(row.kind), name: req(row.name),
+        nameAr: row.name_ar == null ? null : req(row.name_ar),
+        aliases: aliases.map((a) => req(a.alias)),
+        commercialRegistration: row.commercial_registration == null ? null : req(row.commercial_registration),
+        vatNumber: row.vat_number == null ? null : req(row.vat_number),
+        nationalIdHash: row.national_id_hash == null ? null : req(row.national_id_hash),
+      };
+    }
+    // A client that predates the register. It is matched on its own name columns,
+    // which is the one storage path the party register did not replace — see the
+    // note on `clients.party_id` in migration 0029.
+    const legacy = await this.q().get<Row>(
+      `select id, client_type, name, name_ar, national_id_hash
+         from clients where id = ? and tenant_id = ?`,
+      [clientId, tenantId],
+    );
+    if (!legacy) return null;
+    return {
+      id: `client:${req(legacy.id)}`,
+      kind: req(legacy.client_type) === 'organization' ? 'company' : 'individual',
+      name: req(legacy.name),
+      nameAr: legacy.name_ar == null ? null : req(legacy.name_ar),
+      aliases: [],
+      commercialRegistration: null,
+      vatNumber: null,
+      nationalIdHash: legacy.national_id_hash == null ? null : req(legacy.national_id_hash),
+    };
+  }
+
+  // ── conflict checks ──────────────────────────────────────────────────────
+
+  async createConflictCheck(opts: {
+    id: string; tenantId: string; matterId: string; kind: string;
+    startedByMembershipId: string;
+  }): Promise<void> {
+    const now = new Date().toISOString();
+    await this.q().run(
+      `insert into conflict_checks
+         (id, tenant_id, matter_id, kind, status, parties_checked, matters_searched,
+          hits_found, started_by_membership_id, started_at, created_at, updated_at)
+       values (?, ?, ?, ?, 'running', 0, 0, 0, ?, ?, ?, ?)`,
+      [opts.id, opts.tenantId, opts.matterId, opts.kind, opts.startedByMembershipId, now, now, now],
+    );
+  }
+
+  async recordConflictHit(opts: {
+    id: string; tenantId: string; checkId: string; matterId: string;
+    finding: ConflictFinding;
+  }): Promise<void> {
+    const now = new Date().toISOString();
+    const f = opts.finding;
+    await this.q().run(
+      /*
+        NOTE THE COLUMN. The engine's severity goes to `proposed_severity`, and
+        `severity` is left null, because the hit is `open` and
+        `conflict_hits_severity_needs_confirmation` permits a severity only once
+        somebody has recorded that the hit IS a conflict.
+
+        This was written the other way round first, and every check that found
+        anything failed with "CHECK constraint failed: severity is null or disposition
+        = 'same_party'". The constraint was right. A matcher may raise a suspicion; it
+        may not declare a conflict, and the schema is where that is enforced rather
+        than in a convention nobody can see.
+      */
+      `insert into conflict_hits
+         (id, tenant_id, check_id, matter_id, party_id, matched_party_id, matched_matter_id,
+          matched_client_id, relation, match_strength, match_basis, affected_party_id,
+          proposed_severity, rule_cited, relationship_ended_on, window_years, window_lifts_on,
+          within_window, disposition, created_at, updated_at)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
+       on conflict do nothing`,
+      [opts.id, opts.tenantId, opts.checkId, opts.matterId, f.partyId, f.matchedPartyId,
+       f.matchedMatterId, f.matchedClientId, f.relation, f.matchStrength, f.matchBasis,
+       f.affectedPartyId, f.severity, f.ruleCited, f.relationshipEndedOn, f.windowYears,
+       f.windowLiftsOn, f.withinWindow == null ? null : (f.withinWindow ? 1 : 0), now, now],
+    );
+  }
+
+  async updateCheckScope(opts: {
+    checkId: string; tenantId: string; partiesChecked: number; mattersSearched: number; hitsFound: number;
+  }): Promise<void> {
+    await this.q().run(
+      `update conflict_checks
+          set parties_checked = ?, matters_searched = ?, hits_found = ?, updated_at = ?
+        where id = ? and tenant_id = ?`,
+      [opts.partiesChecked, opts.mattersSearched, opts.hitsFound,
+       new Date().toISOString(), opts.checkId, opts.tenantId],
+    );
+  }
+
+  async listConflictChecks(tenantId: string, matterId: string): Promise<Array<Row>> {
+    return this.q().all<Row>(
+      `select c.id, c.matter_id, c.kind, c.status, c.parties_checked, c.matters_searched,
+              c.hits_found, c.started_at, c.concluded_at, c.conclusion,
+              c.started_by_membership_id, c.concluded_by_membership_id,
+              (select count(*) from conflict_hits h where h.check_id = c.id) as hit_count,
+              (select count(*) from conflict_hits h where h.check_id = c.id and h.disposition = 'open') as open_count
+         from conflict_checks c
+        where c.tenant_id = ? and c.matter_id = ?
+        order by c.started_at desc`,
+      [tenantId, matterId],
+    );
+  }
+
+  async listConflictHits(tenantId: string, checkId: string): Promise<Array<ConflictHitRow>> {
+    const rows = await this.q().all<Row>(
+      `select h.id, h.check_id, h.matter_id, h.party_id, h.matched_party_id, h.matched_matter_id,
+              h.matched_client_id, h.relation, h.match_strength, h.match_basis,
+              h.affected_party_id, h.severity, h.proposed_severity, h.rule_cited,
+              h.relationship_ended_on,
+              h.window_years, h.window_lifts_on, h.within_window, h.disposition,
+              h.disposition_reason, h.disposition_at,
+              pp.name as party_name, mp.name as matched_party_name,
+              ap.name as affected_party_name,
+              (select count(*) from conflict_waivers w where w.hit_id = h.id) as waiver_count
+         from conflict_hits h
+         left join parties pp on pp.id = h.party_id
+         left join parties mp on mp.id = h.matched_party_id
+         left join parties ap on ap.id = h.affected_party_id
+        where h.tenant_id = ? and h.check_id = ?
+        -- Order by what is DECIDED, falling back to what the engine proposed: an open
+        -- hit the matcher called 'actual' is more urgent than one it called 'none',
+        -- and the reader sees severity null with a proposal beside it rather than a
+        -- decision that was never taken.
+        order by case coalesce(h.severity, h.proposed_severity)
+                   when 'actual' then 0 when 'potential' then 1 when 'none' then 2 else 3 end,
+                 h.created_at`,
+      [tenantId, checkId],
+    );
+    return rows.map((r) => ({
+      id: req(r.id), checkId: req(r.check_id), matterId: req(r.matter_id),
+      partyId: req(r.party_id), partyName: req(r.party_name),
+      matchedPartyId: r.matched_party_id == null ? null : req(r.matched_party_id),
+      matchedPartyName: r.matched_party_name == null ? null : req(r.matched_party_name),
+      matchedMatterId: r.matched_matter_id == null ? null : req(r.matched_matter_id),
+      matchedClientId: r.matched_client_id == null ? null : req(r.matched_client_id),
+      relation: req(r.relation),
+      matchStrength: req(r.match_strength),
+      matchBasis: req(r.match_basis),
+      affectedPartyId: r.affected_party_id == null ? null : req(r.affected_party_id),
+      affectedPartyName: r.affected_party_name == null ? null : req(r.affected_party_name),
+      // Two fields, and the API returns both under names that cannot be confused:
+      // `severity` is the decision (null while the hit is open) and `proposedSeverity`
+      // is the engine's opinion. A UI that shows only one of them will show the wrong
+      // one.
+      severity: r.severity == null ? null : req(r.severity),
+      proposedSeverity: r.proposed_severity == null ? null : req(r.proposed_severity),
+      ruleCited: req(r.rule_cited),
+      relationshipEndedOn: r.relationship_ended_on == null ? null : (toIso(r.relationship_ended_on) ?? '').slice(0, 10),
+      windowYears: r.window_years == null ? null : toNumber(r.window_years),
+      windowLiftsOn: r.window_lifts_on == null ? null : (toIso(r.window_lifts_on) ?? '').slice(0, 10),
+      withinWindow: r.within_window == null ? null : toBool(r.within_window),
+      disposition: req(r.disposition),
+      dispositionReason: r.disposition_reason == null ? null : req(r.disposition_reason),
+      dispositionAt: r.disposition_at == null ? null : toIso(r.disposition_at),
+      waiverCount: toNumber(r.waiver_count),
+    }));
+  }
+
+  async getConflictHit(tenantId: string, hitId: string): Promise<ConflictHitRow | null> {
+    const row = await this.q().get<Row>(
+      `select id, check_id, tenant_id from conflict_hits where id = ? and tenant_id = ?`,
+      [hitId, tenantId],
+    );
+    if (!row) return null;
+    const hits = await this.listConflictHits(tenantId, req(row.check_id));
+    return hits.find((h) => h.id === hitId) ?? null;
+  }
+
+  async dispositionConflictHit(opts: {
+    tenantId: string; hitId: string; disposition: 'different_party' | 'same_party';
+    severity: 'actual' | 'potential' | 'none' | null; affectedPartyId: string | null;
+    reason: string; membershipId: string;
+  }): Promise<void> {
+    await this.q().run(
+      `update conflict_hits
+          set disposition = ?, disposition_reason = ?, disposition_by_membership_id = ?,
+              disposition_at = ?, severity = ?, affected_party_id = ?, updated_at = ?
+        where id = ? and tenant_id = ? and disposition = 'open'`,
+      [opts.disposition, opts.reason, opts.membershipId, new Date().toISOString(),
+       opts.severity, opts.affectedPartyId, new Date().toISOString(), opts.hitId, opts.tenantId],
+    );
+  }
+
+  async concludeConflictCheck(opts: {
+    tenantId: string; checkId: string; status: 'clear' | 'cleared_with_waiver'
+      | 'conflicts_not_accepted' | 'abandoned';
+    conclusion: string; membershipId: string;
+  }): Promise<void> {
+    const now = new Date().toISOString();
+    await this.q().run(
+      `update conflict_checks
+          set status = ?, conclusion = ?, concluded_by_membership_id = ?, concluded_at = ?, updated_at = ?
+        where id = ? and tenant_id = ? and concluded_at is null`,
+      [opts.status, opts.conclusion, opts.membershipId, now, now, opts.checkId, opts.tenantId],
+    );
+  }
+
+  async recordConflictWaiver(opts: {
+    id: string; tenantId: string; hitId: string; matterId: string; waivedByPartyId: string;
+    consentDocumentId: string | null; consentReference: string | null;
+    consentSignedOn: string; scope: string; membershipId: string;
+  }): Promise<void> {
+    await this.q().run(
+      `insert into conflict_waivers
+         (id, tenant_id, hit_id, matter_id, waived_by_party_id, consent_document_id,
+          consent_reference, consent_signed_on, scope, recorded_by_membership_id, created_at)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [opts.id, opts.tenantId, opts.hitId, opts.matterId, opts.waivedByPartyId,
+       opts.consentDocumentId, opts.consentReference, opts.consentSignedOn, opts.scope,
+       opts.membershipId, new Date().toISOString()],
+    );
+  }
+
+  async listConflictWaivers(tenantId: string, matterId: string): Promise<Array<Row>> {
+    return this.q().all<Row>(
+      `select w.id, w.hit_id, w.waived_by_party_id, w.consent_document_id,
+              w.consent_reference, w.consent_signed_on, w.scope, w.created_at,
+              p.name as party_name
+         from conflict_waivers w
+         left join parties p on p.id = w.waived_by_party_id
+        where w.tenant_id = ? and w.matter_id = ?
+        order by w.created_at`,
+      [tenantId, matterId],
+    );
+  }
+
+  /**
+   * The derived state of `matters.conflict_cleared`, and the reasons when it is false.
+   *
+   * ONE EXPRESSION, and the database refuses a contradicting write rather than
+   * deriving the value itself — because SQLite cannot assign to `NEW` inside a
+   * trigger, and a Postgres-only derivation would be the second expression of a
+   * legal rule that this codebase has been bitten by eleven times.
+   */
+  async conflictStateFor(tenantId: string, matterId: string): Promise<{
+    cleared: boolean; checked: boolean; openHits: number; unwaived: number;
+    exceptions: number; latestCheckId: string | null; reasons: string[];
+  }> {
+    const checks = await this.listConflictChecks(tenantId, matterId);
+    const covering = checks.find((c) => c.status === 'clear' || c.status === 'cleared_with_waiver');
+
+    const parties = await this.listMatterParties(tenantId, matterId);
+    const reasons: string[] = [];
+
+    if (!covering) {
+      const concluded = checks.find((c) => c.concluded_at != null);
+      reasons.push(concluded
+        ? 'the last conflict check did not clear the matter.'
+        : 'no conflict check has been concluded for this matter.');
+      return { cleared: false, checked: checks.length > 0, openHits: 0, unwaived: 0, exceptions: 0, latestCheckId: null, reasons };
+    }
+
+    // A check that ran before a party was added did not see that party, so it does
+    // not cover the matter as it now stands. The database enforces the same rule.
+    const startedAt = req(toIso(covering.started_at as never));
+    const late = parties.filter((p) => p.createdAt > startedAt);
+    if (late.length) {
+      reasons.push(`${late.length} party/parties were added after the clearing check ran, so it did not see them.`);
+    }
+
+    const hits = await this.listConflictHits(tenantId, req(covering.id));
+    const openHits = hits.filter((h) => h.disposition === 'open').length;
+    const unwaived = hits.filter(
+      (h) => h.disposition === 'same_party' && h.severity !== 'none' && h.waiverCount === 0,
+    ).length;
+    const exceptions = hits.filter((h) => h.disposition === 'same_party' && h.severity === 'none').length;
+
+    if (openHits) reasons.push(`${openHits} finding(s) still need a decision.`);
+    if (unwaived) reasons.push(`${unwaived} confirmed conflict(s) have no written consent on record.`);
+
+    return {
+      cleared: reasons.length === 0,
+      checked: true,
+      openHits, unwaived, exceptions,
+      latestCheckId: req(covering.id),
+      reasons,
+    };
+  }
+
+  /** A client of this tenant, or null. Used only to validate a party link. */
+  async getClientForTenant(tenantId: string, clientId: string): Promise<Row | null> {
+    return (await this.q().get<Row>(
+      `select id, tenant_id, client_type, name, name_ar, status, party_id
+         from clients where id = ? and tenant_id = ?`,
+      [clientId, tenantId],
+    )) ?? null;
+  }
+
+  /** Links a client record to its canonical party identity. */
+  async linkClientParty(opts: { tenantId: string; clientId: string; partyId: string }): Promise<void> {
+    await this.q().run(
+      `update clients set party_id = ?, updated_at = ? where id = ? and tenant_id = ?`,
+      [opts.partyId, new Date().toISOString(), opts.clientId, opts.tenantId],
+    );
+  }
+
+  /**
+   * Writes the DERIVED clearance.
+   *
+   * The value is computed by `conflictStateFor` and refused by the database if it
+   * contradicts the record — so this method is the only place the column is set and
+   * it cannot be used to assert a clearance the evidence does not support.
+   */
+  async setMatterConflictCleared(opts: { tenantId: string; matterId: string; cleared: boolean }): Promise<void> {
+    await this.q().run(
+      `update matters set conflict_cleared = ?, updated_at = ?
+        where id = ? and tenant_id = ?`,
+      [opts.cleared ? 1 : 0, new Date().toISOString(), opts.matterId, opts.tenantId],
+    );
+  }
+
+  /** Moves a matter through its internal lifecycle. The gate is in the database. */
+  async setMatterStatus(opts: {
+    tenantId: string; matterId: string; internalStatus: string; conflictCleared: boolean;
+  }): Promise<void> {
+    await this.q().run(
+      `update matters set internal_status = ?, conflict_cleared = ?, updated_at = ?
+        where id = ? and tenant_id = ?`,
+      [opts.internalStatus, opts.conflictCleared ? 1 : 0,
+       new Date().toISOString(), opts.matterId, opts.tenantId],
+    );
+  }
+
   async getTenant(tenantId: string) {
     return this.q().get<Row>(
       `select id, slug, name, name_ar, country, default_language, default_calendar, status
@@ -1423,18 +2166,18 @@ function toMembership(r: Row): MembershipRow {
     staffId: String(r.staff_id),
     email: String(r.email),
     status: String(r.status),
-    jobTitle: toStr(r.job_title),
-    jobTitleAr: toStr(r.job_title_ar),
+    jobTitle: req(r.job_title),
+    jobTitleAr: req(r.job_title_ar),
     // NULL is preserved as null. It must never become 0 or Infinity: the engine
     // reads null as "no authority" and refuses (§10).
     financialAuthority: toNullableNumber(r.financial_authority_sar),
     writeoffAuthority: toNullableNumber(r.writeoff_authority_sar),
     discountPct: toNullableNumber(r.discount_authority_pct),
-    staffName: toStr(r.full_name),
-    staffNameAr: toStr(r.full_name_ar),
-    internalRole: toStr(r.internal_role),
-    language: toStr(r.preferred_language) ?? 'ar',
-    calendar: toStr(r.preferred_calendar) ?? 'islamic-umalqura',
+    staffName: req(r.full_name),
+    staffNameAr: req(r.full_name_ar),
+    internalRole: req(r.internal_role),
+    language: req(r.preferred_language) ?? 'ar',
+    calendar: req(r.preferred_calendar) ?? 'islamic-umalqura',
     mfaEnabled: toBool(r.mfa_enabled),
   };
 }
@@ -1451,14 +2194,14 @@ function toAuditEvent(r: Row) {
     // Projected so a reviewer — and a test — can prove that a search returned
     // only the caller's own firm. The query already filters on it; showing it
     // makes the boundary visible instead of assumed.
-    tenantId: toStr(r.tenant_id),
-    actorKind: toStr(r.actor_kind),
-    actorUserId: toStr(r.actor_user_id),
-    action: toStr(r.action),
-    resourceType: toStr(r.resource_type),
-    resourceId: toStr(r.resource_id),
-    outcome: toStr(r.outcome),
-    reasonCode: toStr(r.reason_code),
+    tenantId: req(r.tenant_id),
+    actorKind: req(r.actor_kind),
+    actorUserId: req(r.actor_user_id),
+    action: req(r.action),
+    resourceType: req(r.resource_type),
+    resourceId: req(r.resource_id),
+    outcome: req(r.outcome),
+    reasonCode: req(r.reason_code),
     // IP hashes are deliberately NOT projected: an audit search is a privilege,
     // but it is not a licence to deanonymize request metadata in bulk.
     metadata,
@@ -1477,7 +2220,7 @@ function toNullableNumber(v: unknown): number | null {
 }
 
 function parseJsonArray(v: unknown, fallback: string[]): string[] {
-  const s = toStr(v);
+  const s = req(v);
   if (!s) return fallback;
   try {
     const parsed: unknown = JSON.parse(s);
@@ -1533,4 +2276,91 @@ export interface LicenceRow {
   statusEffectiveFrom: string | null;
   statusReference: string | null;
   verifiedAt: string | null;
+}
+
+// ── P0.1 · row shapes and the two functions that resolve a derived value ──────
+
+/**
+ * `toStr` with a required-string contract, for the NOT NULL columns.
+ *
+ * The nullable `toStr` is the right default for a database where almost every
+ * column may be absent, but the P0.1 tables are mostly NOT NULL and threading
+ * `?? ''` through forty mappings would hide the two or three places where a null is
+ * actually possible — which are the ones worth seeing.
+ */
+function req(v: unknown): string { return toStr(v) ?? ''; }
+
+export type PartyRow = {
+  id: string; kind: string; name: string; nameAr: string | null;
+  normalized: string; commercialRegistration: string | null; vatNumber: string | null;
+  nationalIdMasked: string | null; status: string; notes: string | null;
+  matterCount: number; createdAt: string;
+};
+
+function toPartyRow(r: Row): PartyRow {
+  return {
+    id: req(r.id), kind: req(r.kind), name: req(r.name),
+    nameAr: r.name_ar == null ? null : req(r.name_ar),
+    normalized: req(r.name_normalized),
+    commercialRegistration: r.commercial_registration == null ? null : req(r.commercial_registration),
+    vatNumber: r.vat_number == null ? null : req(r.vat_number),
+    nationalIdMasked: r.national_id_masked == null ? null : req(r.national_id_masked),
+    status: req(r.status),
+    notes: r.notes == null ? null : req(r.notes),
+    matterCount: toNumber(r.matter_count ?? 0),
+    createdAt: req(toIso(r.created_at)),
+  };
+}
+
+export type ConflictHitRow = {
+  id: string; checkId: string; matterId: string;
+  partyId: string; partyName: string;
+  matchedPartyId: string | null; matchedPartyName: string | null;
+  matchedMatterId: string | null; matchedClientId: string | null;
+  relation: string; matchStrength: string; matchBasis: string;
+  affectedPartyId: string | null; affectedPartyName: string | null;
+  /**
+   * The DECISION. Null while the hit is open, because nobody has decided yet.
+   * `conflict_hits_severity_needs_confirmation` refuses a severity on an open hit,
+   * and the API mirrors that rather than filling the gap with the engine's opinion.
+   */
+  severity: string | null;
+  /**
+   * The ENGINE'S opinion, recorded beside the decision so that "the matcher flagged
+   * this as potential and the lawyer recorded it as none" stays visible after the
+   * decision is made. Never presented as a decision.
+   */
+  proposedSeverity: string | null;
+  ruleCited: string;
+  relationshipEndedOn: string | null; windowYears: number | null;
+  windowLiftsOn: string | null; withinWindow: boolean | null;
+  disposition: string; dispositionReason: string | null; dispositionAt: string | null;
+  waiverCount: number;
+};
+
+/**
+ * When the firm stopped acting for a client — Rule 8/4's starting point.
+ *
+ * «إذا مر على انقضاء العلاقة معهم أو تقديم آخر عمل لهم ثلاث سنوات» — the three
+ * years run from the end of the relationship OR from the last work done for them,
+ * and the rule treats those as the same moment. So an explicit date wins, the
+ * newest closed matter is the fallback, and a client with an OPEN matter is not a
+ * former client at all: work in progress means the relationship has not ended,
+ * whatever a status column says.
+ *
+ * Written as a function rather than inline in the query because it is a legal
+ * definition, and a legal definition written twice will differ.
+ */
+export function clientRelationshipEndedOn(input: {
+  explicit: string | null; lastClosed: string | null; status: string;
+}): string | null {
+  if (input.status === 'active' && input.lastClosed === null) return null;
+  if (input.explicit) return input.explicit;
+  if (input.lastClosed) return input.lastClosed;
+  // Inactive with no closed matter and no date: the firm stopped acting for them at
+  // some point it did not record. Treating that as "still a client" would be the
+  // permissive default, and the permissive default is what Rule 8/1 forbids, so the
+  // window is treated as open — the conservative direction, and the reason this
+  // returns null rather than a guessed date.
+  return null;
 }

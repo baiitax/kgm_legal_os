@@ -53,6 +53,8 @@ const SERVER_WRITES: Array<{
   columns: string[];
   /** Columns the statement merely READS (a WHERE clause), which need SELECT. */
   readColumns?: string[];
+  /** Which role issues the statement. Defaults to firm_api; `clients` is portal_api's. */
+  grantee?: string;
   where: string;
 }> = [
   {
@@ -80,9 +82,105 @@ const SERVER_WRITES: Array<{
     columns: ['tenant_id', 'subject_kind', 'subject_id', 'precondition', 'outcome', 'evidence',
       'rule_cited', 'evaluated_by_membership_id', 'evaluated_at'],
   },
+
+  // ── P0.1 · the party register and the conflict ledger ───────────────────
+  // Twelve routes and four repo methods were written before this list was. That is
+  // the wrong order and it is the one the plan says not to repeat: the list is the
+  // SPECIFICATION of what the grants must permit, and writing it afterwards makes
+  // it a description of what happened.
+  {
+    table: 'parties', command: 'INSERT', where: 'FirmRepo.createParty',
+    columns: ['id', 'tenant_id', 'kind', 'name', 'name_ar', 'name_normalized',
+      'commercial_registration', 'vat_number', 'national_id_masked', 'national_id_hash',
+      'status', 'notes', 'created_by_membership_id', 'created_at', 'updated_at'],
+  },
+  {
+    // The SET list is built at runtime from whichever fields were supplied, so the
+    // list here is the UNION of everything the method can write. A grant covering
+    // the union covers every actual call; a grant covering less would fail only for
+    // certain callers, which is the hardest kind of privilege bug to find.
+    table: 'parties', command: 'UPDATE', where: 'FirmRepo.updateParty (union of optional sets)',
+    columns: ['name', 'name_ar', 'name_normalized', 'notes', 'kind', 'updated_at'],
+    readColumns: ['id', 'tenant_id'],
+  },
+  {
+    table: 'party_aliases', command: 'INSERT', where: 'FirmRepo.addPartyAlias',
+    columns: ['id', 'tenant_id', 'party_id', 'alias', 'alias_normalized', 'script', 'source',
+      'note', 'created_at', 'updated_at'],
+  },
+  {
+    table: 'party_affiliations', command: 'INSERT', where: 'FirmRepo.addAffiliation',
+    columns: ['id', 'tenant_id', 'party_id', 'staff_id', 'relation', 'started_on', 'ended_on',
+      'note', 'recorded_by_membership_id', 'created_at', 'updated_at'],
+  },
+  {
+    table: 'matter_parties', command: 'INSERT', where: 'FirmRepo.addMatterParty',
+    columns: ['id', 'tenant_id', 'matter_id', 'party_id', 'role', 'note',
+      'added_by_membership_id', 'created_at', 'updated_at'],
+  },
+  {
+    table: 'conflict_checks', command: 'INSERT', where: 'FirmRepo.startConflictCheck',
+    columns: ['id', 'tenant_id', 'matter_id', 'kind', 'status', 'parties_checked',
+      'matters_searched', 'hits_found', 'started_by_membership_id', 'started_at',
+      'created_at', 'updated_at'],
+  },
+  {
+    table: 'conflict_checks', command: 'UPDATE', where: 'FirmRepo.recordHit / concludeCheck',
+    columns: ['parties_checked', 'matters_searched', 'hits_found', 'updated_at',
+      'status', 'conclusion', 'concluded_by_membership_id', 'concluded_at'],
+    readColumns: ['id', 'tenant_id'],
+  },
+  {
+    table: 'conflict_hits', command: 'INSERT', where: 'FirmRepo.recordHit',
+    columns: ['id', 'tenant_id', 'check_id', 'matter_id', 'party_id', 'matched_party_id',
+      'matched_matter_id', 'matched_client_id', 'relation', 'match_strength', 'match_basis',
+      // 0031 · the engine's opinion has its own column; `severity` is left null
+      // while the hit is open and the schema refuses it before then.
+      'affected_party_id', 'proposed_severity', 'rule_cited', 'relationship_ended_on', 'window_years',
+      'window_lifts_on', 'within_window', 'disposition', 'created_at', 'updated_at'],
+  },
+  {
+    table: 'conflict_hits', command: 'UPDATE', where: 'FirmRepo.dispositionHit',
+    columns: ['disposition', 'disposition_reason', 'disposition_by_membership_id',
+      'disposition_at', 'severity', 'affected_party_id', 'updated_at'],
+    readColumns: ['id', 'tenant_id'],
+  },
+  {
+    table: 'conflict_waivers', command: 'INSERT', where: 'FirmRepo.recordWaiver',
+    columns: ['id', 'tenant_id', 'hit_id', 'matter_id', 'waived_by_party_id',
+      'consent_document_id', 'consent_reference', 'consent_signed_on', 'scope',
+      'recorded_by_membership_id', 'created_at'],
+  },
+  {
+    // firm_api, not portal_api: `clients` is the portal's table, but it is the FIRM
+    // that records which party a client is — a lawyer does the linkage at intake.
+    // This annotation said portal_api when it was first written, and the check
+    // reported a missing grant that was not missing. A transcription error in this
+    // list produces a false alarm, which is the acceptable direction: the dangerous
+    // error is a statement missing from the list altogether.
+    table: 'clients', command: 'UPDATE', where: 'FirmRepo.linkClientParty',
+    columns: ['party_id', 'updated_at'], readColumns: ['id', 'tenant_id'],
+  },
+  {
+    table: 'matters', command: 'UPDATE', where: 'FirmRepo.setMatterConflictCleared / setMatterStatus',
+    columns: ['conflict_cleared', 'updated_at', 'internal_status'],
+    readColumns: ['id', 'tenant_id'],
+  },
 ];
 
-const NEW_TABLES = ['professional_licences', 'prior_office', 'tenant_relationships', 'eligibility_checks'];
+const NEW_TABLES = [
+  'professional_licences', 'prior_office', 'tenant_relationships', 'eligibility_checks',
+  // 0029
+  'parties', 'party_aliases', 'party_affiliations', 'matter_parties',
+  'conflict_checks', 'conflict_hits', 'conflict_waivers',
+];
+
+/**
+ * Columns the server writes on an EXISTING table, so they are checked in the same
+ * way as the new tables' columns: present in both dialects. `clients` and `matters`
+ * arrived long before 0029 and are easy to forget.
+ */
+const TOUCHED_TABLES = ['clients', 'matters'];
 
 async function main(): Promise<void> {
   const db = new SqliteDb(':memory:');
@@ -131,9 +229,9 @@ async function main(): Promise<void> {
     }
   }
 
-  // ── 2 · columns, for the tables phase P-1 touched ───────────────────────
-  console.log('\nCOLUMNS (phase P-1 tables)');
-  for (const t of NEW_TABLES) {
+  // ── 2 · columns, for every table the phase touched ──────────────────────
+  console.log('\nCOLUMNS (tables this phase touches, both dialects)');
+  for (const t of [...NEW_TABLES, ...TOUCHED_TABLES]) {
     const a = liteCols.get(t) ?? new Set<string>();
     const b = pgCols.get(t) ?? new Set<string>();
     const onlyLite = [...a].filter((x) => !b.has(x));
@@ -153,11 +251,12 @@ async function main(): Promise<void> {
   // ── 3 · write privileges, measured against the server's own statements ──
   console.log('\nWRITE PRIVILEGES (firm_api, against what the server actually sends)');
   for (const w of SERVER_WRITES) {
+    const grantee = w.grantee ?? 'firm_api';
     const granted = new Set(
       (await c.query(
         `select column_name from information_schema.column_privileges
-          where table_name=$1 and grantee='firm_api' and privilege_type=$2`,
-        [w.table, w.command],
+          where table_name=$1 and grantee=$3 and privilege_type=$2`,
+        [w.table, w.command, grantee],
       )).rows.map((r: { column_name: string }) => r.column_name),
     );
     const selects = new Set(

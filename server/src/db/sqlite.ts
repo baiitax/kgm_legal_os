@@ -99,6 +99,11 @@ export class SqliteDb implements Db {
     // practising law, so the licence requirement is data rather than a hardcoded
     // list of role codes in a function.
     add('roles', 'requires_practising_licence', 'integer not null default 0');
+    // 0029 · the party link and the relationship end date, both on the PORTAL
+    // schema's clients table — the conflict engine reads them, but the portal owns
+    // the table, which is exactly the kind of split that gets missed.
+    add('clients', 'party_id', 'text');
+    add('clients', 'relationship_ended_on', 'text');
     this.db.exec(
       `update roles set requires_practising_licence = 1
         where code in ('MANAGING_PARTNER','PARTNER','ASSOCIATE','LAWYER')`,

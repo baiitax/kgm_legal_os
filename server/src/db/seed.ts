@@ -19,6 +19,10 @@ const TABLE_ORDER = [
   // because a licence belongs to a staff member and the Article 16 guard reads
   // memberships when a licence is inserted for a member whose status is active.
   'professional_licences', 'prior_office', 'tenant_relationships', 'eligibility_checks',
+  // 0029 · parties and conflicts. `matter_parties` after `parties`; `conflict_checks`
+  // after `firm_memberships`, because a check records who performed it.
+  'parties', 'party_aliases', 'party_affiliations', 'matter_parties',
+  'conflict_checks', 'conflict_hits', 'conflict_waivers',
 ];
 
 /**

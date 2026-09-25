@@ -41,6 +41,27 @@ export type ErrorCode =
   | 'internal_resource'
   | 'mutation_denied'
   | 'field_not_writable'
+  // the conflict gate (§P0.1) — each of these names an obstacle a lawyer can act on.
+  // A single generic 'forbidden' here would tell them the door is shut without
+  // saying which key opens it, and they would work around the control instead.
+  | 'already_dispositioned'
+  | 'written_consent_required'
+  | 'not_a_confirmed_conflict'
+  | 'no_affected_party'
+  | 'conflicts_outstanding'
+  | 'conflict_gate'
+  /**
+   * A client may not be linked to a party that is archived or merged: the engine
+   * would then match current work against a record the firm has retired, and the
+   * party's successor would be missed.
+   */
+  | 'party_not_active'
+  /**
+   * A concluded conflict check may not be restated. Same reason as an already
+   * dispositioned finding: the record has to show the decision, not the latest
+   * wording of it.
+   */
+  | 'already_concluded'
   // validation
   | 'validation_failed'
   | 'upload_too_large'

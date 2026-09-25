@@ -28,6 +28,9 @@ import type { Container } from '../container.js';
 import { config } from '../config.js';
 import { ok } from '../lib/http.js';
 import { badRequest, forbidden, notFoundOrForbidden } from '../lib/errors.js';
+import { normalizeArabicName, normalizeIdentifier } from '../domain/arabic-names.js';
+import { evaluateConflicts } from '../domain/conflict-engine.js';
+import { keyedHash, maskNationalId } from '../lib/crypto.js';
 import { ah } from '../auth/middleware.js';
 import { requestInfo } from '../audit/logger.js';
 import {
@@ -556,6 +559,709 @@ export function firmRouter(c: Container): Router {
       // one scope rule, applied everywhere, is the only way the two stay in step.
       count: visible.size,
       matterIds: [...visible],
+    });
+  }));
+
+  // ---- parties and conflicts (§P0.1, migration 0029) ----------------------
+  /*
+    THE CONFLICT SURFACE
+
+    Two things happen here and they are deliberately separated:
+
+      · the ENGINE runs and produces findings — `POST /matters/:id/conflict-check`.
+        It is deterministic, it cites the rule, and it decides nothing.
+      · a HUMAN dispositions each finding and, where the rule allows it, records the
+        written consent that cures it — `POST /conflicts/hits/:hitId/disposition`
+        and `.../waiver`.
+
+    The separation is the design. A conflict system that decided by itself would be
+    either over-confident (clearing on a name resemblance) or useless (refusing
+    everything and being turned off). This one produces what a competent paralegal
+    would produce — a list of things that might be the same party and the rule that
+    applies — and requires someone to sign off on each.
+
+    Every negative here answers 404 rather than 403, for the §72 reason: a distinct
+    status would confirm that a party, a matter or a finding exists.
+  */
+
+  r.get('/parties', ah(async (req, res) => {
+    const p = principal(req);
+    c.permissions.assertCan(p, 'clients.read', { type: 'party_collection' });
+    const query = typeof req.query.q === 'string' ? req.query.q : undefined;
+    const parties = await c.firm.listParties(p.tenantId, { query });
+    ok(res, { count: parties.length, parties });
+  }));
+
+  r.post('/parties', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const body = strictBody(
+      z.object({
+        kind: z.enum(['individual', 'company', 'government', 'nonprofit', 'other']),
+        name: z.string().trim().min(2).max(300),
+        nameAr: z.string().trim().min(2).max(300).optional().nullable(),
+        commercialRegistration: z.string().trim().max(40).optional().nullable(),
+        vatNumber: z.string().trim().max(40).optional().nullable(),
+        nationalId: z.string().trim().max(40).optional().nullable(),
+        notes: z.string().trim().max(1000).optional().nullable(),
+        /** Optional: link this party to an existing client record. */
+        clientId: z.string().uuid().optional().nullable(),
+      }).strict(),
+      req, c, '/api/firm/parties',
+    );
+
+    c.permissions.assertCan(p, 'clients.create', { type: 'party_collection' });
+
+    // The normalised form is derived here, once, by the module the engine also uses.
+    const normalized = normalizeArabicName(
+      [body.nameAr, body.name].filter(Boolean).join(' '));
+
+    const id = newId();
+    await c.firm.tx(async () => {
+      await c.firm.createParty({
+        id, tenantId: p.tenantId, kind: body.kind, name: body.name,
+        nameAr: body.nameAr ?? null, normalized,
+        commercialRegistration: normalizeIdentifier(body.commercialRegistration),
+        vatNumber: normalizeIdentifier(body.vatNumber),
+        // The plaintext national id never arrives and is never stored; the same
+        // convention as `clients`, enforced by hashing here rather than by trusting
+        // the caller to send a hash.
+        // `keyedHash` and `maskNationalId` are the same pair the portal uses for a
+        // client's identity: masked for display, keyed hash for verification, and
+        // the plaintext never stored. A party's identifier is no less sensitive than
+        // a client's — it is how the conflict engine decides identity.
+        nationalIdMasked: maskNationalId(body.nationalId ?? null),
+        nationalIdHash: body.nationalId ? keyedHash(body.nationalId.trim()) : null,
+        notes: body.notes ?? null, createdByMembershipId: p.membershipId,
+      });
+      if (body.clientId) {
+        const client = await c.firm.getClientForTenant(p.tenantId, body.clientId);
+        if (!client) throw notFoundOrForbidden('client', body.clientId);
+        await c.firm.linkClientParty({ tenantId: p.tenantId, clientId: body.clientId, partyId: id });
+      }
+      await c.audit.write({
+        action: 'PARTY_CREATED',
+        actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+        resourceType: 'party', resourceId: id, outcome: 'success',
+        metadata: { membershipId: p.membershipId, kind: body.kind, hasRegistration: !!body.commercialRegistration },
+      }, requestInfo(req, c.trustProxy));
+    });
+
+    ok(res, { id, name: body.name, normalized }, 201);
+  }));
+
+  /*
+    Link an EXISTING client to an EXISTING party.
+
+    `POST /parties` can create a party and link it to a client in one step, which is
+    the intake path. It cannot help a firm that already has clients — and every firm
+    this system will be sold to already has clients. Without this route the
+    `clients.party_id` column added by migration 0029 is only ever populated at
+    creation, so the conflict engine falls back to matching on the client's own name
+    columns for the entire existing book of business, and the party register fills up
+    with duplicates of companies the firm already recorded.
+
+    This is a separate route rather than a parameter on `POST /parties` because it is
+    a different act with a different authority: creating a party is `clients.create`,
+    while asserting that an existing client IS that party changes what the conflict
+    engine will find for a client the firm already has — `clients.update`.
+  */
+  r.post('/clients/:id/party', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const body = strictBody(
+      z.object({ partyId: z.string().uuid() }).strict(),
+      req, c, '/api/firm/clients/:id/party',
+    );
+
+    c.permissions.assertCan(p, 'clients.update', { type: 'client', id: String(req.params.id) });
+
+    const clientId = String(req.params.id);
+    const client = await c.firm.getClientForTenant(p.tenantId, clientId);
+    if (!client) throw notFoundOrForbidden('client', clientId);
+
+    const party = await c.firm.getParty(p.tenantId, body.partyId);
+    if (!party) throw notFoundOrForbidden('party', body.partyId);
+    if (party.status !== 'active') {
+      // A merged or archived party is not an identity a client can be given: the
+      // engine would then match current work against a retired record.
+      throw badRequest('party_not_active', 'not_active_party');
+    }
+
+    await c.firm.tx(async () => {
+      await c.firm.linkClientParty({ tenantId: p.tenantId, clientId, partyId: body.partyId });
+      await c.audit.write({
+        action: 'PARTY_UPDATED',
+        actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+        resourceType: 'client', resourceId: clientId, outcome: 'success',
+        metadata: { membershipId: p.membershipId, linkedPartyId: body.partyId,
+          // The previous link is recorded, because re-linking a client changes what
+          // every future conflict check will find, and the question after a missed
+          // conflict is always "when did that link change".
+          previousPartyId: (client as { partyId?: string | null }).partyId ?? null },
+      }, requestInfo(req, c.trustProxy));
+    });
+
+    ok(res, { clientId, partyId: body.partyId, name: party.name });
+  }));
+
+  r.post('/parties/:id/aliases', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const body = strictBody(
+      z.object({
+        alias: z.string().trim().min(2).max(300),
+        script: z.enum(['ar', 'en', 'other']).default('ar'),
+        source: z.enum(['court_filing', 'najiz', 'commercial_registration', 'client_statement',
+          'opposing_counsel', 'manual', 'other']).optional().nullable(),
+        note: z.string().trim().max(300).optional().nullable(),
+      }).strict(),
+      req, c, '/api/firm/parties/:id/aliases',
+    );
+
+    c.permissions.assertCan(p, 'clients.update', { type: 'party_collection' });
+
+    const partyId = String(req.params.id);
+    const party = await c.firm.getParty(p.tenantId, partyId);
+    if (!party) throw notFoundOrForbidden('party', partyId);
+
+    await c.firm.tx(async () => {
+      await c.firm.addPartyAlias({
+        id: newId(), tenantId: p.tenantId, partyId, alias: body.alias,
+        normalized: normalizeArabicName(body.alias), script: body.script,
+        source: body.source ?? null, note: body.note ?? null,
+      });
+      await c.audit.write({
+        action: 'PARTY_ALIAS_ADDED',
+        actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+        resourceType: 'party', resourceId: partyId, outcome: 'success',
+        // The alias itself is recorded: a match later disputed turns on which
+        // spelling was known, and when.
+        metadata: { membershipId: p.membershipId, alias: body.alias, source: body.source ?? null },
+      }, requestInfo(req, c.trustProxy));
+    });
+
+    ok(res, { partyId, alias: body.alias });
+  }));
+
+  r.post('/parties/:id/affiliations', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const body = strictBody(
+      z.object({
+        staffId: z.string().uuid(),
+        relation: z.enum(['former_employer', 'current_employer', 'board_member',
+          'shareholder', 'other_interest']),
+        startedOn: z.string().date().optional().nullable(),
+        endedOn: z.string().date().optional().nullable(),
+        note: z.string().trim().max(500).optional().nullable(),
+      }).strict(),
+      req, c, '/api/firm/parties/:id/affiliations',
+    );
+
+    // A declared interest is a compliance record about a member of the firm, so it
+    // needs the compliance permission and not merely the ability to edit clients.
+    c.permissions.assertCan(p, 'compliance.create', { type: 'party_collection' });
+
+    const partyId = String(req.params.id);
+    const party = await c.firm.getParty(p.tenantId, partyId);
+    if (!party) throw notFoundOrForbidden('party', partyId);
+
+    await c.firm.tx(async () => {
+      await c.firm.recordAffiliation({
+        id: newId(), tenantId: p.tenantId, partyId, staffId: body.staffId,
+        relation: body.relation, startedOn: body.startedOn ?? null,
+        endedOn: body.endedOn ?? null, note: body.note ?? null,
+        recordedByMembershipId: p.membershipId,
+      });
+      await c.audit.write({
+        action: 'PARTY_AFFILIATION_RECORDED',
+        actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+        resourceType: 'party', resourceId: partyId, outcome: 'success',
+        metadata: { membershipId: p.membershipId, staffId: body.staffId, relation: body.relation },
+      }, requestInfo(req, c.trustProxy));
+    });
+
+    ok(res, { partyId, relation: body.relation }, 201);
+  }));
+
+  r.get('/matters/:id/parties', ah(async (req, res) => {
+    const p = principal(req);
+    const matterId = String(req.params.id);
+    c.permissions.assertCan(p, 'matters.read', { type: 'matter', id: matterId });
+    await c.permissions.requireMatter(p, matterId, MATTER_READ);
+    const parties = await c.firm.listMatterParties(p.tenantId, matterId);
+    ok(res, { count: parties.length, parties });
+  }));
+
+  r.post('/matters/:id/parties', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const body = strictBody(
+      z.object({
+        partyId: z.string().uuid(),
+        role: z.enum(['counterparty', 'adverse_party', 'related_entity', 'guarantor',
+          'witness', 'expert', 'interested_party', 'other']),
+        note: z.string().trim().max(500).optional().nullable(),
+        /** Create the party in the same call — the intake path, where the other side is a name and nothing else. */
+        createIfMissing: z.object({
+          kind: z.enum(['individual', 'company', 'government', 'nonprofit', 'other']),
+          name: z.string().trim().min(2).max(300),
+          nameAr: z.string().trim().min(2).max(300).optional().nullable(),
+        }).strict().optional().nullable(),
+      }).strict(),
+      req, c, '/api/firm/matters/:id/parties',
+    );
+
+    const matterId = String(req.params.id);
+    c.permissions.assertCan(p, 'matters.update', { type: 'matter', id: matterId });
+    await c.permissions.requireMatter(p, matterId, MATTER_WRITE);
+
+    let partyId = body.partyId;
+    let created = false;
+
+    await c.firm.tx(async () => {
+      const existing = await c.firm.getParty(p.tenantId, partyId);
+      if (!existing) {
+        if (!body.createIfMissing) throw notFoundOrForbidden('party', partyId);
+        const normalized = normalizeArabicName(
+          [body.createIfMissing.nameAr, body.createIfMissing.name].filter(Boolean).join(' '));
+        await c.firm.createParty({
+          id: partyId, tenantId: p.tenantId, kind: body.createIfMissing.kind,
+          name: body.createIfMissing.name, nameAr: body.createIfMissing.nameAr ?? null,
+          normalized, commercialRegistration: null, vatNumber: null,
+          nationalIdMasked: null, nationalIdHash: null, notes: null,
+          createdByMembershipId: p.membershipId,
+        });
+        created = true;
+        await c.audit.write({
+          action: 'PARTY_CREATED',
+          actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+          resourceType: 'party', resourceId: partyId, outcome: 'success',
+          metadata: { membershipId: p.membershipId, kind: body.createIfMissing.kind, via: 'matter_intake' },
+        }, requestInfo(req, c.trustProxy));
+      }
+
+      await c.firm.addMatterParty({
+        id: newId(), tenantId: p.tenantId, matterId, partyId, role: body.role,
+        note: body.note ?? null, addedByMembershipId: p.membershipId,
+      });
+
+      /*
+        Adding a party INVALIDATES any clearance, and the message says so.
+
+        The clearance belongs to the party set the check saw — that is what the
+        database enforces and what `conflictStateFor` reports. Saying it here as well
+        is not redundancy: a lawyer who adds a counterparty and then watches the
+        matter refuse to advance needs to know that this is the reason, or the gate
+        reads as a bug.
+      */
+      const state = await c.firm.conflictStateFor(p.tenantId, matterId);
+      await c.audit.write({
+        action: 'MATTER_PARTY_ADDED',
+        actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+        resourceType: 'matter', resourceId: matterId, outcome: 'success',
+        metadata: {
+          membershipId: p.membershipId, partyId, role: body.role,
+          conflictClearedAfterAdd: state.cleared,
+        },
+      }, requestInfo(req, c.trustProxy));
+    });
+
+    const state = await c.firm.conflictStateFor(p.tenantId, matterId);
+    ok(res, {
+      matterId, partyId, role: body.role, partyCreated: created,
+      conflictCleared: state.cleared,
+      note: state.cleared
+        ? undefined
+        : 'the matter now needs a conflict check covering this party before it can leave conflict_check.',
+    }, 201);
+  }));
+
+  r.post('/matters/:id/conflict-check', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const body = strictBody(
+      z.object({ kind: z.enum(['intake', 'adverse_check', 'periodic', 'recheck']).default('intake') }).strict(),
+      req, c, '/api/firm/matters/:id/conflict-check',
+    );
+
+    const matterId = String(req.params.id);
+    c.permissions.assertCan(p, 'compliance.create', { type: 'matter', id: matterId });
+    // A conflict check reads the whole firm's history, so the member must at least
+    // be able to see the matter it is about. MATTER_READ and not MATTER_MANAGE:
+    // running a check is diligence, not a change to the file.
+    await c.permissions.requireMatter(p, matterId, MATTER_READ);
+
+    const dataset = await c.firm.loadConflictDataset(p.tenantId, matterId);
+    if (!dataset.matter) throw notFoundOrForbidden('matter', matterId);
+
+    const clientId = String(dataset.matter.client_id);
+    const clientIdentity = await c.firm.clientIdentityForMatter(p.tenantId, clientId);
+    if (!clientIdentity) throw notFoundOrForbidden('client', clientId);
+
+    const result = evaluateConflicts({
+      matter: {
+        id: matterId,
+        matterNumber: String(dataset.matter.matter_number ?? ''),
+        caseNumber: dataset.matter.case_number == null ? null : String(dataset.matter.case_number),
+        clientId,
+        clientIdentity,
+      },
+      parties: dataset.parties,
+      priorAppearances: dataset.priorAppearances,
+      clients: dataset.clients,
+      affiliations: dataset.affiliations,
+      clientMatters: dataset.clientMatters,
+    });
+
+    const checkId = newId();
+    await c.firm.tx(async () => {
+      await c.firm.createConflictCheck({
+        id: checkId, tenantId: p.tenantId, matterId, kind: body.kind,
+        startedByMembershipId: p.membershipId,
+      });
+      for (const finding of result.findings) {
+        await c.firm.recordConflictHit({
+          id: newId(), tenantId: p.tenantId, checkId, matterId, finding,
+        });
+      }
+      await c.firm.updateCheckScope({
+        checkId, tenantId: p.tenantId, partiesChecked: result.partiesChecked,
+        mattersSearched: result.mattersSearched, hitsFound: result.findings.length,
+      });
+      await c.audit.write({
+        action: 'CONFLICT_CHECK_RUN',
+        actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+        resourceType: 'matter', resourceId: matterId, outcome: 'success',
+        metadata: {
+          membershipId: p.membershipId, checkId, kind: body.kind,
+          partiesChecked: result.partiesChecked, mattersSearched: result.mattersSearched,
+          hitsFound: result.findings.length,
+          warnings: result.warnings,
+        },
+      }, requestInfo(req, c.trustProxy));
+
+      /*
+        One audit row per finding, and it carries the RULE. The audit log is read
+        after a dispute, and "a conflict check ran" answers none of the questions
+        asked then — what it found, under which article, and whether it was a
+        current client or a former one, are the questions.
+      */
+      for (const finding of result.findings) {
+        await c.audit.tryWrite({
+          action: 'CONFLICT_HIT',
+          actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+          resourceType: 'matter', resourceId: matterId, outcome: 'success',
+          reasonCode: finding.relation,
+          metadata: {
+            checkId, partyId: finding.partyId, matchedPartyId: finding.matchedPartyId,
+            severity: finding.severity, matchStrength: finding.matchStrength,
+            ruleCited: finding.ruleCited,
+          },
+        }, requestInfo(req, c.trustProxy));
+      }
+    });
+
+    const hits = await c.firm.listConflictHits(p.tenantId, checkId);
+    ok(res, {
+      checkId,
+      partiesChecked: result.partiesChecked,
+      mattersSearched: result.mattersSearched,
+      // The findings are returned WITH the rule and the window, not merely as a
+      // count: the register is the product here, and a number would force the
+      // lawyer to open a second screen to learn what it means.
+      hits,
+      warnings: result.warnings,
+    }, 201);
+  }));
+
+  r.get('/matters/:id/conflicts', ah(async (req, res) => {
+    const p = principal(req);
+    const matterId = String(req.params.id);
+    c.permissions.assertCan(p, 'compliance.read', { type: 'matter', id: matterId });
+    await c.permissions.requireMatter(p, matterId, MATTER_READ);
+
+    const checks = await c.firm.listConflictChecks(p.tenantId, matterId);
+    const detailed = [];
+    for (const check of checks) {
+      detailed.push({
+        ...check,
+        hits: await c.firm.listConflictHits(p.tenantId, String(check.id)),
+      });
+    }
+    ok(res, {
+      matterId,
+      state: await c.firm.conflictStateFor(p.tenantId, matterId),
+      waivers: await c.firm.listConflictWaivers(p.tenantId, matterId),
+      count: detailed.length,
+      checks: detailed,
+    });
+  }));
+
+  r.post('/conflicts/hits/:hitId/disposition', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const body = strictBody(
+      z.object({
+        disposition: z.enum(['different_party', 'same_party']),
+        /**
+         * Severity is the CALLER's, not this handler's, because it is a legal
+         * judgement on a confirmed identity — and it is validated against the
+         * engine's own evidence below rather than trusted.
+         */
+        severity: z.enum(['actual', 'potential', 'none']).optional().nullable(),
+        affectedPartyId: z.string().uuid().optional().nullable(),
+        reason: z.string().trim().min(5).max(500),
+      }).strict(),
+      req, c, '/api/firm/conflicts/hits/:hitId/disposition',
+    );
+
+    const hitId = String(req.params.hitId);
+    c.permissions.assertCan(p, 'compliance.review', { type: 'conflict_collection' });
+
+    const hit = await c.firm.getConflictHit(p.tenantId, hitId);
+    if (!hit) throw notFoundOrForbidden('finding', hitId);
+    if (hit.disposition !== 'open') {
+      // The database refuses this too; refusing it here as well produces a message
+      // that says what to do instead of an opaque constraint violation.
+      throw badRequest('already_dispositioned', 'this finding has already been dispositioned — run a new check');
+    }
+    await c.permissions.requireMatter(p, hit.matterId, MATTER_READ);
+
+    if (body.disposition === 'same_party' && (!body.severity || !body.affectedPartyId)) {
+      throw badRequest('validation_failed',
+        'confirming a finding requires a severity and the party whose consent the rule requires');
+    }
+    if (body.disposition === 'different_party' && body.severity) {
+      throw badRequest('validation_failed', 'a ruled-out finding carries no severity');
+    }
+
+    await c.firm.tx(async () => {
+      await c.firm.dispositionConflictHit({
+        tenantId: p.tenantId, hitId, disposition: body.disposition,
+        severity: body.disposition === 'same_party' ? body.severity! : null,
+        affectedPartyId: body.disposition === 'same_party' ? body.affectedPartyId! : null,
+        reason: body.reason, membershipId: p.membershipId,
+      });
+      await c.audit.write({
+        action: 'CONFLICT_DISPOSITION_RECORDED',
+        actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+        resourceType: 'matter', resourceId: hit.matterId, outcome: 'success',
+        metadata: {
+          membershipId: p.membershipId, hitId, disposition: body.disposition,
+          severity: body.severity ?? null, reason: body.reason,
+        },
+      }, requestInfo(req, c.trustProxy));
+    });
+
+    ok(res, { hitId, disposition: body.disposition });
+  }));
+
+  r.post('/conflicts/hits/:hitId/waiver', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const body = strictBody(
+      z.object({
+        // Rule 8's exception is a WRITING. Either the document, or a reference that
+        // identifies it in the firm's own records until firm-side documents exist.
+        consentDocumentId: z.string().uuid().optional().nullable(),
+        consentReference: z.string().trim().min(3).max(200).optional().nullable(),
+        consentSignedOn: z.string().date(),
+        scope: z.string().trim().min(10).max(1000),
+      }).strict(),
+      req, c, '/api/firm/conflicts/hits/:hitId/waiver',
+    );
+
+    const hitId = String(req.params.hitId);
+    c.permissions.assertCan(p, 'compliance.review', { type: 'conflict_collection' });
+
+    const hit = await c.firm.getConflictHit(p.tenantId, hitId);
+    if (!hit) throw notFoundOrForbidden('finding', hitId);
+    await c.permissions.requireMatter(p, hit.matterId, MATTER_READ);
+
+    if (!body.consentDocumentId && !body.consentReference) {
+      throw badRequest('written_consent_required',
+        'القاعدة الثامنة requires written consent: attach the document or cite where it is held');
+    }
+    if (hit.disposition !== 'same_party') {
+      throw badRequest('not_a_confirmed_conflict',
+        'a waiver cures a confirmed conflict; this finding has not been confirmed as the same party');
+    }
+    if (!hit.affectedPartyId) {
+      throw badRequest('no_affected_party', 'the finding names no affected party, so no consent can be matched to it');
+    }
+
+    const waiverId = newId();
+    await c.firm.tx(async () => {
+      await c.firm.recordConflictWaiver({
+        id: waiverId, tenantId: p.tenantId, hitId, matterId: hit.matterId,
+        // The affected party comes from the FINDING, never from the body. A caller
+        // choosing who consented would defeat the rule; the database refuses a
+        // mismatch too.
+        waivedByPartyId: hit.affectedPartyId!,
+        consentDocumentId: body.consentDocumentId ?? null,
+        consentReference: body.consentReference ?? null,
+        consentSignedOn: body.consentSignedOn, scope: body.scope,
+        membershipId: p.membershipId,
+      });
+      await c.audit.write({
+        action: 'CONFLICT_WAIVED',
+        actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+        resourceType: 'matter', resourceId: hit.matterId, outcome: 'success',
+        metadata: {
+          membershipId: p.membershipId, hitId, waiverId,
+          affectedPartyId: hit.affectedPartyId, affectedPartyName: hit.affectedPartyName,
+          consentDocumentId: body.consentDocumentId ?? null,
+          consentReference: body.consentReference ?? null,
+          windowLiftsOn: hit.windowLiftsOn,
+        },
+      }, requestInfo(req, c.trustProxy));
+    });
+
+    ok(res, { waiverId, hitId, waivedByPartyId: hit.affectedPartyId }, 201);
+  }));
+
+  r.post('/matters/:id/conflict-conclusion', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const body = strictBody(
+      z.object({
+        checkId: z.string().uuid(),
+        decision: z.enum(['clear', 'not_accepted', 'abandoned']),
+        conclusion: z.string().trim().min(5).max(1000),
+      }).strict(),
+      req, c, '/api/firm/matters/:id/conflict-conclusion',
+    );
+
+    const matterId = String(req.params.id);
+    c.permissions.assertCan(p, 'compliance.review', { type: 'matter', id: matterId });
+    await c.permissions.requireMatter(p, matterId, MATTER_MANAGE);
+
+    const checks = await c.firm.listConflictChecks(p.tenantId, matterId);
+    const check = checks.find((x) => String(x.id) === body.checkId);
+    if (!check) throw notFoundOrForbidden('check', body.checkId);
+    if (check.concluded_at != null) {
+      /*
+        A concluded check is EVIDENCE. The database refuses to let its status change,
+        and this refuses the narrower hole the trigger leaves open: a second
+        conclusion with the same status would re-stamp the date and replace the
+        conclusion text, so the record would show the last thing written rather than
+        the decision that was taken. A lawyer who wants a different answer runs a new
+        check, which is also what a reviewer would want to see in the file.
+      */
+      throw badRequest('already_concluded',
+        'this conflict check has been concluded — run a new check rather than restating the old one');
+    }
+
+    const hits = await c.firm.listConflictHits(p.tenantId, body.checkId);
+    const open = hits.filter((h) => h.disposition === 'open').length;
+    const unwaived = hits.filter(
+      (h) => h.disposition === 'same_party' && h.severity !== 'none' && h.waiverCount === 0,
+    ).length;
+
+    if (body.decision === 'clear' && (open > 0 || unwaived > 0)) {
+      /*
+        The refusal names the obstacle rather than saying "not allowed". A lawyer who
+        cannot see WHY the matter will not clear will work around the control, and
+        this is the control the firm most needs them not to work around.
+      */
+      throw badRequest('conflicts_outstanding',
+        open > 0
+          ? `${open} finding(s) have not been dispositioned`
+          : `${unwaived} confirmed conflict(s) have no written consent from the affected party`);
+    }
+
+    // Derived, one expression, in the repository — and the database refuses a
+    // contradicting write, so this value is checked rather than trusted.
+    const status = body.decision === 'clear'
+      ? (hits.some((h) => h.disposition === 'same_party' && h.severity !== 'none')
+        ? 'cleared_with_waiver' : 'clear')
+      : (body.decision === 'not_accepted' ? 'conflicts_not_accepted' : 'abandoned');
+
+    await c.firm.tx(async () => {
+      await c.firm.concludeConflictCheck({
+        tenantId: p.tenantId, checkId: body.checkId, status,
+        conclusion: body.conclusion, membershipId: p.membershipId,
+      });
+      const state = await c.firm.conflictStateFor(p.tenantId, matterId);
+      if (state.cleared) {
+        await c.firm.setMatterConflictCleared({ tenantId: p.tenantId, matterId, cleared: true });
+      }
+      await c.audit.write({
+        action: state.cleared ? 'CONFLICT_CLEARED' : 'CONFLICT_DECLINED',
+        actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+        resourceType: 'matter', resourceId: matterId, outcome: 'success',
+        metadata: {
+          membershipId: p.membershipId, checkId: body.checkId, status,
+          confirmedConflicts: hits.filter((h) => h.disposition === 'same_party' && h.severity !== 'none').length,
+          exceptedByWindow: hits.filter((h) => h.disposition === 'same_party' && h.severity === 'none').length,
+        },
+      }, requestInfo(req, c.trustProxy));
+    });
+
+    ok(res, { matterId, checkId: body.checkId, status, cleared: status !== 'conflicts_not_accepted' && status !== 'abandoned' });
+  }));
+
+  // ---- the matter lifecycle, and the Rule 11 gate -------------------------
+  /*
+    Until now no route changed a matter's status, which meant `MatterTabs` showed a
+    lifecycle nothing could move and the conflict gate guarded a door with no handle.
+    The gate is only real if there is a way to walk through it.
+  */
+  r.post('/matters/:id/status', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const body = strictBody(
+      z.object({
+        internalStatus: z.enum(['intake', 'conflict_check', 'restricted', 'internal_review',
+          'partner_review', 'active', 'on_hold', 'judgment', 'execution', 'closed', 'archived']),
+        reason: z.string().trim().max(500).optional().nullable(),
+        /** Set only by the server from the derived state; a caller may not assert it. */
+        conflictCleared: z.boolean().optional().nullable(),
+      }).strict(),
+      req, c, '/api/firm/matters/:id/status',
+    );
+
+    const matterId = String(req.params.id);
+    c.permissions.assertCan(p, 'matters.status', { type: 'matter', id: matterId });
+    const { facts } = await c.permissions.requireMatter(p, matterId, MATTER_MANAGE);
+
+    const row = await c.firm.getMatterRow(p.tenantId, matterId);
+    if (!row) throw notFoundOrForbidden('matter', matterId);
+    const from = String(row.internal_status ?? '');
+
+    /*
+      `conflict_cleared` is DERIVED. A caller may send it, and it is refused by the
+      database if it contradicts the record — but the server never propagates a
+      caller's claim into the write. It recomputes and writes its own answer, so the
+      column cannot be used to launder a clearance.
+    */
+    const state = await c.firm.conflictStateFor(p.tenantId, matterId);
+
+    if (from === 'conflict_check' && body.internalStatus !== 'conflict_check'
+        && body.internalStatus !== 'archived' && !state.cleared) {
+      await c.audit.tryWrite({
+        action: 'MATTER_SCOPE_DENIED',
+        actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+        resourceType: 'matter', resourceId: matterId, outcome: 'denied',
+        reasonCode: 'conflict_gate',
+        metadata: { membershipId: p.membershipId, from, to: body.internalStatus, reasons: state.reasons },
+      }, requestInfo(req, c.trustProxy));
+      throw badRequest('conflict_gate',
+        `Rule 11: this matter cannot leave conflict_check — ${state.reasons.join('; ')}`);
+    }
+
+    await c.firm.tx(async () => {
+      await c.firm.setMatterStatus({
+        tenantId: p.tenantId, matterId, internalStatus: body.internalStatus,
+        conflictCleared: state.cleared,
+      });
+      await c.audit.write({
+        action: 'MATTER_STATUS_CHANGED',
+        actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+        resourceType: 'matter', resourceId: matterId, outcome: 'success',
+        metadata: {
+          membershipId: p.membershipId, from, to: body.internalStatus,
+          reason: body.reason ?? null, conflictCleared: state.cleared,
+          restricted: facts.isRestricted,
+        },
+      }, requestInfo(req, c.trustProxy));
+    });
+
+    ok(res, {
+      id: matterId, internalStatus: body.internalStatus, previous: from,
+      conflictCleared: state.cleared,
     });
   }));
 

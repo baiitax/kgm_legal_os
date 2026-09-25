@@ -484,4 +484,262 @@ create trigger if not exists firm_memberships_single_firm_guard_upd
     )
   )
   begin select raise(ABORT, 'Article 16: a licensed lawyer may not hold active memberships at two unrelated firms'); end;
+
+-- ── P0.1 · parties and conflicts (mirror of 0029) ───────────────────────────
+-- SQLite has no roles, no functions and no policies, so only the REFUSALS are
+-- mirrored: the gates and the immutability guards. The predicates — the Arabic
+-- name matcher, the match decision, the Rule 8 windows — live once in
+-- server/src/domain/arabic-names.ts and conflict-engine.ts and are used by both
+-- drivers, which is the arrangement the eligibility layer settled on for the same
+-- reason: two expressions of one legal rule will eventually disagree.
+
+create table if not exists parties (
+  id text primary key,
+  tenant_id text not null references tenants(id) on delete restrict,
+  kind text not null default 'company' check (kind in
+    ('individual','company','government','nonprofit','other')),
+  name text not null,
+  name_ar text,
+  -- DERIVED by the application; candidate generation only, never the decision.
+  name_normalized text not null,
+  commercial_registration text,
+  vat_number text,
+  national_id_masked text,
+  national_id_hash text,
+  status text not null default 'active' check (status in ('active','archived','merged')),
+  merged_into_party_id text references parties(id) on delete set null,
+  notes text,
+  created_by_membership_id text references firm_memberships(id) on delete set null,
+  created_at text not null,
+  updated_at text not null,
+  check (merged_into_party_id is null or merged_into_party_id <> id),
+  check (status <> 'merged' or merged_into_party_id is not null)
+);
+create index if not exists parties_tenant_name_idx on parties(tenant_id, name_normalized);
+create index if not exists parties_tenant_cr_idx on parties(tenant_id, commercial_registration);
+create index if not exists parties_tenant_vat_idx on parties(tenant_id, vat_number);
+create index if not exists parties_tenant_nid_idx on parties(tenant_id, national_id_hash);
+
+create table if not exists party_aliases (
+  id text primary key,
+  tenant_id text not null references tenants(id) on delete restrict,
+  party_id text not null references parties(id) on delete cascade,
+  alias text not null,
+  alias_normalized text not null,
+  script text not null default 'ar' check (script in ('ar','en','other')),
+  source text check (source is null or source in
+    ('court_filing','najiz','commercial_registration','client_statement',
+     'opposing_counsel','manual','other')),
+  note text,
+  created_at text not null,
+  updated_at text not null,
+  unique (tenant_id, party_id, alias_normalized)
+);
+create index if not exists party_aliases_norm_idx on party_aliases(tenant_id, alias_normalized);
+
+create table if not exists party_affiliations (
+  id text primary key,
+  tenant_id text not null references tenants(id) on delete restrict,
+  party_id text not null references parties(id) on delete cascade,
+  staff_id text not null references staff(id) on delete cascade,
+  relation text not null check (relation in
+    ('former_employer','current_employer','board_member','shareholder','other_interest')),
+  started_on text,
+  ended_on text,
+  note text,
+  recorded_by_membership_id text references firm_memberships(id) on delete set null,
+  created_at text not null,
+  updated_at text not null,
+  unique (tenant_id, staff_id, party_id, relation),
+  check (ended_on is null or started_on is null or ended_on >= started_on)
+);
+create index if not exists party_affiliations_staff_idx on party_affiliations(tenant_id, staff_id);
+
+-- No 'client' role: the client of a matter is matters.client_id, and a second way
+-- to say it would be a second answer to the question the engine asks.
+create table if not exists matter_parties (
+  id text primary key,
+  tenant_id text not null references tenants(id) on delete restrict,
+  matter_id text not null references matters(id) on delete cascade,
+  party_id text not null references parties(id) on delete restrict,
+  role text not null check (role in
+    ('counterparty','adverse_party','related_entity','guarantor','witness',
+     'expert','interested_party','other')),
+  note text,
+  added_by_membership_id text references firm_memberships(id) on delete set null,
+  created_at text not null,
+  updated_at text not null,
+  unique (tenant_id, matter_id, party_id, role)
+);
+create index if not exists matter_parties_matter_idx on matter_parties(tenant_id, matter_id);
+create index if not exists matter_parties_party_idx on matter_parties(tenant_id, party_id);
+
+create table if not exists conflict_checks (
+  id text primary key,
+  tenant_id text not null references tenants(id) on delete restrict,
+  matter_id text not null references matters(id) on delete cascade,
+  kind text not null default 'intake' check (kind in ('intake','adverse_check','periodic','recheck')),
+  status text not null default 'running' check (status in
+    ('running','clear','cleared_with_waiver','conflicts_not_accepted','abandoned')),
+  parties_checked integer not null default 0,
+  matters_searched integer not null default 0,
+  hits_found integer not null default 0,
+  started_by_membership_id text not null references firm_memberships(id) on delete restrict,
+  started_at text not null,
+  concluded_by_membership_id text references firm_memberships(id) on delete set null,
+  concluded_at text,
+  conclusion text,
+  created_at text not null,
+  updated_at text not null,
+  check ((status = 'running') = (concluded_at is null)),
+  check ((concluded_at is null) = (concluded_by_membership_id is null))
+);
+create index if not exists conflict_checks_matter_idx on conflict_checks(tenant_id, matter_id, started_at desc);
+
+create table if not exists conflict_hits (
+  id text primary key,
+  tenant_id text not null references tenants(id) on delete restrict,
+  check_id text not null references conflict_checks(id) on delete cascade,
+  matter_id text not null references matters(id) on delete cascade,
+  party_id text not null references parties(id) on delete restrict,
+  matched_party_id text references parties(id) on delete restrict,
+  matched_matter_id text references matters(id) on delete set null,
+  matched_client_id text references clients(id) on delete set null,
+  relation text not null check (relation in
+    ('former_client','current_client','former_employer','current_employer',
+     'same_case_opponent','linked_party','related_entity')),
+  match_strength text not null check (match_strength in ('exact','strong','candidate')),
+  match_basis text not null check (match_basis in
+    ('name','alias','commercial_registration','vat_number','national_id_hash')),
+  affected_party_id text references parties(id) on delete restrict,
+  severity text check (severity in ('actual','potential','none')),
+  -- 0031. proposed_severity is what the ENGINE assessed; severity is what a PERSON
+  -- decided. The CHECK on the next column is the reason they are two columns: a
+  -- machine may not declare a conflict, so a hit starts open with no severity.
+  proposed_severity text check (proposed_severity is null
+    or proposed_severity in ('actual','potential','none')),
+  rule_cited text not null,
+  relationship_ended_on text,
+  window_years integer,
+  window_lifts_on text,
+  within_window integer,
+  disposition text not null default 'open' check (disposition in
+    ('open','different_party','same_party')),
+  disposition_reason text,
+  disposition_by_membership_id text references firm_memberships(id) on delete set null,
+  disposition_at text,
+  created_at text not null,
+  updated_at text not null,
+  unique (check_id, party_id, matched_matter_id, affected_party_id, relation),
+  check ((disposition = 'open') = (disposition_at is null)),
+  check (disposition <> 'same_party' or (severity is not null and affected_party_id is not null)),
+  check (severity is null or disposition = 'same_party')
+);
+create index if not exists conflict_hits_check_idx on conflict_hits(check_id);
+create index if not exists conflict_hits_matter_idx on conflict_hits(tenant_id, matter_id);
+create index if not exists conflict_hits_open_idx on conflict_hits(check_id) where disposition = 'open';
+
+create table if not exists conflict_waivers (
+  id text primary key,
+  tenant_id text not null references tenants(id) on delete restrict,
+  hit_id text not null references conflict_hits(id) on delete cascade,
+  matter_id text not null references matters(id) on delete cascade,
+  waived_by_party_id text not null references parties(id) on delete restrict,
+  consent_document_id text references documents(id) on delete set null,
+  consent_reference text,
+  consent_signed_on text not null,
+  scope text not null,
+  recorded_by_membership_id text not null references firm_memberships(id) on delete restrict,
+  created_at text not null,
+  -- Rule 8 admits one remedy and it is a writing: either the document or a
+  -- reference that identifies it in the firm's own records.
+  check (consent_document_id is not null
+         or (consent_reference is not null and trim(consent_reference) <> ''))
+);
+create index if not exists conflict_waivers_hit_idx on conflict_waivers(hit_id);
+
+-- ── the record is immutable ─────────────────────────────────────────────────
+create trigger if not exists conflict_hits_disposition_final
+  before update on conflict_hits
+  when old.disposition <> 'open' and new.disposition <> old.disposition
+  begin select raise(ABORT, 'a conflict disposition is final: run a new check rather than revising the record'); end;
+
+create trigger if not exists conflict_hits_findings_immutable
+  before update on conflict_hits
+  when old.disposition <> 'open' and (
+    new.severity is not old.severity
+    or new.affected_party_id is not old.affected_party_id
+    or new.rule_cited is not old.rule_cited
+    or new.within_window is not old.within_window
+  )
+  begin select raise(ABORT, 'the findings behind a conflict disposition are evidence and may not be rewritten'); end;
+
+create trigger if not exists conflict_checks_conclusion_final
+  before update on conflict_checks
+  when old.concluded_at is not null and new.status <> old.status
+  begin select raise(ABORT, 'a concluded conflict check is evidence: run a new check rather than reopening it'); end;
+
+create trigger if not exists conflict_waivers_immutable_upd
+  before update on conflict_waivers
+  begin select raise(ABORT, 'a written consent is evidence: it is recorded once and never edited or withdrawn'); end;
+
+create trigger if not exists conflict_waivers_immutable_del
+  before delete on conflict_waivers
+  begin select raise(ABORT, 'a written consent is evidence: it is recorded once and never edited or withdrawn'); end;
+
+-- The consent must come from the party the finding says needs to give it.
+create trigger if not exists conflict_waivers_party_guard
+  before insert on conflict_waivers
+  when (
+    (select h.affected_party_id from conflict_hits h where h.id = new.hit_id) is null
+    or new.waived_by_party_id <> (select h.affected_party_id from conflict_hits h where h.id = new.hit_id)
+  )
+  begin select raise(ABORT, 'the consent must come from the party affected by the conflict, as recorded on the finding'); end;
+
+-- ── the coverage rule, once ──────────────────────────────────────────────────
+-- 0032 · SQLite has no user-defined functions, so the rule lives in a VIEW here and
+-- in a function on the other dialect. Either way there is ONE copy per dialect, and
+-- the guard calls it: "does a concluded check cover this matter as it now stands" is
+-- a legal rule, and four copies of a legal rule is three too many.
+create view if not exists matter_conflict_coverage as
+  select m.id as matter_id,
+         exists (
+           select 1 from conflict_checks c
+            where c.matter_id = m.id
+              and c.status in ('clear','cleared_with_waiver')
+              -- a check that ran before the counterparty was known has not checked
+              -- the counterparty
+              and not exists (select 1 from matter_parties mp
+                               where mp.matter_id = m.id and mp.created_at > c.started_at)
+              -- an undispositioned finding is not an answer
+              and not exists (select 1 from conflict_hits h
+                               where h.check_id = c.id and h.disposition = 'open')
+              -- a confirmed conflict needs the affected party's written consent
+              and not exists (select 1 from conflict_hits h
+                               where h.check_id = c.id and h.disposition = 'same_party'
+                                 and h.severity in ('actual','potential')
+                                 and not exists (select 1 from conflict_waivers w where w.hit_id = h.id))
+         ) as covered
+    from matters m;
+
+-- ── the gate ─────────────────────────────────────────────────────────────────
+create trigger if not exists matter_conflict_gate
+  before update on matters
+  when (
+    -- (a) a CHANGE of the derived value may not contradict the ledger. Only a change:
+    -- the row carrying an existing value forward is not making a claim, and treating
+    -- it as one froze every matter that predated this subsystem.
+    (new.conflict_cleared is not old.conflict_cleared
+     and new.conflict_cleared is not null
+     and new.conflict_cleared <> coalesce(
+       (select covered from matter_conflict_coverage where matter_id = new.id), 0))
+    or
+    -- (b) Rule 11: work may not be accepted on an unexamined file
+    (old.internal_status = 'conflict_check'
+     and new.internal_status <> 'conflict_check'
+     and new.internal_status <> 'archived'
+     and not coalesce(
+       (select covered from matter_conflict_coverage where matter_id = new.id), 0))
+  )
+  begin select raise(ABORT, 'conflict gate: a matter may not leave conflict_check without an excluding conflict check (Rule 11), and conflict_cleared may not be asserted against the record'); end;
 `;

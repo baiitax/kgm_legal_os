@@ -18,6 +18,10 @@
 import crypto from 'node:crypto';
 import { hashPassword, keyedHash } from '../lib/crypto.js';
 import { PERMISSIONS, ROLE_TEMPLATES, TEMPLATE_GRANTS } from '../domain/firm-catalogue.js';
+// The seed normalises party names with the SAME function the conflict engine uses.
+// A seed that reimplemented it would produce a register that does not match its own
+// contents — the failure mode the whole two-dialect discipline exists to prevent.
+import { normalizeArabicName } from '../domain/arabic-names.js';
 
 /**
  * Deterministic UUID derived from a stable label.
@@ -51,6 +55,21 @@ export const IDS = {
   matterEmployment: 'eeeeeeee-0000-4000-8000-000000000003',
   matterGulf: 'eeeeeeee-0000-4000-8000-000000000004',
   matterLayla: 'eeeeeeee-0000-4000-8000-000000000005',
+  // P0.1 · closed matters, for the Rule 8/4 windows. A conflict check that cannot
+  // see a closed file cannot see a former client, and Rule 8 is mostly about
+  // former clients.
+  matterNukhba: 'eeeeeeee-0000-4000-8000-000000000006',
+  matterQadim: 'eeeeeeee-0000-4000-8000-000000000007',
+  clientNukhba: 'cccccccc-0000-4000-8000-000000000004',
+  clientQadim: 'cccccccc-0000-4000-8000-000000000005',
+  partyAhmed: '11111111-0000-4000-8000-000000000001',
+  partyGulf: '11111111-0000-4000-8000-000000000002',
+  partyLayla: '11111111-0000-4000-8000-000000000003',
+  partyNukhba: '11111111-0000-4000-8000-000000000004',
+  partyQadim: '11111111-0000-4000-8000-000000000005',
+  partyFajr: '11111111-0000-4000-8000-000000000006',
+  partyFajrVariant: '11111111-0000-4000-8000-000000000007',
+  partyRiyadh: '11111111-0000-4000-8000-000000000008',
   // Firm OS identities. A firm member is a `users` row plus a `firm_memberships`
   // row; the two audiences never share an authorization surface (§6).
   userNoura: 'dddddddd-0000-4000-8000-000000000011',
@@ -155,6 +174,42 @@ export function buildDemoSeed(): SeedRow[] {
   });
 
   // ---------------------------------------------------------------- clients
+  const parties = [
+    { id: IDS.partyAhmed, tenant: IDS.tenantKgm, kind: 'individual',
+      name: 'Ahmed Al-Saud', nameAr: 'أحمد آل سعود', cr: null, vat: null },
+    { id: IDS.partyGulf, tenant: IDS.tenantKgm, kind: 'company',
+      name: 'Gulf Horizon Trading Co.', nameAr: 'شركة الأفق للتجارة', cr: '1010556677', vat: '300055667700003' },
+    { id: IDS.partyNukhba, tenant: IDS.tenantKgm, kind: 'company',
+      name: 'Al-Nukhba Trading Est.', nameAr: 'مؤسسة النخبة التجارية', cr: '1010334455', vat: null },
+    { id: IDS.partyQadim, tenant: IDS.tenantKgm, kind: 'company',
+      name: 'Qadim Logistics Co.', nameAr: 'شركة قديم للخدمات اللوجستية', cr: '4030998877', vat: null },
+    { id: IDS.partyFajr, tenant: IDS.tenantKgm, kind: 'company',
+      name: 'Al-Fajr Contracting Co.', nameAr: 'شركة الفجر للمقاولات', cr: '1010887766', vat: null },
+    // The same name as recorded by a different clerk at intake. Its own row, because
+    // the firm does not yet KNOW it is the same company — that is the question the
+    // matcher asks and a person answers.
+    { id: IDS.partyFajrVariant, tenant: IDS.tenantKgm, kind: 'company',
+      name: 'Al-Fajr Contracting & Trading Co.', nameAr: 'شركة الفجر للمقاولات والتجارة',
+      cr: null, vat: null },
+    { id: IDS.partyRiyadh, tenant: IDS.tenantKgm, kind: 'company',
+      name: 'Riyadh Holding Group', nameAr: 'مجموعة الرياض القابضة', cr: '1010123456', vat: null },
+    { id: IDS.partyLayla, tenant: IDS.tenantNajd, kind: 'individual',
+      name: 'Layla Mansour', nameAr: 'ليلى منصور', cr: null, vat: null },
+  ];
+  for (const p of parties) {
+    add('parties', {
+      id: p.id, tenant_id: p.tenant, kind: p.kind, name: p.name, name_ar: p.nameAr,
+      // DERIVED, and derived by the SAME function the engine uses — imported rather
+      // than reimplemented, because a seed whose normalisation differs from the
+      // search's would produce a register that does not match its own contents.
+      name_normalized: normalizeArabicName([p.nameAr, p.name].filter(Boolean).join(' ')),
+      commercial_registration: p.cr, vat_number: p.vat,
+      national_id_masked: null, national_id_hash: null,
+      status: 'active', merged_into_party_id: null, notes: null,
+      created_by_membership_id: null, created_at: now, updated_at: now,
+    });
+  }
+
   add('clients', {
     id: IDS.clientAhmed, tenant_id: IDS.tenantKgm, client_type: 'individual',
     name: 'Ahmed Al-Saud', name_ar: 'أحمد السعود',
@@ -163,7 +218,9 @@ export function buildDemoSeed(): SeedRow[] {
     address_line: 'King Fahd Road, Al Olaya', city: 'Riyadh', country: 'SA',
     identity_verified: 1, verification_note: 'Verified via Absher integration (demo)',
     status: 'active', created_at: now, updated_at: now,
-  });
+      party_id: IDS.partyAhmed,
+    relationship_ended_on: null,
+});
   add('clients', {
     id: IDS.clientGulf, tenant_id: IDS.tenantKgm, client_type: 'organization',
     name: 'Gulf Horizon Trading Co.', name_ar: 'شركة الأفق التجاري',
@@ -172,7 +229,9 @@ export function buildDemoSeed(): SeedRow[] {
     address_line: 'Corniche Road, Al Shatea', city: 'Jeddah', country: 'SA',
     identity_verified: 1, verification_note: 'CR verified (demo)',
     status: 'active', created_at: now, updated_at: now,
-  });
+      party_id: IDS.partyGulf,
+    relationship_ended_on: null,
+});
   add('clients', {
     id: IDS.clientLayla, tenant_id: IDS.tenantNajd, client_type: 'individual',
     name: 'Layla Mansour', name_ar: 'ليلى منصور',
@@ -181,7 +240,9 @@ export function buildDemoSeed(): SeedRow[] {
     address_line: 'Prince Sultan Road', city: 'Khobar', country: 'SA',
     identity_verified: 0, verification_note: null,
     status: 'active', created_at: now, updated_at: now,
-  });
+      party_id: IDS.partyLayla,
+    relationship_ended_on: null,
+});
 
   // ------------------------------------------------------------------ users
   const pw = hashPassword(DEMO_PASSWORD);
@@ -255,6 +316,41 @@ export function buildDemoSeed(): SeedRow[] {
   }
 
   // ---------------------------------------------------------------- matters
+  /*
+    Two FORMER CLIENTS, and their closed matters.
+
+    They exist for Rule 8, which is a prohibition on acting against former clients —
+    so a demo dataset that contains only a current client cannot exercise the rule
+    at all. The two are dated to land on opposite sides of القاعدة ٨/٤'s three years,
+    so the demo shows the rule AND its exception:
+
+      · النخبة  — relationship ended 15 August 2024. Three years run to 15 August
+                  2027, so acting against them today is a POTENTIAL conflict that
+                  needs their written consent.
+      · قديم    — relationship ended 30 June 2019. The window closed in 2022, so
+                  the rule says in terms that this is NOT a conflict. The finding is
+                  still recorded, because "why is this not a problem" is the question
+                  asked about a clearance later.
+  */
+  add('clients', {
+    id: IDS.clientNukhba, tenant_id: IDS.tenantKgm, client_type: 'organization',
+    name: 'Al-Nukhba Trading Est.', name_ar: 'مؤسسة النخبة التجارية',
+    national_id_masked: null, national_id_hash: null, commercial_reg_masked: '******441',
+    email: null, phone: null, address_line: null, city: 'Riyadh', country: 'SA',
+    identity_verified: 1, verification_note: 'CR sighted at engagement (synthetic)',
+    status: 'inactive', created_at: now, updated_at: now,
+    party_id: IDS.partyNukhba, relationship_ended_on: '2024-08-15',
+  });
+  add('clients', {
+    id: IDS.clientQadim, tenant_id: IDS.tenantKgm, client_type: 'organization',
+    name: 'Qadim Logistics Co.', name_ar: 'شركة قديم للخدمات اللوجستية',
+    national_id_masked: null, national_id_hash: null, commercial_reg_masked: '******902',
+    email: null, phone: null, address_line: null, city: 'Jeddah', country: 'SA',
+    identity_verified: 1, verification_note: 'Archived engagement (synthetic)',
+    status: 'inactive', created_at: now, updated_at: now,
+    party_id: IDS.partyQadim, relationship_ended_on: '2019-06-30',
+  });
+
   const matters = [
     {
       id: IDS.matterCommercial, tenant: IDS.tenantKgm, client: IDS.clientAhmed,
@@ -265,7 +361,7 @@ export function buildDemoSeed(): SeedRow[] {
       internal: 'partner_review', clientStatus: 'hearings', opened: -14, lastUpdate: -1,
       summary: 'Dispute over unpaid invoices under a supply agreement.',
       summaryAr: 'نزاع حول فواتير غير مدفوعة بموجب اتفاقية توريد.',
-      risk: 'high', conflict: 1, notes: 'INTERNAL: partner to approve settlement posture before next session.',
+      risk: 'high', conflict: null, notes: 'INTERNAL: partner to approve settlement posture before next session.',
     },
     {
       id: IDS.matterRealEstate, tenant: IDS.tenantKgm, client: IDS.clientAhmed,
@@ -276,7 +372,7 @@ export function buildDemoSeed(): SeedRow[] {
       internal: 'internal_review', clientStatus: 'under_review', opened: -7, lastUpdate: -2,
       summary: 'Review and negotiation of a commercial lease agreement.',
       summaryAr: 'مراجعة والتفاوض على اتفاقية إيجار تجاري.',
-      risk: 'medium', conflict: 1, notes: 'INTERNAL: awaiting conflict clearance on counterparty.',
+      risk: 'medium', conflict: null, notes: 'INTERNAL: awaiting conflict clearance on counterparty.',
     },
     {
       id: IDS.matterEmployment, tenant: IDS.tenantKgm, client: IDS.clientAhmed,
@@ -287,7 +383,7 @@ export function buildDemoSeed(): SeedRow[] {
       internal: 'conflict_check', clientStatus: 'opened', opened: -2, lastUpdate: 0,
       summary: 'Claim relating to end-of-service benefits.',
       summaryAr: 'مطالبة تتعلق بمكافأة نهاية الخدمة.',
-      risk: 'low', conflict: 0, notes: 'INTERNAL: conflict check in progress — do not contact client yet.',
+      risk: 'low', conflict: null, notes: 'INTERNAL: conflict check in progress — do not contact client yet.',
     },
     {
       id: IDS.matterGulf, tenant: IDS.tenantKgm, client: IDS.clientGulf,
@@ -298,6 +394,9 @@ export function buildDemoSeed(): SeedRow[] {
       internal: 'active', clientStatus: 'under_review', opened: -30, lastUpdate: -5,
       summary: 'Acquisition of a logistics subsidiary.',
       summaryAr: 'الاستحواذ على شركة تابعة في قطاع الخدمات اللوجستية.',
+      // DERIVED, and backed by the concluded check seeded at the end of this
+      // function: one hit, dispositioned. It is the only matter in the dataset whose
+      // clearance is EARNED rather than absent.
       risk: 'critical', conflict: 1, notes: 'INTERNAL: highly confidential — Client 2 only.',
     },
     {
@@ -309,7 +408,31 @@ export function buildDemoSeed(): SeedRow[] {
       internal: 'active', clientStatus: 'under_review', opened: -10, lastUpdate: -3,
       summary: 'Review of a cross-border distribution agreement.',
       summaryAr: 'مراجعة اتفاقية توزيع عابرة للحدود.',
-      risk: 'medium', conflict: 1, notes: 'INTERNAL: other firm, other tenant.',
+      risk: 'medium', conflict: null, notes: 'INTERNAL: other firm, other tenant.',
+    },
+    {
+      id: IDS.matterNukhba, tenant: IDS.tenantKgm, client: IDS.clientNukhba,
+      number: 'KGM-2024-0112', caseNo: '1446/7777',
+      title: 'Supply Agreement Drafting', titleAr: 'صياغة اتفاقية توريد',
+      area: 'Commercial Litigation', areaAr: 'التقاضي التجاري',
+      court: null, courtAr: null,
+      internal: 'closed', clientStatus: 'closed', opened: -800, lastUpdate: -404,
+      closed: '2024-08-15T09:00:00.000Z',
+      summary: 'Drafting and negotiation of a supply agreement.',
+      summaryAr: 'صياغة والتفاوض على اتفاقية توريد.',
+      risk: 'low', conflict: null, notes: 'INTERNAL: closed on completion of the engagement.',
+    },
+    {
+      id: IDS.matterQadim, tenant: IDS.tenantKgm, client: IDS.clientQadim,
+      number: 'KGM-2019-0044', caseNo: null,
+      title: 'Warehousing Dispute', titleAr: 'نزاع تخزين',
+      area: 'Commercial Litigation', areaAr: 'التقاضي التجاري',
+      court: 'Commercial Court — Jeddah', courtAr: 'المحكمة التجارية بجدة',
+      internal: 'closed', clientStatus: 'closed', opened: -2600, lastUpdate: -2600,
+      closed: '2019-06-30T09:00:00.000Z',
+      summary: 'Warehousing liability claim, concluded by settlement.',
+      summaryAr: 'مطالبة مسؤولية تخزين، انتهت بتسوية.',
+      risk: 'medium', conflict: null, notes: 'INTERNAL: settled; retention applies.',
     },
   ];
   for (const m of matters) {
@@ -319,7 +442,11 @@ export function buildDemoSeed(): SeedRow[] {
       practice_area: m.area, practice_area_ar: m.areaAr, court: m.court, court_ar: m.courtAr,
       internal_status: m.internal, client_status: m.clientStatus,
       summary: m.summary, summary_ar: m.summaryAr,
-      opened_at: iso(m.opened), closed_at: null, last_client_update_at: iso(m.lastUpdate, 11),
+      opened_at: iso(m.opened),
+      // A closed matter carries its closing date, because that date is where Rule
+      // 8/4's three years start. It is not decoration.
+      closed_at: (m as { closed?: string }).closed ?? null,
+      last_client_update_at: iso(m.lastUpdate, 11),
       risk_rating: m.risk, conflict_cleared: m.conflict, internal_notes: m.notes,
       created_at: now, updated_at: now,
     });
@@ -971,6 +1098,172 @@ export function buildDemoSeed(): SeedRow[] {
     session_absolute_minutes: 480, session_idle_minutes: 20,
     updated_at: now,
   });
+
+  /*
+    ── P0.1 · THE PARTY REGISTER, AND A CONFLICT WORTH FINDING ────────────────
+
+    Placed last because `conflict_checks.started_by_membership_id` and the
+    affiliations reference `firm_memberships`, which is seeded above.
+
+    What this builds is a firm that has a real conflict on its books, of the kind
+    القاعدة الثامنة exists to catch:
+
+      · «مؤسسة النخبة التجارية» was a client of the firm until 15 August 2024, and
+        is now the COUNTERPARTY on KGM-2026-0148. Three years have not passed, so
+        acting for the new client is a potential conflict requiring the former
+        client's written consent.
+      · Faisal Al-Harbi previously worked for «مجموعة الرياض القابضة», which is the
+        counterparty on KGM-2026-0151. القاعدة ٨/٢ and ٨/٣ give that five years.
+      · Noura Al-Qahtani sits on the board of «شركة الفجر للمقاولات», also adverse on
+        KGM-2026-0148 — a potential conflict with no window, because an interest does
+        not expire with time.
+      · «شركة قديم للخدمات اللوجستية» ended its relationship in June 2019, and its
+        counterparty appearance on KGM-2026-0170 is therefore NOT a conflict — the
+        exception in القاعدة ٨/٤, recorded rather than silently skipped.
+      · A counterparty entered at intake as «شركة الفجر للمقاولات والتجارة», which
+        the matcher can only CALL A CANDIDATE — one company written two ways, or two
+        companies with a common name. That one is for a human.
+
+    The register also holds the aliases, because a company appears differently in a
+    court filing, in Najiz and on its commercial registration, and a conflict search
+    that only knows one of those spellings finds the conflict some of the time.
+  */
+
+  const aliases: Array<[string, string, string, string, string]> = [
+    [IDS.partyGulf, 'Gulf Horizon Trading', 'en', 'manual', 'Short form used in correspondence.'],
+    [IDS.partyGulf, 'الأفق للتجارة', 'ar', 'najiz', 'As it appears on the Najiz case record.'],
+    [IDS.partyFajr, 'مؤسسة الفجر للمقاولات', 'ar', 'court_filing', 'The legal form differs on the filing.'],
+    [IDS.partyFajr, 'Al-Fajr Contracting Co. Ltd.', 'en', 'commercial_registration', 'English form on the CR.'],
+    [IDS.partyNukhba, 'النخبة التجارية', 'ar', 'court_filing', 'Without the legal form word.'],
+    [IDS.partyRiyadh, 'Riyadh Holding', 'en', 'manual', 'Short form.'],
+  ];
+  for (const [partyId, alias, script, source, note] of aliases) {
+    add('party_aliases', {
+      id: detId(`alias:${partyId}:${alias}`),
+      tenant_id: matters.find((m) => m.id === IDS.matterCommercial)!.tenant,
+      party_id: partyId, alias, alias_normalized: normalizeArabicName(alias),
+      script, source, created_at: now, updated_at: now, note,
+    });
+  }
+
+  // Who is on which side. Note the absence of a client role: the client of a matter
+  // is matters.client_id, and a second way to say it would be a second answer.
+  const matterParties: Array<[string, string, string, string]> = [
+    [IDS.matterCommercial, IDS.partyNukhba, 'counterparty', 'الطرف الآخر في نزاع الفواتير'],
+    [IDS.matterCommercial, IDS.partyFajr, 'counterparty', 'مقاول متعاقد من الباطن'],
+    [IDS.matterRealEstate, IDS.partyRiyadh, 'counterparty', 'مالك العقار'],
+    [IDS.matterEmployment, IDS.partyFajrVariant, 'counterparty', 'اسم مُدخل عند الاستلام'],
+    [IDS.matterGulf, IDS.partyQadim, 'counterparty', 'طرف مقابل في ملف قديم الصلة'],
+    [IDS.matterNukhba, IDS.partyFajr, 'related_entity', 'طرف ذو علاقة — ليس خصماً'],
+    [IDS.matterQadim, IDS.partyRiyadh, 'counterparty', 'طرف مقابل في الملف المنتهي'],
+  ];
+  for (const [matterId, partyId, role, note] of matterParties) {
+    add('matter_parties', {
+      id: detId(`matter_party:${matterId}:${partyId}:${role}`),
+      tenant_id: matters.find((m) => m.id === matterId)!.tenant,
+      matter_id: matterId, party_id: partyId, role, note,
+      added_by_membership_id: null,
+      // 29 days ago, and the DATE IS LOAD-BEARING. `matter_conflict_gate` accepts a
+      // check as covering a matter only when every party on the matter was added no
+      // later than the moment the check started — because a conflict check that ran
+      // before the counterparty was known has not checked the counterparty.
+      //
+      // The first version of this seed used `now` for these rows and backdated the
+      // check to 30 days ago, which is a sequence that cannot happen: the check
+      // would have run before the parties existed. Every clearance it produced
+      // failed the trigger's coverage test, so the demo's one "cleared" matter was
+      // cleared by a record the database itself refused to honour. The seed now
+      // tells a story that can happen: opened 30 days ago, parties registered the
+      // day after, check run two days ago.
+      created_at: iso(-29, 9), updated_at: iso(-29, 9),
+    });
+  }
+
+  /*
+    Declared interests of the firm's own people.
+
+    These are the records no one remembers unaided: that a partner sits on a
+    board, that a lawyer used to work somewhere. القاعدة ٨/٢ and ٨/٣ make the second
+    an obligation with a five-year life, and القاعدة ٨/١ makes the first a
+    «محتمل» conflict for as long as the interest lasts.
+  */
+  const affiliations: Array<[string, string, string, string | null, string | null, string]> = [
+    // [partyId, staffId, relation, startedOn, endedOn, note]
+    [IDS.partyRiyadh, staff[1].id, 'former_employer', '2015-03-01', '2023-01-31',
+      'Employment before joining the firm.'],
+    [IDS.partyFajr, staff[0].id, 'board_member', '2021-06-01', null,
+      'Non-executive board seat declared on joining.'],
+    [IDS.partyQadim, staff[0].id, 'former_employer', '2008-01-01', '2014-12-31',
+      'Historical employment; the five years of القاعدة ٨/٣ expired in 2019.'],
+  ];
+  for (const [partyId, staffId, relation, startedOn, endedOn, note] of affiliations) {
+    add('party_affiliations', {
+      id: detId(`affiliation:${partyId}:${staffId}:${relation}`),
+      tenant_id: IDS.tenantKgm, party_id: partyId, staff_id: staffId, relation,
+      started_on: startedOn, ended_on: endedOn, note,
+      recorded_by_membership_id: null, created_at: now, updated_at: now,
+    });
+  }
+
+  /*
+    ONE CONCLUDED CHECK: the acquisition file, which is genuinely clear.
+
+    It is clear because its only finding is the former client whose three years had
+    already run — القاعدة ٨/٤'s exception in action. That finding is recorded with a
+    severity of 'none' rather than dropped, so the register shows WHY the matter
+    cleared, which is the question asked about a clearance six months later.
+  */
+  // The membership id shape used by the memberships block above:
+  // detId(`firm_membership:${tenant}:${userId}`). Reusing the helper would mean the
+  // two expressions of "who is this membership" living in one file; this one is
+  // derived from the same label, and the FK below proves they agree.
+  const nouraMembershipId = detId(`firm_membership:${IDS.tenantKgm}:${IDS.userNoura}`);
+  const gulfCheckId = detId('conflict_check:gulf');
+  add('conflict_checks', {
+    id: gulfCheckId, tenant_id: IDS.tenantKgm, matter_id: IDS.matterGulf,
+    kind: 'intake', status: 'clear', parties_checked: 2, matters_searched: 7, hits_found: 1,
+    started_by_membership_id: nouraMembershipId,
+    started_at: iso(-28, 9),
+    concluded_by_membership_id: nouraMembershipId,
+    concluded_at: iso(-28, 10),
+    conclusion: 'لا يوجد تعارض: العلاقة مع «شركة قديم» انتهت في ٢٠١٩ ومضى أكثر من ثلاث سنوات.',
+    created_at: iso(-28, 9), updated_at: iso(-28, 10),
+  });
+  add('conflict_hits', {
+    id: detId(`conflict_hit:${gulfCheckId}:${IDS.partyQadim}`),
+    tenant_id: IDS.tenantKgm, check_id: gulfCheckId, matter_id: IDS.matterGulf,
+    party_id: IDS.partyQadim, matched_party_id: IDS.partyQadim, matched_matter_id: IDS.matterQadim,
+    matched_client_id: IDS.clientQadim, relation: 'former_client',
+    match_strength: 'exact', match_basis: 'name',
+    affected_party_id: IDS.partyQadim,
+    // What the engine assessed (0031), and what a person decided. They agree here
+    // because the window really had closed.
+    proposed_severity: 'none', severity: 'none',
+    rule_cited: 'القاعدة الثامنة/٤ من قواعد السلوك المهني — انقضاء ثلاث سنوات على العلاقة',
+    relationship_ended_on: '2019-06-30', window_years: 3, window_lifts_on: '2022-06-30',
+    within_window: 0, disposition: 'same_party',
+    disposition_reason: 'نفس الطرف؛ والقاعدة ٨/٤ تقضي بأن انقضاء ثلاث سنوات يرفع التعارض.',
+    disposition_by_membership_id: nouraMembershipId,
+    disposition_at: iso(-28, 10), created_at: iso(-28, 9), updated_at: iso(-28, 10),
+  });
+  /*
+    NOTE ON THE DERIVED COLUMN.
+
+    `matters.conflict_cleared` for KGM-2026-0170 is set to 1 in the MAIN matters
+    loop above, not here, and the first draft of this seed got that wrong: it emitted
+    a second `matters` row at the end of the function with the derived value on it.
+    The seed inserts with `on conflict do nothing`, so the second row was silently
+    discarded and the column stayed null — a seed that reported one state and wrote
+    another, with nothing failing.
+
+    The value is legitimately 1: the check seeded below is CONCLUDED, and its single
+    hit was dispositioned, which is the definition this system uses for clearance.
+    The seed and the schema agree, so the row is consistent with its own ledger —
+    which is what a demo dataset is supposed to be.
+
+    The engine derives this value in production. Nothing in the running system reads
+    a seeded `conflict_cleared` to decide anything.
+  */
 
   return rows;
 }

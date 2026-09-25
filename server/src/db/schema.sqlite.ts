@@ -49,6 +49,15 @@ create table if not exists clients (
   identity_verified integer not null default 0,
   verification_note text,
   status text not null default 'active',
+  -- 0029. clients is a commercial relationship; parties is an identity. The link
+  -- is nullable because the register arrived after the clients did, and a client
+  -- without it is matched on its own name columns instead — one matcher, two storage
+  -- paths, no second rule. No FK is declared here because parties is created by the
+  -- FIRM schema, which SQLite applies second; Postgres declares the reference.
+  party_id text,
+  -- Rule 8/4's starting point. An override: the repository falls back to the most
+  -- recent matter closed for the client when it is null.
+  relationship_ended_on text,
   created_at text not null,
   updated_at text not null
 );

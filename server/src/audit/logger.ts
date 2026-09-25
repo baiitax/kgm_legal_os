@@ -43,6 +43,24 @@ export type AuditAction =
   | 'MATTER_RESTRICTED' | 'MATTER_UNRESTRICTED'
   | 'ESCALATION_ATTEMPT' | 'ADMIN_MUTATION'
   /*
+    ── 0029 · the party register and the conflict record (P0.1) ────────────────
+
+    CONFLICT_HIT is separate from CONFLICT_CHECK_RUN on purpose. The run is an
+    action; the hit is a FINDING, and the question asked after a disqualification
+    motion is not "did somebody run the check" but "what did it find, and what did
+    we do about it". An audit log that recorded only the run would show the firm
+    performing diligence while saying nothing about what diligence produced.
+
+    CONFLICT_WAIVED is written at the moment a written consent is recorded, and it
+    carries the affected party — because the obligation is owed to that party, and
+    the regulator's question is whether THEY consented, not whether consent exists.
+  */
+  | 'PARTY_CREATED' | 'PARTY_UPDATED' | 'PARTY_MERGED' | 'PARTY_ALIAS_ADDED'
+  | 'PARTY_AFFILIATION_RECORDED' | 'MATTER_PARTY_ADDED' | 'MATTER_PARTY_UPDATED'
+  | 'MATTER_STATUS_CHANGED'
+  | 'CONFLICT_CHECK_RUN' | 'CONFLICT_HIT' | 'CONFLICT_DISPOSITION_RECORDED'
+  | 'CONFLICT_CLEARED' | 'CONFLICT_DECLINED' | 'CONFLICT_WAIVED'
+  /*
     ── 0027 · case-file access, and the eligibility layer ──────────────────────
     MATTER_VIEWED is the one this system was missing and could not have added by
     accident. DOCUMENT_VIEWED, INVOICE_VIEWED, MESSAGE_READ and RECEIPT_VIEWED

@@ -479,7 +479,17 @@ describe('§10/§11 · practice-area and assignment scoping', () => {
     const res = await agent.get('/api/firm/matters');
     expect(res.status).toBe(200);
     const numbers = res.body.data.matters.map((m: any) => m.matterNumber).sort();
-    expect(numbers).toEqual(['KGM-2026-0148', 'KGM-2026-0151', 'KGM-2026-0163', 'KGM-2026-0170']);
+    /*
+      SIX, and two of them are CLOSED. KGM-2024-0112 and KGM-2019-0044 were added by
+      the P0.1 party model, because a conflict engine that cannot see the firm's
+      closed files cannot see a former client — and القاعدة ٨/٤ is almost entirely
+      about former clients. A demo dataset containing only live matters could not
+      exercise the rule at all, which is why the count in this assertion changed.
+    */
+    expect(numbers).toEqual([
+      'KGM-2019-0044', 'KGM-2024-0112', 'KGM-2026-0148',
+      'KGM-2026-0151', 'KGM-2026-0163', 'KGM-2026-0170',
+    ]);
     expect(res.body.data.scope.firmWide).toBe(true);
     expect(numbers).not.toContain('NLP-2026-0021');
   });
@@ -500,13 +510,33 @@ describe('§10/§11 · practice-area and assignment scoping', () => {
     expect(res.body.data.scope.practiceAreas.sort()).toEqual(['Commercial Litigation', 'Real Estate']);
   });
 
-  it('§13 · a paralegal sees only the matter she is assigned to', async () => {
+  it('§13 · a paralegal is ASSIGNED to one matter and merely READS her practice area', async () => {
+    /*
+      The title used to read "sees only the matter she is assigned to", and it was
+      true by accident of the dataset: the Commercial Litigation practice area
+      contained exactly one matter and she was on it. Adding two closed commercial
+      matters to the demo exposed the difference between the two mechanisms, which is
+      the distinction §10/§11 actually draws:
+
+        · assignment        → 'operational', she works the file
+        · practice area     → 'view', she can read it and cannot change it
+
+      The assertion is now about the LEVEL rather than the count, because the level is
+      the control.
+    */
     const agent = createAgent(s.app);
     await firmLoginAs(agent, FIRM.paralegal);
     const res = await agent.get('/api/firm/matters');
-    expect(res.body.data.count).toBe(1);
-    expect(res.body.data.matters[0].matterNumber).toBe('KGM-2026-0148');
-    expect(res.body.data.matters[0].accessLevel).toBe('operational');
+    const byNumber = Object.fromEntries(
+      res.body.data.matters.map((m: any) => [m.matterNumber, m.accessLevel]));
+
+    expect(byNumber['KGM-2026-0148']).toBe('operational');
+    // Commercial Litigation, not assigned to her, and CLOSED — read-only.
+    expect(byNumber['KGM-2024-0112']).toBe('view');
+    expect(byNumber['KGM-2019-0044']).toBe('view');
+    // Not her area and not assigned: absent entirely.
+    expect(byNumber['KGM-2026-0151']).toBeUndefined();
+    expect(byNumber['KGM-2026-0163']).toBeUndefined();
   });
 
   it('§15 · compliance reaches a matter by assignment, at a lateral level', async () => {
@@ -643,8 +673,9 @@ describe('§27 · restricted matters', () => {
     const agent = createAgent(s.app);
     await firmLoginAs(agent, FIRM.finance);
     const res = await agent.get('/api/firm/matters');
-    // Still sees the three unrestricted matters through read_all...
-    expect(res.body.data.count).toBe(3);
+    // Still sees every unrestricted matter through read_all — five of them, now
+    // that the two closed files exist...
+    expect(res.body.data.count).toBe(5);
     expect(res.body.data.matters.map((m: any) => m.matterNumber)).not.toContain('KGM-2026-0170');
   });
 
