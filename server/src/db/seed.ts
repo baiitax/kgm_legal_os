@@ -15,6 +15,10 @@ const TABLE_ORDER = [
   'firm_memberships', 'membership_roles', 'department_members',
   'membership_practice_areas', 'matter_controls', 'matter_permissions',
   'tenant_settings',
+  // 0027 · the eligibility layer. After `staff` and after `firm_memberships`,
+  // because a licence belongs to a staff member and the Article 16 guard reads
+  // memberships when a licence is inserted for a member whose status is active.
+  'professional_licences', 'prior_office', 'tenant_relationships', 'eligibility_checks',
 ];
 
 /**

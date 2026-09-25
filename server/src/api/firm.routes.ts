@@ -279,6 +279,43 @@ export function firmRouter(c: Container): Router {
       accessLevel: level,
     });
 
+    /*
+      MATTER_VIEWED · phase P-1.4
+
+      The 69-action vocabulary held DOCUMENT_VIEWED, INVOICE_VIEWED, MESSAGE_READ
+      and RECEIPT_VIEWED, and not this one — and because migration 0023 makes the
+      union the database's contract, no call site could have written it.
+
+      That absence is why this system cannot answer a disqualification motion. The
+      question asked when a conflict surfaces late is not "was the screen clean in
+      March" but "who here had actually seen that file, and when", because imputed
+      knowledge attaches to the lawyer who read the matter regardless of any
+      register. The firm could prove which PDFs were opened and could not prove
+      who had looked at the case.
+
+      Written with `tryWrite` — fire-and-forget, outside the request transaction —
+      because a failure to record a READ must never fail the read itself. The
+      asymmetry is deliberate and is the opposite of the rule for writes: a
+      mutation whose audit is lost must fail, a read whose audit is lost must not.
+      The consequence is a logged warning rather than a silent hole, which is the
+      best available outcome once the decision to not block is made.
+
+      `reasonCode` carries the ACCESS LEVEL rather than a refusal, so the log
+      answers the follow-up question too: not just that they looked, but how much
+      they were entitled to see when they did.
+    */
+    await c.audit.tryWrite({
+      action: 'MATTER_VIEWED',
+      actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+      resourceType: 'matter', resourceId: facts.matterId, outcome: 'success',
+      reasonCode: `access_level:${level}`,
+      metadata: {
+        membershipId: p.membershipId,
+        matterNumber: facts.matterNumber,
+        restricted: facts.isRestricted,
+      },
+    }, requestInfo(req, c.trustProxy));
+
     ok(res, {
       ...projected.data,
       // Authorization facts, not classified fields: the member needs to know
@@ -379,6 +416,56 @@ export function firmRouter(c: Container): Router {
       throw notFoundOrForbidden('member', body.membershipId);
     }
 
+    /*
+      THE ELIGIBILITY GATE · phase P-1.1
+
+      A member may not be given work they are not entitled to perform. This is the
+      first of the gates from the gap analysis: the system could previously grant
+      matter access to a member whose licence was suspended, and recorded nothing
+      about whether the question had even been asked.
+
+      The check is on the TARGET, not the actor: an administrator delegating work
+      is doing nothing wrong, and refusing them would send the message to the
+      wrong person.
+
+      REVOKING access is deliberately NOT gated. Removing a member from a matter
+      is how a firm responds to a suspended licence, so requiring the licence to
+      be valid in order to revoke it would make the remedy unavailable in exactly
+      the case it exists for.
+    */
+    if (body.accessLevel !== 'none') {
+      const eligibility = await c.firm.eligibilityFor(p.tenantId, body.membershipId);
+      if (!eligibility.entitled) {
+        await c.firm.recordEligibilityCheck({
+          tenantId: p.tenantId,
+          subjectKind: 'matter_assignment',
+          subjectId: matterId,
+          precondition: 'member_entitled_to_practise',
+          outcome: 'fail',
+          evidence: {
+            targetMembershipId: body.membershipId,
+            reason: eligibility.reason,
+            requiresLicence: eligibility.requiresLicence,
+            licences: eligibility.licences.map((l) => ({
+              number: l.licenceNumber, status: l.status, expiresAt: l.expiresAt,
+            })),
+          },
+          ruleCited: 'قواعد السلوك المهني — Rule 10 (no practice under suspension); نظام المحاماة',
+          evaluatedByMembershipId: p.membershipId,
+        });
+        await c.audit.tryWrite({
+          action: 'ELIGIBILITY_DENIED',
+          actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+          outcome: 'denied', reasonCode: eligibility.reason,
+          resourceType: 'matter', resourceId: matterId,
+          metadata: { membershipId: p.membershipId, targetMembershipId: body.membershipId },
+        }, requestInfo(req, c.trustProxy));
+        // The same response a member of another tenant gets, so this cannot be
+        // used to enumerate who holds a licence: §72's rule, applied here.
+        throw notFoundOrForbidden('member', body.membershipId);
+      }
+    }
+
     await c.firm.tx(async () => {
       if (body.accessLevel === 'none') {
         await c.firm.revokeMatterAccess({ tenantId: p.tenantId, matterId, membershipId: body.membershipId });
@@ -470,6 +557,193 @@ export function firmRouter(c: Container): Router {
       count: visible.size,
       matterIds: [...visible],
     });
+  }));
+
+  // ---- eligibility (§P-1.1 – P-1.3, migration 0027) -----------------------
+  /*
+    The eligibility register, readable.
+
+    Permission is `compliance.licences` where it exists — the code has been in the
+    catalogue since 0006 with no table behind it, granting two roles the authority
+    to manage something that did not exist. This is what it now refers to.
+
+    `users.read` is accepted as well, because a managing partner reviewing their
+    own firm's standing is doing administration, not compliance, and requiring a
+    second grant to answer "who here may still practise" would make the register
+    one nobody looks at. The two are not additive in any other direction: neither
+    one widens what matters a member can reach.
+  */
+  r.get('/eligibility', ah(async (req, res) => {
+    const p = principal(req);
+    c.permissions.assertCanAny(p, ['compliance.licences', 'users.read'], { type: 'member_collection' });
+
+    const members = await c.firm.listMembers(p.tenantId);
+    const rows = await Promise.all(members.map(async (m) => {
+      const eligibility = await c.firm.eligibilityFor(p.tenantId, m.membershipId);
+      const prior = await c.firm.priorOfficeBar(p.tenantId, m.membershipId);
+      return {
+        membershipId: m.membershipId,
+        displayName: m.displayName,
+        displayNameAr: m.displayNameAr,
+        email: m.email,
+        status: m.status,
+        requiresLicence: eligibility.requiresLicence,
+        entitled: eligibility.entitled,
+        reason: eligibility.reason,
+        licences: eligibility.licences,
+        priorOffice: {
+          barred: prior.barred,
+          restrictionEndsOn: prior.restrictionEndsOn,
+          stillInPost: prior.stillInPost,
+          // The institution is named only where a bar is live. Reporting it
+          // unconditionally would turn this endpoint into a searchable list of
+          // where every colleague used to work, which is not what a licence
+          // register is for.
+          institution: prior.barred ? prior.institution : null,
+        },
+      };
+    }));
+
+    ok(res, {
+      count: rows.length,
+      // The headline number a managing partner is looking for, computed rather
+      // than left to the client: a UI that recounts this is a second definition
+      // of "may practise" and the two will disagree eventually.
+      notEntitled: rows.filter((r) => !r.entitled).length,
+      barredByPriorOffice: rows.filter((r) => r.priorOffice.barred).length,
+      members: rows,
+    });
+  }));
+
+  r.get('/eligibility/me', ah(async (req, res) => {
+    const p = principal(req);
+    // Own standing: no permission beyond an authenticated session. A member must
+    // always be able to find out why they were refused work.
+    const eligibility = await c.firm.eligibilityFor(p.tenantId, p.membershipId);
+    const prior = await c.firm.priorOfficeBar(p.tenantId, p.membershipId);
+    ok(res, {
+      membershipId: p.membershipId,
+      requiresLicence: eligibility.requiresLicence,
+      entitled: eligibility.entitled,
+      reason: eligibility.reason,
+      licences: eligibility.licences,
+      priorOffice: {
+        barred: prior.barred,
+        restrictionEndsOn: prior.restrictionEndsOn,
+        stillInPost: prior.stillInPost,
+        institution: prior.institution,
+      },
+    });
+  }));
+
+  r.post('/eligibility/:membershipId/licences', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const body = strictBody(
+      z.object({
+        licenceNumber: z.string().trim().min(3).max(60),
+        issuedAt: z.string().date().optional().nullable(),
+        expiresAt: z.string().date().optional().nullable(),
+        status: z.enum(['valid', 'suspended', 'expired', 'revoked', 'pending']).default('valid'),
+        statusReference: z.string().trim().max(200).optional().nullable(),
+      }).strict(),
+      req, c, '/api/firm/eligibility/:membershipId/licences',
+    );
+
+    c.permissions.assertCanAny(p, ['compliance.licences', 'users.read'], { type: 'member_collection' });
+
+    const target = await c.firm.getMembershipById(String(req.params.membershipId));
+    if (!target || target.tenantId !== p.tenantId) {
+      await c.audit.tryWrite({
+        action: 'ESCALATION_ATTEMPT',
+        actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+        outcome: 'denied', reasonCode: 'cross_tenant_licence_write',
+        resourceType: 'membership', resourceId: String(req.params.membershipId),
+        metadata: { membershipId: p.membershipId },
+      }, requestInfo(req, c.trustProxy));
+      throw notFoundOrForbidden('member', String(req.params.membershipId));
+    }
+
+    // A licence number may not be recorded twice for the same person: a renewal is
+    // a new number or an UPDATE of the expiry, and silently accepting a duplicate
+    // would create two rows whose agreement nothing checks.
+    const existing = await c.firm.listLicences(p.tenantId, target.staffId);
+    const clash = existing.find((l) => l.licenceNumber === body.licenceNumber);
+
+    await c.firm.tx(async () => {
+      await c.firm.upsertLicence({
+        tenantId: p.tenantId,
+        staffId: target.staffId,
+        licenceNumber: body.licenceNumber,
+        issuedAt: body.issuedAt ?? null,
+        expiresAt: body.expiresAt ?? null,
+        status: body.status,
+        statusReference: body.statusReference ?? null,
+        verifiedByMembershipId: p.membershipId,
+      });
+      await c.audit.write({
+        action: clash ? 'LICENCE_STATUS_CHANGED' : 'LICENCE_RECORDED',
+        actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+        resourceType: 'staff', resourceId: target.staffId, outcome: 'success',
+        metadata: {
+          membershipId: p.membershipId, licenceNumber: body.licenceNumber,
+          status: body.status, previousStatus: clash?.status ?? null,
+        },
+      }, requestInfo(req, c.trustProxy));
+    });
+
+    const eligibility = await c.firm.eligibilityFor(p.tenantId, target.id);
+    ok(res, { licenceNumber: body.licenceNumber, status: body.status, eligibility });
+  }));
+
+  r.post('/eligibility/:membershipId/prior-office', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const body = strictBody(
+      z.object({
+        officeKind: z.enum(['judiciary', 'public_prosecution', 'bog', 'committee',
+          'government_body', 'court_administration', 'foreign_judiciary']),
+        institution: z.string().trim().min(2).max(200),
+        institutionAr: z.string().trim().max(200).optional().nullable(),
+        roleTitle: z.string().trim().max(120).optional().nullable(),
+        startedOn: z.string().date(),
+        endedOn: z.string().date().optional().nullable(),
+      }).strict(),
+      req, c, '/api/firm/eligibility/:membershipId/prior-office',
+    );
+
+    c.permissions.assertCanAny(p, ['compliance.licences', 'users.read'], { type: 'member_collection' });
+
+    const target = await c.firm.getMembershipById(String(req.params.membershipId));
+    if (!target || target.tenantId !== p.tenantId) {
+      throw notFoundOrForbidden('member', String(req.params.membershipId));
+    }
+    if (body.endedOn && body.endedOn < body.startedOn) {
+      throw badRequest('validation_failed', 'endedOn cannot precede startedOn');
+    }
+
+    await c.firm.tx(async () => {
+      await c.firm.recordPriorOffice({
+        id: newId(), tenantId: p.tenantId, staffId: target.staffId,
+        officeKind: body.officeKind, institution: body.institution,
+        institutionAr: body.institutionAr ?? null,
+        roleTitle: body.roleTitle ?? null, roleTitleAr: null,
+        startedOn: body.startedOn, endedOn: body.endedOn ?? null,
+      });
+      await c.audit.write({
+        action: 'PRIOR_OFFICE_RECORDED',
+        actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+        resourceType: 'staff', resourceId: target.staffId, outcome: 'success',
+        metadata: {
+          membershipId: p.membershipId, officeKind: body.officeKind,
+          // The institution is recorded in the audit because the audit is
+          // privileged and the endpoint's list view is not; a reviewer needs to
+          // know which body, and a colleague browsing the register does not.
+          institution: body.institution,
+          endedOn: body.endedOn ?? null,
+        },
+      }, requestInfo(req, c.trustProxy));
+    });
+
+    ok(res, await c.firm.priorOfficeBar(p.tenantId, target.id));
   }));
 
   // ---- administration (§49, §50) -------------------------------------------

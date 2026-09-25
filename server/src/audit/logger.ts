@@ -41,7 +41,30 @@ export type AuditAction =
   | 'PERMISSION_DENIED' | 'MATTER_SCOPE_DENIED' | 'CEILING_EXCEEDED'
   | 'ROLE_GRANTED' | 'ROLE_REVOKED' | 'MATTER_ACCESS_GRANTED' | 'MATTER_ACCESS_REVOKED'
   | 'MATTER_RESTRICTED' | 'MATTER_UNRESTRICTED'
-  | 'ESCALATION_ATTEMPT' | 'ADMIN_MUTATION';
+  | 'ESCALATION_ATTEMPT' | 'ADMIN_MUTATION'
+  /*
+    ── 0027 · case-file access, and the eligibility layer ──────────────────────
+    MATTER_VIEWED is the one this system was missing and could not have added by
+    accident. DOCUMENT_VIEWED, INVOICE_VIEWED, MESSAGE_READ and RECEIPT_VIEWED
+    were all here; reading the CASE FILE itself was not.
+
+    That is the record a disqualification motion asks for. When a conflict
+    surfaces late, the question is not "was the screen clean in March" but "who
+    here had actually seen that file, and when" — imputed knowledge attaches to
+    the lawyer who read the matter, independently of any register. Without this
+    action the firm can prove which PDFs were opened and cannot prove who looked
+    at the case.
+
+    Note the mechanism that made this unfixable without a migration: 0023 derives
+    the database's allowlist from THIS union, so a call site cannot invent an
+    action. Adding the string here without admitting it in the constraint yields
+    a dropped audit row, not an error. Both must move together.
+  */
+  | 'MATTER_VIEWED'
+  | 'LICENCE_RECORDED' | 'LICENCE_STATUS_CHANGED' | 'LICENCE_VERIFIED'
+  | 'PRIOR_OFFICE_RECORDED' | 'TENANT_RELATIONSHIP_DECLARED'
+  | 'ELIGIBILITY_EVALUATED' | 'ELIGIBILITY_DENIED'
+  | 'MULTI_FIRM_AFFILIATION_DENIED';
 
 export interface AuditActor {
   /**

@@ -68,6 +68,41 @@ export class SqliteDb implements Db {
     // byte-identical to the version its 185 tests were written against.
     this.db.exec(SQLITE_SCHEMA);
     this.db.exec(FIRM_RBAC_SCHEMA);
+    this.ensureColumns();
+  }
+
+  /**
+   * Columns added to an EXISTING table after it shipped.
+   *
+   * SQLite has no `alter table ... add column if not exists`, and both schema
+   * files are written with `create table if not exists` — so a new column in a
+   * `create table` statement is applied to a fresh database and silently skipped
+   * by one that already has the table. A developer with a working `data/`
+   * directory would get a schema one column behind the code with no error saying
+   * so, and the failure would surface as an opaque "no such column" hours later.
+   *
+   * So each such column is declared twice, deliberately: once in the schema file
+   * as the definition, and once here as the migration. Postgres has the same
+   * problem solved properly by `add column if not exists` in a numbered migration;
+   * this is the equivalent for the demo driver, and it is the ONLY reason this
+   * method exists.
+   */
+  private ensureColumns(): void {
+    const add = (table: string, column: string, definition: string) => {
+      const cols = this.db.prepare(`pragma table_info(${table})`).all() as Array<{ name: string }>;
+      if (!cols.some((c) => c.name === column)) {
+        this.db.exec(`alter table ${table} add column ${column} ${definition}`);
+      }
+    };
+
+    // 0027 · the eligibility layer. Roles declare whether holding them means
+    // practising law, so the licence requirement is data rather than a hardcoded
+    // list of role codes in a function.
+    add('roles', 'requires_practising_licence', 'integer not null default 0');
+    this.db.exec(
+      `update roles set requires_practising_licence = 1
+        where code in ('MANAGING_PARTNER','PARTNER','ASSOCIATE','LAWYER')`,
+    );
   }
 
   private coerce(params: Param[] = []): (string | number | null | Buffer)[] {

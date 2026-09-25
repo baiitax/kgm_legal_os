@@ -52,6 +52,9 @@ create table if not exists roles (
   description text,
   description_ar text,
   is_system integer not null default 0,
+  -- 0027: whether holding this role means practising law, so a valid licence is
+  -- a precondition. Default 0 — a new role is inert until someone decides.
+  requires_practising_licence integer not null default 0,
   is_active integer not null default 1,
   created_at text not null,
   updated_at text not null,
@@ -327,4 +330,158 @@ create trigger if not exists firm_sessions_no_active_after_left
     (select status from firm_memberships where id = new.membership_id) not in ('active')
   )
   begin select raise(ABORT, 'only an active membership may hold a session'); end;
+
+
+-- ============================================================================
+-- 0027 · THE ELIGIBILITY LAYER  (mirror of the Postgres migration)
+-- ============================================================================
+-- The Postgres side expresses the derived predicates as SQL functions
+-- (member_entitled_to_practise, member_requires_licence, member_eligible_for_matter).
+-- SQLite has no functions, so the READ side of those predicates is implemented in
+-- firm-repo.ts as one query that both drivers run — which is the better place for
+-- it anyway, because a predicate the application reads and a predicate the
+-- database enforces must be the SAME expression, and a function on one dialect
+-- only is how they drift.
+--
+-- What is mirrored here are the REFUSALS, because those must hold even if a write
+-- path never goes through the repository.
+
+create table if not exists professional_licences (
+  id text primary key,
+  tenant_id text not null references tenants(id) on delete restrict,
+  staff_id text not null references staff(id) on delete restrict,
+  licence_number text not null,
+  issued_at text,
+  expires_at text,
+  status text not null default 'valid'
+    check (status in ('valid','suspended','expired','revoked','pending')),
+  status_effective_from text,
+  status_reference text,
+  verified_by_membership_id text references firm_memberships(id) on delete set null,
+  verified_at text,
+  evidence_document_id text,
+  created_at text not null,
+  updated_at text not null,
+  unique (staff_id, licence_number),
+  -- A licence may not be valid AND carry a suspension reference.
+  check (status = 'valid' and status_reference is null or status <> 'valid')
+);
+create index if not exists professional_licences_staff_idx on professional_licences(staff_id, status);
+create index if not exists professional_licences_tenant_idx on professional_licences(tenant_id);
+
+create table if not exists prior_office (
+  id text primary key,
+  tenant_id text not null references tenants(id) on delete restrict,
+  staff_id text not null references staff(id) on delete restrict,
+  office_kind text not null check (office_kind in
+    ('judiciary','public_prosecution','bog','committee',
+     'government_body','court_administration','foreign_judiciary')),
+  institution text not null,
+  institution_ar text,
+  role_title text,
+  role_title_ar text,
+  started_on text not null,
+  -- NULL means STILL IN POST: no restriction window has begun and the bar is
+  -- absolute. The window itself is derived in priorOfficeBar() (firm-repo.ts),
+  -- not stored — see the note in the Postgres migration for why there is no
+  -- restriction_ends_on column in either dialect.
+  ended_on text,
+  created_at text not null,
+  updated_at text not null,
+  check (ended_on is null or ended_on >= started_on)
+);
+create index if not exists prior_office_staff_idx on prior_office(staff_id);
+
+-- The five-year window is NOT a trigger here. SQLite cannot assign to NEW, and
+-- computing it in a trigger on one dialect while Postgres computes it in another
+-- is two expressions for one rule. It lives in priorOfficeBar() instead.
+
+create table if not exists tenant_relationships (
+  tenant_id text not null references tenants(id) on delete cascade,
+  related_tenant_id text not null references tenants(id) on delete cascade,
+  kind text not null check (kind in ('branch','affiliate','merged','successor')),
+  declared_by_membership_id text references firm_memberships(id) on delete set null,
+  note text,
+  declared_at text not null,
+  primary key (tenant_id, related_tenant_id),
+  check (tenant_id <> related_tenant_id)
+);
+
+-- Append-only: a check that can be edited is not evidence.
+create table if not exists eligibility_checks (
+  id integer primary key autoincrement,
+  tenant_id text not null references tenants(id) on delete restrict,
+  subject_kind text not null check (subject_kind in
+    ('membership','staff','matter','client','invoice','document','matter_assignment')),
+  subject_id text not null,
+  precondition text not null,
+  outcome text not null check (outcome in ('pass','fail','waived','not_applicable')),
+  evidence text not null default '{}',
+  rule_cited text,
+  evaluated_by_membership_id text references firm_memberships(id) on delete set null,
+  evaluated_at text not null
+);
+create index if not exists eligibility_subject_idx
+  on eligibility_checks(subject_kind, subject_id, precondition, evaluated_at desc);
+
+create trigger if not exists eligibility_checks_immutable_upd
+  before update on eligibility_checks
+  begin select raise(ABORT, 'eligibility_checks is append-only: a check that can be edited is not evidence'); end;
+
+create trigger if not exists eligibility_checks_immutable_del
+  before delete on eligibility_checks
+  begin select raise(ABORT, 'eligibility_checks is append-only: a check that can be edited is not evidence'); end;
+
+-- ── Article 16 · the single-firm guard ──────────────────────────────────────
+-- Refuses an ACTIVE membership for a licensed lawyer who already holds one at a
+-- different, unrelated tenant. Only the transition into 'active' is checked: a
+-- membership may be invited, suspended or left freely; it is conferring the right
+-- to practise here that has to be lawful.
+create trigger if not exists firm_memberships_single_firm_guard
+  before insert on firm_memberships
+  for each row when (
+    new.status = 'active'
+    and exists (
+      select 1 from professional_licences l
+       where l.staff_id = new.staff_id and l.status = 'valid'
+         and (l.expires_at is null or l.expires_at > date('now'))
+    )
+    and exists (
+      select 1 from firm_memberships m
+       where m.user_id = new.user_id
+         and m.id <> new.id
+         and m.status = 'active'
+         and m.tenant_id <> new.tenant_id
+         and not exists (
+           select 1 from tenant_relationships r
+            where (r.tenant_id = new.tenant_id and r.related_tenant_id = m.tenant_id)
+               or (r.tenant_id = m.tenant_id and r.related_tenant_id = new.tenant_id)
+         )
+    )
+  )
+  begin select raise(ABORT, 'Article 16: a licensed lawyer may not hold active memberships at two unrelated firms'); end;
+
+create trigger if not exists firm_memberships_single_firm_guard_upd
+  before update of status on firm_memberships
+  for each row when (
+    new.status = 'active'
+    and exists (
+      select 1 from professional_licences l
+       where l.staff_id = new.staff_id and l.status = 'valid'
+         and (l.expires_at is null or l.expires_at > date('now'))
+    )
+    and exists (
+      select 1 from firm_memberships m
+       where m.user_id = new.user_id
+         and m.id <> new.id
+         and m.status = 'active'
+         and m.tenant_id <> new.tenant_id
+         and not exists (
+           select 1 from tenant_relationships r
+            where (r.tenant_id = new.tenant_id and r.related_tenant_id = m.tenant_id)
+               or (r.tenant_id = m.tenant_id and r.related_tenant_id = new.tenant_id)
+         )
+    )
+  )
+  begin select raise(ABORT, 'Article 16: a licensed lawyer may not hold active memberships at two unrelated firms'); end;
 `;

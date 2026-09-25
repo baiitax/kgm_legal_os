@@ -23,6 +23,7 @@
 import type { Db, Param, Queryable, Row } from './types.js';
 import { currentQueryable, currentScope } from './context.js';
 import { toBool, toIso, toNumber, toStr } from './types.js';
+import { newId } from '../lib/crypto.js';
 
 /** The membership row plus the identity it points at. */
 export interface MembershipRow {
@@ -1070,6 +1071,309 @@ export class FirmRepo {
     return rows.map(toAuditEvent);
   }
 
+  /* ==========================================================================
+     THE ELIGIBILITY LAYER · phase P-1  (migration 0027)
+
+     These methods are the READ side of the gates. The REFUSAL side lives in the
+     database (the Article 16 trigger) and in the routes (the assignment gate);
+     this is where each rule is EXPRESSED, and there is exactly one expression of
+     each — see the note above PRIOR_OFFICE_RESTRICTION_YEARS for why the window
+     arithmetic is here rather than in SQL.
+     ========================================================================== */
+
+  /** Every licence this firm holds for a staff member, newest first. */
+  async listLicences(tenantId: string, staffId: string): Promise<LicenceRow[]> {
+    const rows = await this.q().all<Row>(
+      `select id, licence_number, issued_at, expires_at, status, status_effective_from,
+              status_reference, verified_at
+         from professional_licences
+        where tenant_id = ? and staff_id = ?
+        order by expires_at desc nulls last, issued_at desc nulls last`,
+      [tenantId, staffId],
+    );
+    return rows.map((row) => ({
+      id: String(row.id),
+      licenceNumber: toStr(row.licence_number) ?? '',
+      issuedAt: toStr(row.issued_at),
+      expiresAt: toStr(row.expires_at),
+      status: toStr(row.status) ?? 'pending',
+      statusEffectiveFrom: toStr(row.status_effective_from),
+      statusReference: toStr(row.status_reference),
+      verifiedAt: toStr(row.verified_at),
+    }));
+  }
+
+  /**
+   * Is this member entitled to practise, and why not if not?
+   *
+   * Returns the REASON as well as the verdict. A boolean would force every caller
+   * to re-derive the explanation for the refusal it is about to render, and that
+   * re-derivation is where the "no licence on record" case would get lost — the
+   * case that matters most, because it is the state every new joiner is in and
+   * the one a lenient default would wave through.
+   */
+  async eligibilityFor(
+    tenantId: string,
+    membershipId: string,
+  ): Promise<{ requiresLicence: boolean; entitled: boolean; reason: string; licences: LicenceRow[] }> {
+    const membership = await this.getMembershipById(membershipId);
+    // Tenant is checked here as well as in the caller. This is a read about a
+    // named person's professional standing, and a membership id from another firm
+    // must not resolve — the same discipline `getMatterAuthFacts` applies.
+    if (!membership || membership.tenantId !== tenantId) {
+      return { requiresLicence: false, entitled: false, reason: 'membership_not_in_tenant', licences: [] };
+    }
+
+    const requires = await this.memberRequiresLicence(tenantId, membershipId);
+    const licences = await this.listLicences(tenantId, membership.staffId);
+
+    // A non-practitioner is never gated: a paralegal, a finance officer or a
+    // compliance officer holds no licence and does not need one. Gating them
+    // would block a legitimate hire and teach the firm to ignore the flag.
+    if (!requires) {
+      return { requiresLicence: false, entitled: true, reason: 'not_a_practising_role', licences };
+    }
+    if (licences.length === 0) {
+      // ABSENCE IS NOT PERMISSION. The deliberate inverse of the usual default,
+      // matching the rule already stated for financial ceilings: "NULL = no
+      // authority. Never read NULL as unlimited."
+      return { requiresLicence: true, entitled: false, reason: 'no_licence_on_record', licences };
+    }
+
+    const today = new Date().toISOString().slice(0, 10);
+    if (licences.some((l) => l.status === 'valid' && (!l.expiresAt || l.expiresAt > today))) {
+      return { requiresLicence: true, entitled: true, reason: 'valid', licences };
+    }
+
+    // Name the most SERIOUS reason present, not the first row's. A suspension
+    // outranks an expiry, and an expiry outranks 'pending' — a member shown
+    // "licence pending" when they have in fact been suspended would be misled
+    // about whether they may practise.
+    const reason =
+      licences.some((l) => l.status === 'suspended') ? 'suspended'
+        : licences.some((l) => l.status === 'revoked') ? 'revoked'
+          : licences.some((l) => l.expiresAt && l.expiresAt <= today) ? 'expired'
+            : 'pending';
+    return { requiresLicence: true, entitled: false, reason, licences };
+  }
+
+  /**
+   * Does this member hold a live role that means practising law?
+   *
+   * Reads the role's own declaration rather than a hardcoded list of role codes,
+   * so a tenant that defines a "Legal Consultant" role can say that it practises
+   * without a code change — and a new role is inert until someone decides, rather
+   * than silently demanding or silently exempting a licence.
+   *
+   * `revoked_at is null` is load-bearing: a revoked role confers nothing, so it
+   * must impose nothing either.
+   */
+  async memberRequiresLicence(tenantId: string, membershipId: string): Promise<boolean> {
+    const r = await this.q().get<Row>(
+      `select count(*) as n
+         from membership_roles mr
+         join roles rl on rl.id = mr.role_id
+        where mr.membership_id = ?
+          and mr.revoked_at is null
+          and rl.requires_practising_licence = true
+          and (rl.tenant_id = ? or rl.tenant_id is null)`,
+      [membershipId, tenantId],
+    );
+    return Number(r?.n ?? 0) > 0;
+  }
+
+  /**
+   * Prior judicial or government service, with the restriction window derived.
+   *
+   * `barred` is returned EXPLICITLY rather than inferred from a date, because the
+   * two NULL cases mean opposite things and conflating them would either bar an
+   * innocent lawyer or clear a sitting judge:
+   *
+   *   · no row, or the window has elapsed  →  barred = false
+   *   · ended_on IS NULL (still in post)   →  barred = TRUE, with no end date
+   */
+  async priorOfficeBar(
+    tenantId: string,
+    membershipId: string,
+  ): Promise<{ barred: boolean; restrictionEndsOn: string | null; institution: string | null; stillInPost: boolean }> {
+    const membership = await this.getMembershipById(membershipId);
+    if (!membership || membership.tenantId !== tenantId) {
+      // An unknown membership is NOT reported as barred: this answers a question
+      // about a person, and inventing a bar for a subject that does not exist
+      // would make a caller treat a 404 as a compliance event.
+      return { barred: false, restrictionEndsOn: null, institution: null, stillInPost: false };
+    }
+
+    const rows = await this.q().all<Row>(
+      `select office_kind, institution, ended_on
+         from prior_office
+        where tenant_id = ? and staff_id = ?
+        order by ended_on desc nulls first`,
+      [tenantId, membership.staffId],
+    );
+
+    const today = new Date().toISOString().slice(0, 10);
+    let worst: { barred: boolean; restrictionEndsOn: string | null; institution: string | null; stillInPost: boolean } =
+      { barred: false, restrictionEndsOn: null, institution: null, stillInPost: false };
+
+    for (const row of rows) {
+      const endedOn = toStr(row.ended_on);
+      if (!endedOn) {
+        // Still in post: no window has begun and none will end on a date. The
+        // strictest case, so it wins over any dated window.
+        if (!worst.stillInPost) {
+          worst = {
+            barred: true,
+            restrictionEndsOn: null,
+            institution: toStr(row.institution),
+            stillInPost: true,
+          };
+        }
+        continue;
+      }
+      const ends = addYears(endedOn, PRIOR_OFFICE_RESTRICTION_YEARS);
+      if (ends > today && !worst.barred) {
+        worst = {
+          barred: true,
+          restrictionEndsOn: ends,
+          institution: toStr(row.institution),
+          stillInPost: false,
+        };
+      }
+    }
+    return worst;
+  }
+
+  /**
+   * Records or updates a licence.
+   *
+   * An upsert rather than an insert, because the two real workflows are both
+   * upserts: a renewal changes the expiry on a licence the firm already holds,
+   * and a restoration flips a status back to 'valid' and clears the suspension
+   * reference. Refusing the second would force the caller to delete and re-add,
+   * which loses `verified_at` and turns a documented history into an edit.
+   *
+   * The update is deliberately narrow: the licence NUMBER and the staff member
+   * are never rewritten. A different number is a different licence, and moving a
+   * licence between people is not an operation that should be expressible.
+   */
+  async upsertLicence(opts: {
+    tenantId: string;
+    staffId: string;
+    licenceNumber: string;
+    issuedAt: string | null;
+    expiresAt: string | null;
+    status: 'valid' | 'suspended' | 'expired' | 'revoked' | 'pending';
+    statusReference: string | null;
+    verifiedByMembershipId: string;
+  }): Promise<void> {
+    const now = new Date().toISOString();
+    const today = now.slice(0, 10);
+
+    /*
+      The consistency rule from migration 0027, enforced here as well as in the
+      CHECK, because a caller that reaches this method with a stale suspension
+      reference would otherwise get an opaque constraint violation from one driver
+      and a silent success from the other. SQLite's CHECK is on the row; this makes
+      the same decision in a place that can explain it.
+    */
+    const statusReference = opts.status === 'valid' ? null : opts.statusReference;
+
+    const existing = await this.q().get<Row>(
+      `select id from professional_licences where staff_id = ? and licence_number = ?`,
+      [opts.staffId, opts.licenceNumber],
+    );
+
+    if (existing) {
+      await this.q().run(
+        `update professional_licences
+            set issued_at = coalesce(?, issued_at),
+                expires_at = ?,
+                status = ?,
+                status_effective_from = ?,
+                status_reference = ?,
+                verified_by_membership_id = ?,
+                verified_at = ?,
+                updated_at = ?
+          where id = ? and tenant_id = ?`,
+        [
+          opts.issuedAt, opts.expiresAt, opts.status,
+          // The date the status took effect — not the row's updated_at. A
+          // suspension order is dated, and that date is the legal fact.
+          opts.status === 'valid' ? null : today,
+          statusReference, opts.verifiedByMembershipId, now, now,
+          String(existing.id), opts.tenantId,
+        ],
+      );
+      return;
+    }
+
+    await this.q().run(
+      `insert into professional_licences
+         (id, tenant_id, staff_id, licence_number, issued_at, expires_at, status,
+          status_effective_from, status_reference, verified_by_membership_id,
+          verified_at, created_at, updated_at)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        newId(), opts.tenantId, opts.staffId, opts.licenceNumber,
+        opts.issuedAt, opts.expiresAt, opts.status,
+        opts.status === 'valid' ? (opts.issuedAt ?? today) : today,
+        statusReference, opts.verifiedByMembershipId, now, now, now,
+      ],
+    );
+  }
+
+  /** Records a prior judicial or government appointment. Append-only. */
+  async recordPriorOffice(opts: {
+    id: string;
+    tenantId: string;
+    staffId: string;
+    officeKind: string;
+    institution: string;
+    institutionAr: string | null;
+    roleTitle: string | null;
+    roleTitleAr: string | null;
+    startedOn: string;
+    endedOn: string | null;
+  }): Promise<void> {
+    const now = new Date().toISOString();
+    await this.q().run(
+      `insert into prior_office
+         (id, tenant_id, staff_id, office_kind, institution, institution_ar,
+          role_title, role_title_ar, started_on, ended_on, created_at, updated_at)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        opts.id, opts.tenantId, opts.staffId, opts.officeKind, opts.institution,
+        opts.institutionAr, opts.roleTitle, opts.roleTitleAr,
+        opts.startedOn, opts.endedOn, now, now,
+      ],
+    );
+  }
+
+  /** Records a compliance check. Append-only at the database level. */
+  async recordEligibilityCheck(opts: {
+    tenantId: string;
+    subjectKind: 'membership' | 'staff' | 'matter' | 'client' | 'invoice' | 'document' | 'matter_assignment';
+    subjectId: string;
+    precondition: string;
+    outcome: 'pass' | 'fail' | 'waived' | 'not_applicable';
+    evidence?: Record<string, unknown>;
+    ruleCited?: string | null;
+    evaluatedByMembershipId: string;
+  }): Promise<void> {
+    await this.q().run(
+      `insert into eligibility_checks
+         (tenant_id, subject_kind, subject_id, precondition, outcome, evidence,
+          rule_cited, evaluated_by_membership_id, evaluated_at)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        opts.tenantId, opts.subjectKind, opts.subjectId, opts.precondition, opts.outcome,
+        JSON.stringify(opts.evidence ?? {}), opts.ruleCited ?? null,
+        opts.evaluatedByMembershipId, new Date().toISOString(),
+      ],
+    );
+  }
+
   async getTenant(tenantId: string) {
     return this.q().get<Row>(
       `select id, slug, name, name_ar, country, default_language, default_calendar, status
@@ -1181,4 +1485,52 @@ function parseJsonArray(v: unknown, fallback: string[]): string[] {
   } catch {
     return fallback;
   }
+}
+
+/**
+ * The restriction window after judicial or government service.
+ *
+ * Article 14 of نظام المحاماة — «لا يجوز للمحامي بنفسه أو بوساطة محامٍ آخر أن يقبل
+ * أي دعوى أو يعطي أي استشارة ضد جهة يعمل لديها، أو ضد جهة انتهت علاقته بها، إلا
+ * بعد مضي مدة لا تقل عن خمس سنوات من تاريخ انتهاء علاقته بها» — five years from
+ * the end of the relationship. Rule 8/3 of قواعد السلوك المهني sets the same
+ * period for a former employer.
+ *
+ * Rule 8/4 sets THREE years for a former CLIENT. That is a different rule against
+ * a different relationship and is deliberately NOT applied here; conflating the
+ * two would under-restrict the judicial case, which is the serious one.
+ *
+ * Named rather than inlined: a bare `5` in a date calculation is exactly the kind
+ * of value a reader assumes means years, or days, or rows.
+ */
+const PRIOR_OFFICE_RESTRICTION_YEARS = 5;
+
+/**
+ * Adds whole years to an ISO date without `Date`'s month rollover.
+ *
+ * `new Date('2020-02-29')` stepped forward five years lands on 1 March, because
+ * 2025 has no 29 February — so the restriction window would shorten by a day, in
+ * favour of the person restricted, on leap years only. Clamping to the last valid
+ * day of the target month is what a statutory period means when its end date does
+ * not exist, and it is also the rule courts apply to a period expiring on a
+ * non-existent day.
+ */
+export function addYears(isoDate: string, years: number): string {
+  const [y, m, d] = isoDate.slice(0, 10).split('-').map(Number);
+  if (!y || !m || !d) return isoDate;
+  const targetYear = y + years;
+  const lastDay = new Date(Date.UTC(targetYear, m, 0)).getUTCDate();
+  const day = Math.min(d, lastDay);
+  return `${targetYear}-${String(m).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+export interface LicenceRow {
+  id: string;
+  licenceNumber: string;
+  issuedAt: string | null;
+  expiresAt: string | null;
+  status: string;
+  statusEffectiveFrom: string | null;
+  statusReference: string | null;
+  verifiedAt: string | null;
 }

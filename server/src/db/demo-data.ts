@@ -709,19 +709,40 @@ export function buildDemoSeed(): SeedRow[] {
 
   // ------------------------------------------------------- firm identities
   const firmPw = hashPassword(DEMO_FIRM_PASSWORD);
+  /*
+    Which role templates practise law, and therefore require a valid licence.
+
+    Declared here as data that the seed WRITES rather than as a rule the seed
+    ASSUMES, so that a fresh database has the same answer as migration 0027's
+    `update roles set requires_practising_licence = true where code in (...)`.
+    Two lists that must agree is a risk; it is taken deliberately, because the
+    alternative — computing it in one place — would mean either the SQL migration
+    reading from application code, or the application hardcoding a list the
+    database does not share.
+  */
+  const PRACTISING_ROLE_CODES = new Set(['MANAGING_PARTNER', 'PARTNER', 'ASSOCIATE', 'LAWYER']);
+
   const firmPeople = [
     { userId: IDS.userNoura,  staffId: staff[0].id, email: 'noura@kgm.example.test',
       template: 'MANAGING_PARTNER', department: 'LEGAL', isDeptLead: 1,
       title: 'Managing Partner', titleAr: 'الشريكة الإدارية',
       practiceAreas: ['*'],
+      // A practising role carries a licence. See the seeding loop below: a member
+      // whose role practises and who has NO licence row is refused assignment,
+      // so this is not decoration.
+      licence: { number: 'SA-BAR-11482', issued: '2011-04-12', expires: '2027-04-11' },
       financial: 500000, writeoff: 100000, discount: 25, language: 'ar' },
     { userId: IDS.userFaisal, staffId: staff[1].id, email: 'faisal@kgm.example.test',
       template: 'LAWYER', department: 'LEGAL', isDeptLead: 0,
       title: 'Senior Associate', titleAr: 'محامٍ أول',
       practiceAreas: ['Commercial Litigation', 'Real Estate'],
+      licence: { number: 'SA-BAR-20917', issued: '2019-09-01', expires: '2026-11-30' },
       // NULL, not 0: a lawyer holds no financial authority at all, and the
       // resolver must read that as "refuse", never as "unlimited" (§10).
       financial: null, writeoff: null, discount: null, language: 'ar' },
+    // NO `licence` KEY — deliberate. A paralegal does not hold a licence to
+    // practise, so requiring one would block a legitimate hire; `memberRequires-
+    // Licence()` reads that from the role catalogue and gating never applies.
     { userId: IDS.userMariam, staffId: staff[2].id, email: 'mariam@kgm.example.test',
       template: 'PARALEGAL', department: 'LEGAL', isDeptLead: 0,
       title: 'Paralegal', titleAr: 'مساعدة قانونية',
@@ -740,6 +761,32 @@ export function buildDemoSeed(): SeedRow[] {
       practiceAreas: [],
       financial: 25000, writeoff: 5000, discount: 10, language: 'ar' },
   ];
+
+  /*
+    The eligibility layer (migration 0027).
+
+    Two lawyers hold a valid licence; the paralegal, the compliance officer and
+    the finance manager hold none, and the ABSENCE of a row is the intended state
+    for them rather than a gap in the seed — their roles do not practise, so the
+    gate does not apply.
+
+    The expiry dates are real dates rather than nulls so the demo exercises the
+    expiry branch of `eligibilityFor()`: Faisal's licence expires 30 November
+    2026, which is in the future today and becomes a refusal on its own with no
+    code change, which is what a licence register is for.
+  */
+  for (const f of firmPeople) {
+    if (!('licence' in f) || !f.licence) continue;
+    add('professional_licences', {
+      id: detId(`licence:${f.staffId}:${f.licence.number}`),
+      tenant_id: IDS.tenantKgm, staff_id: f.staffId,
+      licence_number: f.licence.number,
+      issued_at: f.licence.issued, expires_at: f.licence.expires, status: 'valid',
+      status_effective_from: f.licence.issued, status_reference: null,
+      verified_by_membership_id: null, verified_at: iso(-30, 6),
+      created_at: now, updated_at: now,
+    });
+  }
 
   for (const f of firmPeople) {
     add('users', {
@@ -775,7 +822,14 @@ export function buildDemoSeed(): SeedRow[] {
       add('roles', {
         id: tenantRoleId(tenantId, t.code), tenant_id: tenantId, code: t.code,
         name: t.name, name_ar: t.nameAr, description: t.description, description_ar: null,
-        is_system: 1, is_active: 1, created_at: now, updated_at: now,
+        is_system: 1, is_active: 1,
+        // 0027. Declared per role, not hardcoded in a function, so a tenant that
+        // invents a "Legal Consultant" role can say it practises — and a new role
+        // is inert until someone decides. PARALEGAL is deliberately FALSE: legal
+        // work under supervision is not practice, and requiring a licence would
+        // block a legitimate hire.
+        requires_practising_licence: PRACTISING_ROLE_CODES.has(t.code) ? 1 : 0,
+        created_at: now, updated_at: now,
       });
       for (const code of TEMPLATE_GRANTS[t.code] ?? []) {
         add('role_permissions', {
