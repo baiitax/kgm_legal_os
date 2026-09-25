@@ -146,13 +146,29 @@ export default function Login() {
    *
    * Deliberately NOT a general retry: an invalid password, a locked account and a refusal
    * are final, and retrying them would turn a clear answer into a slower one. The retry is
-   * also bounded — once — because a server that is genuinely down must fail visibly rather
-   * than leave the reader watching a spinner.
+   * bounded — three attempts in all, and the wait is what the server asked for — because a
+   * server that is genuinely down must fail visibly rather than leave the reader watching
+   * a spinner.
    */
   const isWorthRetrying = (err: unknown): boolean => {
     const api = err instanceof ApiError ? err : null;
     if (!api) return false;
     return api.code === 'service_unavailable' || api.code === 'network_error';
+  };
+
+  /**
+   * How long to wait before trying again: what the response asked for, when it asked.
+   *
+   * `retryAfterSeconds` arrives from the 503 envelope; the fallback is a beat, so the
+   * second attempt is not the first one repeated in the same millisecond against the same
+   * congested connection. Capped at five seconds — beyond that the reader is better served
+   * by an answer they can act on.
+   */
+  const retryDelayFor = (err: unknown): number => {
+    const api = err instanceof ApiError ? err : null;
+    const asked = (api?.details as { retryAfterSeconds?: number } | undefined)?.retryAfterSeconds;
+    const seconds = typeof asked === 'number' && asked > 0 ? Math.min(asked, 5) : 0.8;
+    return seconds * 1_000;
   };
 
   const onCredentials = async (event: FormEvent) => {
@@ -161,7 +177,17 @@ export default function Login() {
     resetFeedback();
     let lastError: unknown = null;
     try {
-      for (let attempt = 1; attempt <= 2; attempt++) {
+      /*
+        THREE ATTEMPTS, AND THE SERVER SETS THE PACE.
+
+        Measured against the deployed API at thirty simultaneous sign-ins: most are served
+        at once, and a few wait behind the session pooler's fifteen-slot budget and are
+        refused with `retry-after: 2`. That is a request to come back in two seconds, not a
+        failure, and it should not reach the person signing in as an error. So the wait is
+        read from the response rather than guessed, and there is time for a second and
+        third try.
+      */
+      for (let attempt = 1; attempt <= 3; attempt++) {
         try {
           if (isFirm) {
             const res = await firmSignIn(email.trim(), password, remember);
@@ -178,10 +204,8 @@ export default function Login() {
           break;
         } catch (err) {
           lastError = err;
-          if (attempt === 2 || !isWorthRetrying(err)) break;
-          /* A beat, so the second attempt is not the first one repeated in the same
-             millisecond against the same congested connection. */
-          await new Promise((r) => setTimeout(r, 400));
+          if (attempt === 3 || !isWorthRetrying(err)) break;
+          await new Promise((r) => setTimeout(r, retryDelayFor(err)));
         }
       }
       if (lastError) throw lastError;
