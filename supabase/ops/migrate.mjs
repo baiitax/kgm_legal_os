@@ -53,6 +53,7 @@ function parseArgs(argv) {
     if (a === '--url') out.url = argv[++i];
     else if (a === '--dry-run') out.dryRun = true;
     else if (a === '--up-to') out.upTo = argv[++i];
+    else if (a === '--reconcile') (out.reconcile ??= []).push(argv[++i]);
     else if (a === '--help' || a === '-h') out.help = true;
   }
   return out;
@@ -70,6 +71,14 @@ if (args.help || !args.url) {
     --url <conn>    Admin connection string. Or set $KGM_ADMIN_URL.
     --dry-run       List what would be applied; change nothing.
     --up-to <file>  Stop after the named file, e.g. --up-to 0004_rls_and_grants.sql
+    --reconcile <file>
+                    Re-record the checksum of an already-applied file whose SQL was
+                    edited AFTER it was applied, once a human has confirmed the live
+                    schema already matches the edited file. Named, one file at a
+                    time, and printed — never a wildcard. The warning this clears
+                    exists to catch a divergence; a warning that is permanently on
+                    for a known-good file trains people to ignore it, which costs
+                    more than the warning is worth.
 
   Notes
     Use the SESSION pooler on port 5432 (or the direct host). Port 6543 is the
@@ -136,6 +145,42 @@ async function main() {
   const applied = new Set(
     (await q('select filename from public.kgm_migrations')).rows.map((r) => r.filename),
   );
+
+  /*
+    Reconciliation runs BEFORE the loop, on purpose. Re-recording a checksum and
+    then reporting the file as changed in the same breath would be theatre.
+  */
+  if (args.reconcile?.length) {
+    for (const name of args.reconcile) {
+      if (!files.includes(name)) {
+        console.log(`  refuse  --reconcile ${name}  (no such migration file)`);
+        process.exitCode = 1;
+        continue;
+      }
+      if (!applied.has(name)) {
+        console.log(`  refuse  --reconcile ${name}  (not applied yet — nothing to reconcile)`);
+        process.exitCode = 1;
+        continue;
+      }
+      const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, name), 'utf8');
+      const now = String(
+        (await import('node:crypto')).createHash('sha256').update(sql).digest('hex'),
+      ).slice(0, 16);
+      const before = (
+        await q('select checksum from public.kgm_migrations where filename = $1', [name])
+      ).rows[0]?.checksum;
+      if (before === now) {
+        console.log(`  same    ${name}  (checksum already current)`);
+        continue;
+      }
+      await q('update public.kgm_migrations set checksum = $2 where filename = $1', [name, now]);
+      console.log(
+        `  RECON  ${name}  ${before ?? '—'} → ${now}  ` +
+        '(checksum re-recorded; the live schema was verified against this file by hand)',
+      );
+    }
+    console.log('');
+  }
 
   let ran = 0;
   for (const file of files) {
