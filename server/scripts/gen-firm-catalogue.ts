@@ -10,12 +10,21 @@
  */
 import { writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { parseFirmCatalogueFile } from '../src/domain/parse-firm-catalogue.js';
+import { CATALOGUE_MIGRATIONS, parseFirmCatalogueFiles } from '../src/domain/parse-firm-catalogue.js';
 
-const MIGRATION = resolve('supabase/migrations/0006_firm_rbac.sql');
+/*
+  EVERY catalogue-bearing migration, in order — not just 0006.
+
+  A migration that adds permissions declares them in the same three shapes this parser
+  understands, and an APPLIED migration is never edited: 0006 records what the database was
+  told in the RBAC phase, and 0046 records what it was told in the judgments phase. The
+  catalogue is the union, and the demo seed, the resolver and both engines are all built
+  from that one union.
+*/
+const SOURCES = CATALOGUE_MIGRATIONS.map((m) => resolve(m));
 const OUT = resolve('server/src/domain/firm-catalogue.ts');
 
-const c = parseFirmCatalogueFile(MIGRATION);
+const c = parseFirmCatalogueFiles(SOURCES);
 
 const q = (s: string) => JSON.stringify(s);
 
@@ -23,7 +32,7 @@ const lines: string[] = [];
 lines.push('/**');
 lines.push(' * GENERATED FILE — DO NOT EDIT BY HAND.');
 lines.push(' *');
-lines.push(' * Source of truth: supabase/migrations/0006_firm_rbac.sql');
+lines.push(' * Source of truth: supabase/migrations/0006_firm_rbac.sql (+ 0046_judgment_permissions.sql)');
 lines.push(' * Regenerate:      npx tsx server/scripts/gen-firm-catalogue.ts');
 lines.push(' *');
 lines.push(' * The permission catalogue and the nine system role templates are defined once,');
