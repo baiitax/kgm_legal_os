@@ -23,7 +23,10 @@
     "test:server": "vitest run",
     "test:firm": "npm run test --workspace firm",
     "build:vercel": "node scripts/build-vercel.mjs",
-    "test:web": "npm run test --workspace web"
+    "test:web": "npm run test --workspace web",
+    "verify:parity": "tsx scripts/verify/schema-parity.ts",
+    "verify:live": "node scripts/verify/eligibility-live.mjs",
+    "verify:sqlite": "tsx scripts/verify/sqlite-mirror.ts server/data/kgm-portal.sqlite"
   },
   "engines": {
     "node": ">=20.11"
