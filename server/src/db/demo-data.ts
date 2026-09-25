@@ -101,6 +101,9 @@ export const IDS = {
   userMariam: 'dddddddd-0000-4000-8000-000000000013',
   userOmar: 'dddddddd-0000-4000-8000-000000000014',
   userSara: 'dddddddd-0000-4000-8000-000000000015',
+  // P0.3 · a client the firm was asked to act for and could not identify. It has a
+  // record and no matter, because the matter is exactly what the obligation forbids.
+  clientFajr: 'cccccccc-0000-4000-8000-000000000006',
 } as const;
 
 export const DEMO_PASSWORD = 'Demo!Portal2026';
@@ -236,13 +239,26 @@ export function buildDemoSeed(): SeedRow[] {
     });
   }
 
+  /*
+    ── `identity_verified` IS NOT ASSERTED HERE ────────────────────────────────
+
+    Every client row in this file states ZERO, including the two whose identity has
+    genuinely been verified. The flag is derived — from whether a current
+    due-diligence record exists and is complete — and the derivation runs as a
+    deferred pass at the end of the seed, the same way invoice issuance does, for
+    the same reason: the records it reads do not exist yet when these rows are
+    written.
+
+    A fixture that typed `1` here would be the defect this phase exists to remove,
+    one layer up.
+  */
   add('clients', {
     id: IDS.clientAhmed, tenant_id: IDS.tenantKgm, client_type: 'individual',
     name: 'Ahmed Al-Saud', name_ar: 'أحمد السعود',
     national_id_masked: '********1234', national_id_hash: keyedHash('demo-nid-1234'),
     email: 'ahmed.alsaud@example.test', phone: '+966 5X XXX 1234',
     address_line: 'King Fahd Road, Al Olaya', city: 'Riyadh', country: 'SA',
-    identity_verified: 1, verification_note: 'Verified via Absher integration (demo)',
+    identity_verified: 0, verification_note: 'Verified via Absher integration (demo)',
     status: 'active', created_at: now, updated_at: now,
       party_id: IDS.partyAhmed,
     relationship_ended_on: null,
@@ -253,7 +269,7 @@ export function buildDemoSeed(): SeedRow[] {
     commercial_reg_masked: '******789', national_id_masked: null, national_id_hash: null,
     email: 'finance@gulfhorizon.example.test', phone: '+966 1X XXX 5678',
     address_line: 'Corniche Road, Al Shatea', city: 'Jeddah', country: 'SA',
-    identity_verified: 1, verification_note: 'CR verified (demo)',
+    identity_verified: 0, verification_note: 'CR verified (demo)',
     status: 'active', created_at: now, updated_at: now,
       party_id: IDS.partyGulf,
     relationship_ended_on: null,
@@ -363,7 +379,7 @@ export function buildDemoSeed(): SeedRow[] {
     name: 'Al-Nukhba Trading Est.', name_ar: 'مؤسسة النخبة التجارية',
     national_id_masked: null, national_id_hash: null, commercial_reg_masked: '******441',
     email: null, phone: null, address_line: null, city: 'Riyadh', country: 'SA',
-    identity_verified: 1, verification_note: 'CR sighted at engagement (synthetic)',
+    identity_verified: 0, verification_note: 'CR sighted at engagement (synthetic)',
     status: 'inactive', created_at: now, updated_at: now,
     party_id: IDS.partyNukhba, relationship_ended_on: '2024-08-15',
   });
@@ -372,7 +388,7 @@ export function buildDemoSeed(): SeedRow[] {
     name: 'Qadim Logistics Co.', name_ar: 'شركة قديم للخدمات اللوجستية',
     national_id_masked: null, national_id_hash: null, commercial_reg_masked: '******902',
     email: null, phone: null, address_line: null, city: 'Jeddah', country: 'SA',
-    identity_verified: 1, verification_note: 'Archived engagement (synthetic)',
+    identity_verified: 0, verification_note: 'Archived engagement (synthetic)',
     status: 'inactive', created_at: now, updated_at: now,
     party_id: IDS.partyQadim, relationship_ended_on: '2019-06-30',
   });
@@ -1842,6 +1858,659 @@ export function buildDemoSeed(): SeedRow[] {
     bank_statement_document_id: null, clients_with_balance: 2, status: 'investigated',
     notes: 'SAR 1,250 bank charge posted by the bank on 30 July that has not yet been recorded against a client ledger. Charged to the firm, not to either client; to be posted as an operating expense.',
     performed_by_user_id: IDS.userSara, performed_at: iso(-1), created_at: iso(-1),
+  });
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+     P0.3 · CLIENT DUE DILIGENCE, THE OWNERS, THE SCREENING AND ONE REPORT
+
+     WHAT THIS DATASET HAS TO BE ABLE TO SHOW, in the order the obligation runs:
+
+       · a client whose due diligence is COMPLETE, whose owners are accounted for
+         and whose screening is resolved — the matter gate admits them, and the
+         only way to prove a gate admits anybody is to have somebody it admits;
+       · a client whose due diligence is COMPLETE but whose screening has an OPEN
+         HIT — the case an inspector looks for, because the file looks finished;
+       · a client whose screening RUN FAILED — which is not a clearance, and reads
+         as one in any schema that has no status for it;
+       · a legal person whose owners are genuinely opaque — a chain that ends in a
+         nominee nobody will name;
+       · a company that owns 100% of itself, recorded as a legal person, because the
+         obvious implementation of "add up the percentages" accepts that chain and
+         a clean one refuses it;
+       · one client the firm was asked to act for and COULD NOT IDENTIFY — the case
+         the manual is clearest about, where the answer is a prohibition;
+       · one report, filed, against a client whose screening went wrong.
+
+     AND ONE THING THIS DATASET DELIBERATELY DOES NOT DO. It never opens a matter
+     for a client whose record is incomplete. `matter_cdd_gate` would refuse the
+     seed on a fresh database, which is the gate working — but a fixture that
+     cannot load is not a fixture. The incomplete clients are clients, not matters.
+  */
+
+  /*
+    ── THE REGISTER OF HIGH-RISK JURISDICTIONS ─────────────────────────────────
+
+    A SHORT, REAL LIST, DATED. The Kingdom's own designations come by circular and
+    the FATF lists move; what this records is which list was in force and when, so
+    that "why was this client rated high in March" has an answer that is not the
+    opinion of whoever is being asked.
+  */
+  const riskCountries: Array<[string, string, string, string, string, string]> = [
+    ['IR', 'Iran', 'إيران', 'fatf_call_for_action', 'prohibited', '2020-02-21'],
+    ['KP', 'Korea, Democratic People\'s Republic of', 'كوريا الشمالية', 'fatf_call_for_action', 'prohibited', '2020-02-21'],
+    ['MM', 'Myanmar', 'ميانمار', 'fatf_call_for_action', 'prohibited', '2023-10-01'],
+    ['SY', 'Syrian Arab Republic', 'الجمهورية العربية السورية', 'sama_circular', 'high', '2011-05-01'],
+    ['YE', 'Yemen', 'اليمن', 'fatf_grey', 'high', '2024-06-28'],
+    ['NG', 'Nigeria', 'نيجيريا', 'fatf_grey', 'high', '2023-02-24'],
+    ['LB', 'Lebanon', 'لبنان', 'internal', 'high', '2024-11-01'],
+  ];
+  for (const [code, name, nameAr, source, level, from] of riskCountries) {
+    add('aml_risk_countries', {
+      id: detId(`risk_country:${code}:${source}`), tenant_id: IDS.tenantKgm,
+      country_code: code, country_name: name, country_name_ar: nameAr,
+      list_source: source, risk_level: level, effective_from: from, effective_to: null,
+      note: null, created_by_membership_id: detId(`firm_membership:${IDS.tenantKgm}:${IDS.userOmar}`),
+      created_at: now, updated_at: now,
+    });
+  }
+
+  const ddNoura = detId(`firm_membership:${IDS.tenantKgm}:${IDS.userNoura}`);
+  const ddOmar = detId(`firm_membership:${IDS.tenantKgm}:${IDS.userOmar}`);
+  const ddGulf = detId(`due_diligence:${IDS.clientGulf}`);
+  const ddNukhba = detId(`due_diligence:${IDS.clientNukhba}`);
+  const ddQadim = detId(`due_diligence:${IDS.clientQadim}`);
+
+  /*
+    ── AHMED: AN INDIVIDUAL, COMPLETE, AND ADMITTED ────────────────────────────
+
+    Every field a natural person is identified by, plus the two that exist because
+    the risk assessment needs them rather than because a form asked: where the
+    funds come from, and why he is here at all.
+
+    `risk_rating` is 'low' and the reasons are EMPTY, which is a statement rather
+    than an omission: nothing in the record elevated it. The pair travels together
+    in the schema, so a rating without reasons cannot be written by accident.
+  */
+  add('client_due_diligence', {
+    id: detId(`due_diligence:${IDS.clientAhmed}`), tenant_id: IDS.tenantKgm,
+    client_id: IDS.clientAhmed, party_id: IDS.partyAhmed, version: 1,
+    cdd_level: 'standard', status: 'complete',
+    legal_name: 'Ahmed bin Saud Al-Saud', legal_name_ar: 'أحمد بن سعود السعود',
+    date_of_birth: '1981-06-14', nationality: 'SA', residence_country: 'SA',
+    address: 'King Fahd Road, Al Olaya, Riyadh 12212',
+    id_type: 'national_id', id_number_hash: keyedHash('demo-nid-1234'),
+    id_number_masked: '********1234', id_issued_at: '2019-03-02', id_expires_at: '2029-03-01',
+    cr_number: null, cr_issued_at: null, incorporation_country: null, business_activity: null,
+    ownership_structure: null,
+    source_of_funds: 'Salary and accumulated savings from his employment in the Kingdom.',
+    source_of_wealth: null,
+    purpose: 'A commercial dispute with a former supplier, and a review of an existing lease.',
+    expected_annual_volume_sar: 120_000,
+    verification_method: 'electronic', verification_source: 'National single sign-on (demo)',
+    verified_by_membership_id: ddOmar, verified_at: iso(-88, 10),
+    /*
+      NULL IS NOT 'not_pep'. It means NOBODY HAS MADE THE DETERMINATION, and it is
+      the state that keeps the record incomplete. This one is determined because a
+      determination was actually made — on the date recorded beside it.
+    */
+    pep_status: 'not_pep', pep_details: null,
+    risk_rating: 'low', risk_reasons: '[]', risk_assessed_at: iso(-88, 10),
+    senior_approved_by_membership_id: null, senior_approved_at: null, senior_approval_note: null,
+    review_due_at: '2028-06-01', last_reviewed_at: iso(-88, 10),
+    completed_at: iso(-88, 11), completed_by_membership_id: ddOmar,
+    unable_reason: null, notes: null,
+    superseded_by: null, superseded_at: null,
+    created_by_membership_id: ddOmar, created_at: iso(-88, 9), updated_at: iso(-88, 11),
+  });
+
+  /*
+    ── GULF HORIZON: A COMPANY, COMPLETE, TWO OWNERS AND A SCREENING THAT WENT WRONG
+
+    Four things are happening in this client's file, and all four are the point.
+
+    1. THE OWNERS. One natural person at 60% and one at 25% — the second is there so
+       that the 25% threshold is TESTED rather than described. The third row owns 15%
+       and is BELOW the threshold; it is recorded anyway, because the firm knows about
+       it, and the gate must count it neither towards the threshold nor as a subject to
+       screen. An implementation that screens every row passes this fixture; one that
+       screens only the ones that count also passes. The one that fails is the one that
+       sums unverified rows, which is why two of the three are verified and the
+       interest of the third is recorded without verification.
+
+    2. THE SCREENING. The company cleared; the 60% owner cleared; the 25% owner's run
+       FAILED — the provider timed out. Nothing about that file looks unfinished, and
+       in any schema without a `failed` status it reads as "no matches found". It is
+       the most expensive false negative this obligation has, so the fixture contains
+       it and the gate refuses on it.
+
+    3. THE PEP. The 25% owner is a `pep_family` — a close relative of a serving
+       official — which is a recorded determination, not an opinion, and it is the
+       reason the assessment is high risk rather than medium.
+
+    4. AND IT IS STILL `complete` WITH THE RIGHT LEVEL. The level is `standard`,
+       deliberately. This client is NOT eligible for a matter to be opened, and the
+       fixture says why in the record rather than in a comment: the determination was
+       made, the level was not raised to meet it, and the firm's own record shows the
+       gap. A fixture where every complete record is also admissible could not tell
+       the two rules apart.
+
+    `identity_verified` on the client row follows from this record — the trigger
+    derives it, and the seed asserts nothing.
+  */
+  add('client_due_diligence', {
+    id: ddGulf, tenant_id: IDS.tenantKgm,
+    client_id: IDS.clientGulf, party_id: IDS.partyGulf, version: 1,
+    cdd_level: 'standard', status: 'complete',
+    legal_name: 'Gulf Horizon Trading Company (a Saudi closed joint stock company)',
+    legal_name_ar: 'شركة الأفق التجاري (شركة مساهمة مقفلة سعودية)',
+    date_of_birth: null, nationality: null, residence_country: 'SA',
+    address: 'Corniche Road, Al Shatea, Jeddah 23613',
+    id_type: 'commercial_registration', id_number_hash: keyedHash('demo-cr-1010556677'),
+    id_number_masked: '******789', id_issued_at: '2016-02-08', id_expires_at: null,
+    cr_number: '1010556677', cr_issued_at: '2016-02-08',
+    incorporation_country: 'SA',
+    business_activity: 'Wholesale of building materials and related trading activity.',
+    ownership_structure: 'Three shareholders; the majority holder is also the general manager.',
+    source_of_funds: 'Trading revenue and bank facilities with a licensed Saudi bank.',
+    purpose: 'The acquisition of a competitor, and the disputes arising from it.',
+    expected_annual_volume_sar: 480_000,
+    verification_method: 'certified_copy',
+    verification_source: 'CR extract and articles of association, certified and sighted.',
+    verified_by_membership_id: ddOmar, verified_at: iso(-70, 10),
+    pep_status: 'pep_family',
+    pep_details: 'A majority shareholder is a close relative of a serving senior official.',
+    risk_rating: 'high',
+    risk_reasons: JSON.stringify([
+      { code: 'pep', weight: 'high',
+        label: 'a politically exposed person is connected to this relationship',
+        labelAr: 'يرتبط بالعلاقة شخص ذو نفوذ سياسي' },
+    ]),
+    risk_assessed_at: iso(-70, 10),
+    senior_approved_by_membership_id: null, senior_approved_at: null, senior_approval_note: null,
+    review_due_at: '2027-03-01', last_reviewed_at: iso(-70, 10),
+    completed_at: iso(-70, 11), completed_by_membership_id: ddOmar,
+    unable_reason: null,
+    notes: 'PEP determination recorded. Enhanced due diligence and senior approval have NOT yet been undertaken.',
+    superseded_by: null, superseded_at: null,
+    created_by_membership_id: ddOmar, created_at: iso(-72, 9), updated_at: iso(-70, 11),
+  });
+
+  /*
+    ── QADIM: COMPLETE, OWNED, SCREENED AND ADMISSIBLE ────────────────────────
+    The rule 8/4 exception client — the relationship that ended in 2019 — and the
+    one legal person in this dataset for which a matter may be opened. Without it,
+    every company in the demo would be a refusal and the gate would look like a
+    wall rather than a gate.
+  */
+  add('client_due_diligence', {
+    id: ddQadim, tenant_id: IDS.tenantKgm,
+    client_id: IDS.clientQadim, party_id: IDS.partyQadim, version: 1,
+    cdd_level: 'standard', status: 'complete',
+    legal_name: 'Qadim Logistics Company', legal_name_ar: 'شركة قديم للخدمات اللوجستية',
+    date_of_birth: null, nationality: null, residence_country: 'SA',
+    address: 'Industrial City, Phase 4, Riyadh 14331',
+    id_type: 'commercial_registration', id_number_hash: keyedHash('demo-cr-4030998877'),
+    id_number_masked: '******877', id_issued_at: '2014-05-19', id_expires_at: null,
+    cr_number: '4030998877', cr_issued_at: '2014-05-19', incorporation_country: 'SA',
+    business_activity: 'Freight forwarding and warehousing within the Kingdom.',
+    ownership_structure: 'Controlled by the founder through a voting right rather than a shareholding.',
+    source_of_funds: 'Operating revenue from freight contracts.',
+    purpose: 'Recovery of unpaid invoices, if the firm is instructed again.',
+    expected_annual_volume_sar: 80_000,
+    verification_method: 'original_seen',
+    verification_source: 'Originals sighted at the firm\'s offices.',
+    verified_by_membership_id: ddOmar, verified_at: iso(-40, 10),
+    pep_status: 'not_pep', pep_details: null,
+    risk_rating: 'medium',
+    risk_reasons: JSON.stringify([
+      { code: 'cash_intensive', weight: 'medium',
+        label: 'the business is cash-intensive by nature',
+        labelAr: 'النشاط كثيف النقد بطبيعته' },
+    ]),
+    risk_assessed_at: iso(-40, 10),
+    senior_approved_by_membership_id: null, senior_approved_at: null, senior_approval_note: null,
+    review_due_at: '2027-09-01', last_reviewed_at: iso(-40, 10),
+    completed_at: iso(-40, 11), completed_by_membership_id: ddOmar,
+    unable_reason: null, notes: null,
+    superseded_by: null, superseded_at: null,
+    created_by_membership_id: ddOmar, created_at: iso(-41, 9), updated_at: iso(-40, 11),
+  });
+
+  /*
+    ── AL-NUKHBA: A COMPANY WHOSE OWNER IS ANOTHER COMPANY ────────────────────
+
+    Complete on paper, and not identified in fact. The register holds one owner,
+    a legal person, at 100%, verified against a shareholders register — and that
+    chain ends in a holding company in Jersey, itself held through a trust whose
+    beneficiaries have never been provided.
+
+    WHY THIS CLIENT IS IN THE FIXTURE. The obvious implementation of a 25% rule
+    adds up `ownership_pct`, reaches 100, and concludes the client is identified —
+    and then tries to screen a company against a designation list, which finds
+    nothing, and the matter opens. That implementation is wrong in law (the
+    obligation is about the PERSONS behind the client) and this is the row that
+    catches it: the identified percentage counts verified natural persons only, so
+    it is zero here, and no control right has been recorded to take its place.
+
+    Its screening is deliberately absent. The gate's ownership check runs before
+    the screening check in both dialects, so the refusal this client produces is
+    `cdd_beneficial_owner_missing` — which is the honest answer about the file.
+  */
+  add('client_due_diligence', {
+    id: ddNukhba, tenant_id: IDS.tenantKgm,
+    client_id: IDS.clientNukhba, party_id: IDS.partyNukhba, version: 1,
+    cdd_level: 'standard', status: 'complete',
+    legal_name: 'Al-Nukhba Trading Establishment', legal_name_ar: 'مؤسسة النخبة التجارية',
+    date_of_birth: null, nationality: null, residence_country: 'SA',
+    address: 'King Abdulaziz Road, Al Malaz, Riyadh 12836',
+    id_type: 'commercial_registration', id_number_hash: keyedHash('demo-cr-1010334455'),
+    id_number_masked: '******455', id_issued_at: '2012-08-14', id_expires_at: null,
+    cr_number: '1010334455', cr_issued_at: '2012-08-14', incorporation_country: 'SA',
+    business_activity: 'General trading.',
+    ownership_structure: 'Held in full by a company registered outside the Kingdom.',
+    source_of_funds: 'Trading revenue.',
+    purpose: 'A supply dispute, concluded in 2024.',
+    expected_annual_volume_sar: 200_000,
+    verification_method: 'certified_copy',
+    verification_source: 'Shareholders register supplied by the client and certified.',
+    verified_by_membership_id: ddOmar, verified_at: iso(-45, 10),
+    pep_status: 'not_pep', pep_details: null,
+    risk_rating: 'high',
+    risk_reasons: JSON.stringify([
+      { code: 'opaque_ownership', weight: 'high',
+        label: 'the ownership is opaque — the identified owners hold 0.00% below the 25% threshold, and no control right is recorded',
+        labelAr: 'هيكل الملكية غير واضح' },
+    ]),
+    risk_assessed_at: iso(-45, 10),
+    senior_approved_by_membership_id: null, senior_approved_at: null, senior_approval_note: null,
+    review_due_at: '2027-04-01', last_reviewed_at: iso(-45, 10),
+    completed_at: iso(-45, 11), completed_by_membership_id: ddOmar,
+    unable_reason: null,
+    notes: 'The ultimate beneficial owners sit behind a trust and have not been provided.',
+    superseded_by: null, superseded_at: null,
+    created_by_membership_id: ddOmar, created_at: iso(-46, 9), updated_at: iso(-45, 11),
+  });
+
+  /*
+    ── AL-FAJR CONTRACTING: ASKED TO ACT, AND THE FIRM COULD NOT IDENTIFY IT ──
+
+    A client record exists — it is a counterparty on two of the firm's matters, and
+    a firm that refused to record a counterparty because it could not identify it
+    would have an evidence problem, not a compliance one. What does NOT exist is a
+    matter of its own, and what DOES exist is a due-diligence record marked
+    `unable_to_complete` with the ground written out.
+
+    THE GROUND IS THE POINT. "Unable to complete" with no reason is an unexplained
+    exit from an obligation, and the schema refuses it under ten characters. This
+    one is the case the manual describes: the persons behind the company would not
+    be named, so the lawyer may not act.
+  */
+  add('clients', {
+    id: IDS.clientFajr, tenant_id: IDS.tenantKgm, client_type: 'organization',
+    name: 'Al-Fajr Contracting Co.', name_ar: 'شركة الفجر للمقاولات',
+    commercial_reg_masked: '******766', national_id_masked: null, national_id_hash: null,
+    email: null, phone: null, address_line: null, city: 'Riyadh', country: 'SA',
+    /*
+      FALSE, AND A TRIGGER WOULD MAKE IT FALSE ANYWAY. `clients_identity_derived`
+      derives this column from whether a complete due-diligence record exists, and
+      for this client none does — so the row states the derived answer rather than
+      asserting one. That is the whole point of the phase.
+    */
+    identity_verified: 0,
+    verification_note: 'Instruction declined: customer due diligence could not be completed.',
+    status: 'active', created_at: iso(-20, 9), updated_at: iso(-19, 11),
+    party_id: IDS.partyFajr,
+    relationship_ended_on: null,
+  });
+  add('client_due_diligence', {
+    id: detId(`due_diligence:${IDS.clientFajr}`), tenant_id: IDS.tenantKgm,
+    client_id: IDS.clientFajr, party_id: IDS.partyFajr, version: 1,
+    cdd_level: 'standard', status: 'unable_to_complete',
+    legal_name: 'Al-Fajr Contracting Company', legal_name_ar: 'شركة الفجر للمقاولات',
+    date_of_birth: null, nationality: null, residence_country: 'SA',
+    address: 'As recorded on the commercial registration.',
+    id_type: 'commercial_registration', id_number_hash: keyedHash('demo-cr-1010887766'),
+    id_number_masked: '******766', id_issued_at: null, id_expires_at: null,
+    cr_number: '1010887766', cr_issued_at: null, incorporation_country: 'SA',
+    business_activity: null, ownership_structure: 'Not provided.',
+    source_of_funds: null, source_of_wealth: null, purpose: null,
+    expected_annual_volume_sar: null,
+    verification_method: null, verification_source: null,
+    verified_by_membership_id: null, verified_at: null,
+    pep_status: null, pep_details: null,
+    risk_rating: null, risk_reasons: '[]', risk_assessed_at: null,
+    senior_approved_by_membership_id: null, senior_approved_at: null, senior_approval_note: null,
+    review_due_at: null, last_reviewed_at: null,
+    completed_at: null, completed_by_membership_id: null,
+    unable_reason: 'The client would not identify the persons who control it, and no ownership document was provided. Customer due diligence cannot be completed on these facts.',
+    notes: 'Escalated to the compliance officer; the instruction was declined on that basis.',
+    superseded_by: null, superseded_at: null,
+    created_by_membership_id: ddOmar, created_at: iso(-20, 9), updated_at: iso(-19, 11),
+  });
+
+  const owners: Array<Record<string, unknown>> = [
+    {
+      id: detId('beneficial_owner:gulf:mohammed'),
+      dd_id: ddGulf, client_id: IDS.clientGulf, party_id: null,
+      owner_kind: 'natural_person', full_name: 'Mohammed Al-Harbi', full_name_ar: 'محمد الحربي',
+      date_of_birth: '1974-11-03', nationality: 'SA', residence_country: 'SA',
+      address: 'Al Rawdah District, Jeddah',
+      id_type: 'national_id', id_number_hash: keyedHash('demo-owner-nid-4471'),
+      id_number_masked: '********4471',
+      cr_number: null, ownership_pct: 60, control_basis: 'ownership', control_description: null,
+      pep_status: 'not_pep', is_designated: 0,
+      source: 'Commercial registration extract and the shareholders register.',
+      verification_method: 'certified_copy', verified_by_membership_id: ddOmar,
+      verified_at: iso(-70, 10), notes: null,
+    },
+    {
+      /*
+        THE 25% HOLDER, AND THE PEP. Recorded at the threshold exactly: a rule that
+        is strict (`> 25`) excludes her and one that is inclusive (`>= 25`) includes
+        her. The manual is inclusive, so this row is the one that pins the operator.
+      */
+      id: detId('beneficial_owner:gulf:sara'),
+      dd_id: ddGulf, client_id: IDS.clientGulf, party_id: null,
+      owner_kind: 'natural_person', full_name: 'Sara bint Nasser Al-Dosari',
+      full_name_ar: 'سارة بنت ناصر الدوسري',
+      date_of_birth: '1986-04-19', nationality: 'SA', residence_country: 'SA',
+      address: 'Al Malqa District, Riyadh',
+      id_type: 'national_id', id_number_hash: keyedHash('demo-owner-nid-8863'),
+      id_number_masked: '********8863',
+      cr_number: null, ownership_pct: 25, control_basis: 'ownership', control_description: null,
+      pep_status: 'pep_family', is_designated: 0,
+      source: 'Commercial registration extract and the shareholders register.',
+      verification_method: 'certified_copy', verified_by_membership_id: ddOmar,
+      verified_at: iso(-70, 10),
+      notes: 'PEP family determination — a close relative of a serving official.',
+    },
+    {
+      /*
+        BELOW THE THRESHOLD, AND NOT VERIFIED. Two deliberate negatives in one row:
+        this holder is not a subject the gate screens, and the firm's failure to
+        verify the holding must not be counted as an identified 15%. An
+        implementation that sums `ownership_pct` without the `verified_at` filter
+        reaches 100% here and passes a fixture it should fail.
+      */
+      id: detId('beneficial_owner:gulf:minority'),
+      dd_id: ddGulf, client_id: IDS.clientGulf, party_id: null,
+      owner_kind: 'natural_person', full_name: 'Khalid bin Omar Al-Zahrani',
+      full_name_ar: 'خالد بن عمر الزهراني',
+      date_of_birth: '1990-09-30', nationality: 'SA', residence_country: 'SA',
+      address: 'Al Khobar North, Al Khobar',
+      id_type: 'national_id', id_number_hash: keyedHash('demo-owner-nid-2210'),
+      id_number_masked: '********2210',
+      cr_number: null, ownership_pct: 15, control_basis: 'ownership', control_description: null,
+      pep_status: null, is_designated: null,
+      source: 'Commercial registration extract; not yet verified against the register.',
+      verification_method: null, verified_by_membership_id: null, verified_at: null,
+      notes: 'Below the 25% threshold. Recorded for completeness of the ownership picture.',
+    },
+
+    /*
+      ── AL-NUKHBA: A COMPANY THAT OWNS ITSELF ────────────────────────────────
+
+      One owner, a legal person, 100%. The chain does not terminate in a human
+      being, and no control right is recorded either — a previous counsel is named
+      in the file and nobody will say who instructs. This is the shape an
+      "add up the percentages" rule accepts: 100 ≥ 25, so the client reads as
+      identified and every subject in the relationship reads as screenable. There is
+      no subject to screen, because a company is not searchable against a
+      designation list in the same way a person is, and the firm may not act.
+    */
+    {
+      id: detId('beneficial_owner:nukhba:nested'),
+      dd_id: ddNukhba, client_id: IDS.clientNukhba, party_id: null,
+      owner_kind: 'legal_person', full_name: 'Al-Nukhba Holdings (Jersey) Limited',
+      full_name_ar: 'النخبة القابضة (جيرسي) المحدودة',
+      date_of_birth: null, nationality: null, residence_country: null,
+      address: 'St Helier, Jersey',
+      id_type: null, id_number_hash: null, id_number_masked: null,
+      cr_number: 'JE-118472', ownership_pct: 100, control_basis: 'ownership',
+      control_description: null,
+      pep_status: null, is_designated: null,
+      source: 'Shareholders register supplied by the client.',
+      verification_method: 'relying_on_third_party', verified_by_membership_id: ddOmar,
+      verified_at: iso(-45, 10),
+      notes: 'The parent is itself held through a trust. The ultimate owners have not been provided.',
+    },
+
+    /*
+      ── QADIM: A COMPANY CONTROLLED BY SOMEONE WHO OWNS NOTHING ──────────────
+
+      Zero shareholding and a control right: the founder holds a golden share and is
+      the only person who signs. Under a pure percentage rule this client is
+      unidentified and the firm may not act — wrongly, because the manual's own
+      reason for the threshold is that control is what matters and shares are only
+      the usual way of measuring it. The gate must admit this client, and this row is
+      the only way to prove that it does.
+
+      AND A CONTROL RIGHT HAS A DESCRIPTION, which the schema requires: "control",
+      recorded as a word, is not a fact anybody can review.
+    */
+    {
+      id: detId('beneficial_owner:qadim:founder'),
+      dd_id: ddQadim, client_id: IDS.clientQadim, party_id: null,
+      owner_kind: 'natural_person', full_name: 'Faisal bin Abdulrahman Al-Otaibi',
+      full_name_ar: 'فيصل بن عبدالرحمن العتيبي',
+      date_of_birth: '1963-01-22', nationality: 'SA', residence_country: 'SA',
+      address: 'Al Yasmin District, Riyadh',
+      id_type: 'national_id', id_number_hash: keyedHash('demo-owner-nid-5507'),
+      id_number_masked: '********5507',
+      cr_number: null, ownership_pct: null, control_basis: 'voting_rights',
+      control_description: 'A golden share and the sole signature authority on the bank mandate.',
+      pep_status: 'not_pep', is_designated: 0,
+      source: 'Articles of association and the bank mandate.',
+      verification_method: 'certified_copy', verified_by_membership_id: ddOmar,
+      verified_at: iso(-40, 10), notes: null,
+    },
+  ];
+  for (const owner of owners) {
+    add('beneficial_owners', {
+      tenant_id: IDS.tenantKgm, created_at: now, updated_at: now, ...owner,
+    });
+  }
+
+  /*
+    ── AHMED'S SCREENING ──────────────────────────────────────────────────────
+    One run, cleared, against the internal register. `list_as_of` is the date of the
+    list that was searched, not the date of the search: screening against a list
+    eighteen months old is not screening, and the two dates are only the same date
+    by coincidence.
+  */
+  const ahmedRunId = detId('screening_run:ahmed:client');
+  add('screening_runs', {
+    id: ahmedRunId, tenant_id: IDS.tenantKgm,
+    dd_id: detId(`due_diligence:${IDS.clientAhmed}`), client_id: IDS.clientAhmed,
+    subject_kind: 'client', subject_id: IDS.clientAhmed, subject_name: 'Ahmed bin Saud Al-Saud',
+    list_sets: JSON.stringify(['un_consolidated', 'sama_designations', 'internal_register']),
+    list_as_of: '2026-08-31', provider: 'internal_register',
+    /*
+      NOT 'clear' — A MATCH WAS FOUND AND RULED OUT.
+
+      `matches_found` is 1 and the status is `potential_match`, because a run that
+      found somebody with the same name and had it dispositioned by a person is not
+      a run that found nothing, and recording it as clear would erase the decision.
+      What makes this client admissible is not the absence of a hit but the presence
+      of a disposition — which is the difference between screening and searching.
+
+      The score is recorded because a fuzzy match without its score is a claim about
+      similarity that nobody can check afterwards.
+    */
+    provider_reference: 'AML-2026-0417', status: 'potential_match', matches_found: 1,
+    failure_reason: null, run_at: iso(-88, 10), run_by_membership_id: ddOmar,
+    note: 'One candidate; ruled out against the date of birth and the national identification.',
+    created_at: iso(-88, 10),
+  });
+  add('screening_matches', {
+    id: detId('screening_match:ahmed:ruled-out'), tenant_id: IDS.tenantKgm,
+    run_id: ahmedRunId, list_source: 'internal_register',
+    matched_name: 'Ahmed Saud Al-Saud (listed 2016 — settled 2018)',
+    matched_reference: 'INTERNAL-2016-0114',
+    match_kind: 'fuzzy_name', score: 62.0,
+    disposition: 'false_positive',
+    disposition_reason: 'Different date of birth and a different national identification; the entry was closed in 2018.',
+    disposition_by_membership_id: ddOmar, disposition_at: iso(-88, 11),
+    created_at: iso(-88, 10),
+  });
+
+  /*
+    ── GULF HORIZON'S SCREENING, AND THE RUN THAT FAILED ──────────────────────
+
+    Three runs for this client, and the third is the one this fixture exists for.
+    The company cleared and Mohammed cleared; the run against Sara — the 25% holder,
+    the PEP — returned a provider failure and wrote `failed` with its reason on it.
+
+    The temptation this refuses is a fixture where the failed run is simply ABSENT,
+    because a missing run and a failed run look identical on any screen that reads
+    "no matches". Keeping the row is what makes the difference legible.
+  */
+  const gulfClientRun = detId('screening_run:gulf:client');
+  const gulfOwnerRun = detId('screening_run:gulf:owner-mohammed');
+  const gulfOwnerFailedRun = detId('screening_run:gulf:owner-sara-failed');
+  add('screening_runs', {
+    id: gulfClientRun, tenant_id: IDS.tenantKgm, dd_id: ddGulf, client_id: IDS.clientGulf,
+    subject_kind: 'client', subject_id: IDS.clientGulf,
+    subject_name: 'Gulf Horizon Trading Company',
+    list_sets: JSON.stringify(['un_consolidated', 'sama_designations', 'internal_register']),
+    list_as_of: '2026-08-31', provider: 'internal_register',
+    provider_reference: 'AML-2026-0418', status: 'clear', matches_found: 0,
+    failure_reason: null, run_at: iso(-70, 10), run_by_membership_id: ddOmar, note: null,
+    created_at: iso(-70, 10),
+  });
+  add('screening_runs', {
+    id: gulfOwnerRun, tenant_id: IDS.tenantKgm, dd_id: ddGulf, client_id: IDS.clientGulf,
+    subject_kind: 'beneficial_owner',
+    subject_id: detId('beneficial_owner:gulf:mohammed'),
+    subject_name: 'Mohammed Al-Harbi',
+    list_sets: JSON.stringify(['un_consolidated', 'sama_designations', 'internal_register']),
+    list_as_of: '2026-08-31', provider: 'internal_register',
+    provider_reference: 'AML-2026-0419', status: 'clear', matches_found: 0,
+    failure_reason: null, run_at: iso(-70, 10), run_by_membership_id: ddOmar, note: null,
+    created_at: iso(-70, 10),
+  });
+  add('screening_runs', {
+    id: gulfOwnerFailedRun, tenant_id: IDS.tenantKgm, dd_id: ddGulf, client_id: IDS.clientGulf,
+    subject_kind: 'beneficial_owner',
+    subject_id: detId('beneficial_owner:gulf:sara'),
+    subject_name: 'Sara bint Nasser Al-Dosari',
+    list_sets: JSON.stringify(['un_consolidated', 'sama_designations']),
+    list_as_of: '2026-08-31', provider: 'external_provider',
+    provider_reference: 'REF-8842-TIMEOUT', status: 'failed', matches_found: 0,
+    failure_reason: 'The screening provider did not respond within the configured timeout.',
+    run_at: iso(-70, 10), run_by_membership_id: ddOmar,
+    note: 'Re-run required. Recorded as a failure rather than left absent.',
+    created_at: iso(-70, 10),
+  });
+
+  /*
+    ── QADIM'S SCREENING, CLEARED ─────────────────────────────────────────────
+    A control-right holder is a subject too — the reason the owner exists in the
+    register is that the firm has to know who instructs, and knowing who instructs
+    and not screening them is the gap this run closes.
+  */
+  /*
+    BOTH SUBJECTS, AND THE FIRST DRAFT OF THIS FIXTURE HAD ONLY ONE.
+
+    It screened the control-right holder and not the company, and the gate refused:
+    `screening_incomplete`. The client is a subject in its own right — the company
+    that owns nothing is still the company the firm is acting for — so a fixture that
+    screens the interesting person and forgets the obvious one produces a client that
+    cannot be admitted for a reason the file does not show. The gate was right.
+  */
+  add('screening_runs', {
+    id: detId('screening_run:qadim:client'), tenant_id: IDS.tenantKgm, dd_id: ddQadim,
+    client_id: IDS.clientQadim, subject_kind: 'client', subject_id: IDS.clientQadim,
+    subject_name: 'Qadim Logistics Company',
+    list_sets: JSON.stringify(['un_consolidated', 'sama_designations', 'internal_register']),
+    list_as_of: '2026-08-31', provider: 'internal_register',
+    provider_reference: 'AML-2026-0420', status: 'clear', matches_found: 0,
+    failure_reason: null, run_at: iso(-40, 10), run_by_membership_id: ddOmar, note: null,
+    created_at: iso(-40, 10),
+  });
+  add('screening_runs', {
+    id: detId('screening_run:qadim:owner'), tenant_id: IDS.tenantKgm, dd_id: ddQadim,
+    client_id: IDS.clientQadim, subject_kind: 'beneficial_owner',
+    subject_id: detId('beneficial_owner:qadim:founder'),
+    subject_name: 'Faisal bin Abdulrahman Al-Otaibi',
+    list_sets: JSON.stringify(['un_consolidated', 'sama_designations', 'internal_register']),
+    list_as_of: '2026-08-31', provider: 'internal_register',
+    provider_reference: 'AML-2026-0421', status: 'clear', matches_found: 0,
+    failure_reason: null, run_at: iso(-40, 10), run_by_membership_id: ddOmar, note: null,
+    created_at: iso(-40, 10),
+  });
+
+  /*
+    ── AND A HIT SOMEBODY HAS TO DECIDE ABOUT ─────────────────────────────────
+
+    A fuzzy match between Qadim's client name and an entry on the internal register,
+    left OPEN. This is what an unresolved screening looks like in the register, and
+    it is the second refusal the gate has to make: a client whose file is otherwise
+    finished but against whom a name hit nobody has ruled out. The hit is on the
+    CLIENT subject, so the client's own clearance is the one that is withheld.
+
+    `score` is recorded because a fuzzy match without its score is a claim about
+    similarity that cannot be checked.
+  */
+  const nukhbaRunId = detId('screening_run:nukhba:client');
+  add('screening_runs', {
+    id: nukhbaRunId, tenant_id: IDS.tenantKgm, dd_id: ddNukhba,
+    client_id: IDS.clientNukhba, subject_kind: 'client', subject_id: IDS.clientNukhba,
+    subject_name: 'Al-Nukhba Trading Establishment',
+    list_sets: JSON.stringify(['un_consolidated', 'sama_designations', 'internal_register']),
+    list_as_of: '2026-08-31', provider: 'internal_register',
+    provider_reference: 'AML-2026-0422', status: 'potential_match', matches_found: 1,
+    failure_reason: null, run_at: iso(-45, 10), run_by_membership_id: ddOmar, note: null,
+    created_at: iso(-45, 10),
+  });
+  add('screening_matches', {
+    id: detId('screening_match:nukhba:open'), tenant_id: IDS.tenantKgm,
+    run_id: nukhbaRunId,
+    list_source: 'internal_register',
+    matched_name: 'Faisal Abdulrahman Al-Otaibi (listed 2019 — settled)',
+    matched_reference: 'INTERNAL-2019-0033',
+    match_kind: 'fuzzy_name', score: 87.5,
+    disposition: 'open', disposition_reason: null,
+    disposition_by_membership_id: null, disposition_at: null,
+    created_at: iso(-40, 10),
+  });
+
+  /*
+    ── ONE REPORT, FILED ──────────────────────────────────────────────────────
+    Against Gulf Horizon's failed screening, because that is how the two records
+    connect in real life: a screening that cannot be completed is a question, and
+    the answer to a question about a client's funds is sometimes a report.
+
+    The narrative is Arabic — the schema, the trigger and the domain check all
+    insist on it — and the report is FILED, which means it carries the moment, the
+    member, the authority's reference and the acknowledgement that the client was
+    not told. `tipping_off_acknowledged_at` is not ceremony: tipping off is its own
+    offence under the same law.
+  */
+  add('str_reports', {
+    id: detId('str_report:gulf:2026-0007'), tenant_id: IDS.tenantKgm,
+    report_number: 'STR-2026-0007',
+    subject_kind: 'client', subject_id: IDS.clientGulf, subject_name: 'Gulf Horizon Trading Company',
+    client_id: IDS.clientGulf, matter_id: IDS.matterGulf,
+    grounds: JSON.stringify(['third_party_funding', 'reluctant_identification']),
+    narrative_ar: 'وردت أتعاب ملف الاستحواذ من حساب بنكي باسم طرف ثالث لا تربطه بالعميل علاقة ظاهرة، '
+      + 'وقد طُلب أكثر من مرة مستند يوضح مصدر الأموال فلم يُقدَّم. كما لم يُقدَّم بيان بالمالك الحقيقي '
+      + 'الأخير للشركة الأم. وقد أُرسل التقرير إلى وحدة التحريات المالية في المملكة.',
+    narrative_en: null,
+    amount_sar: 40_000, currency: 'SAR',
+    transaction_reference: 'IBAN transfer ref 90114',
+    transaction_at: iso(-24, 14),
+    status: 'filed',
+    prepared_by_membership_id: ddOmar, prepared_at: iso(-24, 10),
+    reviewed_by_membership_id: ddNoura, reviewed_at: iso(-24, 12),
+    filed_by_membership_id: ddOmar, filed_at: iso(-23, 9),
+    /* Three working days from preparation: Friday and Saturday do not count. */
+    filed_due_at: iso(-21, 10),
+    fiu_reference: 'SAFIU-2026-118420',
+    fiu_response: null, fiu_responded_at: null,
+    tipping_off_acknowledged_at: iso(-23, 9), tipping_off_acknowledged_by_membership_id: ddOmar,
+    closure_reason: null, closed_at: null,
+    created_by_membership_id: ddOmar, created_at: iso(-24, 10), updated_at: iso(-23, 9),
   });
 
   return rows;

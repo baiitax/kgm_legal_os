@@ -122,7 +122,26 @@ export type AuditAction =
   | 'TIME_ENTRY_RECORDED' | 'TIME_ENTRY_ADJUSTED' | 'TIME_WRITTEN_OFF'
   | 'EXPENSE_RECORDED' | 'EXPENSE_APPROVED' | 'EXPENSE_REJECTED'
   | 'BILLING_TERMS_SET' | 'ENGAGEMENT_LETTER_RECORDED' | 'ENGAGEMENT_LETTER_SIGNED'
-  | 'ENGAGEMENT_GATE_DENIED' | 'WRITE_OFF_APPROVED' | 'DISCOUNT_APPLIED';
+  | 'ENGAGEMENT_GATE_DENIED' | 'WRITE_OFF_APPROVED' | 'DISCOUNT_APPLIED'
+  /*
+    P0.3 · CLIENT DUE DILIGENCE AND THE AML GATES.
+
+    WHY THESE ARE SEPARATE ACTIONS AND NOT ONE `CDD_UPDATED`. The obligation is a
+    sequence of decisions, and an inspection does not ask whether the file was
+    touched — it asks who decided the client was not a PEP, who ruled out a name
+    match, and when the report left the building. One action for all of them would
+    answer none of those.
+
+    AND WHY THE DENIAL IS HERE TOO. `CDD_GATE_DENIED` is the manual's prohibition
+    firing. A firm that never sees this action in its own trail has either nothing
+    to refuse or a gate that is not working, and those are different problems.
+  */
+  | 'CDD_RECORDED' | 'CDD_UPDATED' | 'CDD_COMPLETED' | 'CDD_UNABLE_TO_COMPLETE'
+  | 'CDD_REVIEW_SCHEDULED' | 'CDD_GATE_DENIED'
+  | 'BENEFICIAL_OWNER_RECORDED' | 'BENEFICIAL_OWNER_VERIFIED'
+  | 'SCREENING_RUN' | 'SCREENING_MATCH_FOUND' | 'SCREENING_MATCH_DISPOSITIONED'
+  | 'SCREENING_FAILED' | 'RISK_ASSESSED' | 'RISK_COUNTRY_RECORDED'
+  | 'STR_PREPARED' | 'STR_REVIEWED' | 'STR_FILED' | 'STR_RESPONSE_RECORDED';
 
 export interface AuditActor {
   /**

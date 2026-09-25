@@ -45,6 +45,34 @@ export type ErrorCode =
   // A single generic 'forbidden' here would tell them the door is shut without
   // saying which key opens it, and they would work around the control instead.
   | 'already_dispositioned'
+  /*
+    P0.3 · CLIENT DUE DILIGENCE. Every code here is a named obstacle, for the same reason
+    the conflict gate's are: the obligation is a list of requirements, and a person who is
+    refused needs to know which one they have not met. `cdd_gate_denied` is the manual's
+    prohibition — the firm may not act for this client — and it is deliberately distinct
+    from `cdd_incomplete`, which is a file that is merely unfinished.
+  */
+  | 'cdd_missing'
+  | 'cdd_incomplete'
+  | 'cdd_unable_to_complete'
+  | 'cdd_gate_denied'
+  | 'cdd_already_open'
+  | 'cdd_record_closed'
+  | 'senior_approval_required'
+  | 'screening_unresolved'
+  | 'screening_incomplete'
+  | 'screening_failed'
+  | 'sanctions_match'
+  | 'cdd_review_overdue'
+  | 'cdd_beneficial_owner_missing'
+  | 'aml_record_retention'
+  | 'str_narrative_incomplete'
+  | 'str_narrative_not_arabic'
+  | 'str_filed_immutable'
+  | 'str_not_approved'
+  | 'str_not_draft'
+  | 'str_not_reviewed'
+  | 'str_not_filed'
   | 'written_consent_required'
   | 'not_a_confirmed_conflict'
   | 'no_affected_party'
@@ -321,4 +349,39 @@ const REFUSAL_STATUS: Record<string, number> = {
   reconciliation_is_append_only: 409,
   invoice_not_issued: 409,
   invoice_number_taken: 409,
+
+  /*
+    P0.3, and the same distinction. A refusal about the STATE of a record that has moved
+    on is 409: the decision has been taken (a match has been dispositioned, a report has
+    been filed) or a deadline has passed (the review fell due), and re-sending the request
+    will not change the answer. A refusal about a file that is merely unfinished, or an
+    input that does not meet the reporting requirement, is 400 — the person can complete
+    the record or rewrite the narrative and come back.
+  */
+  already_dispositioned: 409,
+  cdd_review_overdue: 409,
+  aml_record_retention: 409,
+  cdd_already_open: 409,
+  cdd_record_closed: 409,
+  str_filed_immutable: 409,
+  str_not_approved: 409,
+  str_not_draft: 409,
+  str_not_reviewed: 409,
+  str_not_filed: 409,
+
+  // The gate's own answers, spelled out rather than left to the `?? 400` default, so the
+  // vocabulary is closed: a token that reaches this file and is not listed here is a
+  // refusal somebody forgot to classify.
+  cdd_missing: 400,
+  cdd_incomplete: 400,
+  cdd_unable_to_complete: 400,
+  cdd_gate_denied: 400,
+  cdd_beneficial_owner_missing: 400,
+  senior_approval_required: 400,
+  screening_incomplete: 400,
+  screening_unresolved: 400,
+  screening_failed: 400,
+  sanctions_match: 400,
+  str_narrative_incomplete: 400,
+  str_narrative_not_arabic: 400,
 };

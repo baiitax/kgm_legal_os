@@ -37,6 +37,14 @@ const TABLE_ORDER = [
   'client_ledgers', 'ledger_entries',
   'time_entries', 'expenses',
   'invoice_submissions', 'credit_notes', 'ledger_reconciliations',
+  /*
+    P0.3 · client due diligence and the AML gates. `client_due_diligence` after
+    `clients` and `parties`; `beneficial_owners` and `screening_runs` after the
+    record they belong to; `screening_matches` after its run; `str_reports` last,
+    because a report names a client, a matter and two memberships.
+  */
+  'aml_risk_countries', 'client_due_diligence', 'beneficial_owners',
+  'screening_runs', 'screening_matches', 'str_reports',
 ];
 
 /**
@@ -48,6 +56,44 @@ const TABLE_ORDER = [
  * Both constraints are real, and the pass has to land between them.
  */
 const ISSUANCE_BOUNDARY = 'payments';
+
+/**
+ * The deferred derivation of `clients.identity_verified`.
+ *
+ * WHY IT CANNOT BE PART OF THE ROW. The column is derived from whether a current
+ * due-diligence record exists and is complete, and the seed writes the clients before it
+ * writes the records — necessarily, because `client_due_diligence.client_id` references
+ * them. SQLite refuses the assertion outright (the triggers in
+ * `CLIENT_DUE_DILIGENCE_SCHEMA`) and Postgres overrides it, so a fixture that typed `1`
+ * would either fail to load or quietly disagree with the database; either way the demo
+ * would be demonstrating the defect rather than the rule.
+ *
+ * So the pass runs once, at the end, over every client: the same statement the trigger
+ * enforces, expressed as the answer rather than as a prohibition.
+ */
+async function reconcileIdentityVerified(db: Db): Promise<number> {
+  /*
+    `true`/`false`, NOT `1`/`0`.
+
+    `clients.identity_verified` is a real boolean in PostgreSQL, and a LITERAL integer in a
+    statement is typed as an integer — `case … then 1 else 0 end` is an integer expression,
+    and Postgres refuses it outright: "column identity_verified is of type boolean but
+    expression is of type integer". SQLite accepts it, so this line ran green on every
+    local run and failed only on the real server, which is the fourteenth mechanism in the
+    list this project keeps: the two dialects agree about bound parameters (a parameter's
+    text '0' is inferred as boolean and parses) and disagree about literals. The lesson
+    already recorded for `is_active = 1` and `coalesce(bool, 0)` applies to UPDATE and
+    SELECT exactly as it applies to DDL.
+  */
+  const r = await db.run(
+    `update clients
+        set identity_verified = case when exists (
+              select 1 from client_due_diligence d
+               where d.tenant_id = clients.tenant_id and d.client_id = clients.id
+                 and d.superseded_by is null and d.status = 'complete')
+            then true else false end`);
+  return Number((r as { changes?: number }).changes ?? 0);
+}
 
 /** Applies the deferred issuances: the second half of creating a tax invoice. */
 async function applyDemoIssuances(db: Db): Promise<void> {
@@ -181,6 +227,18 @@ export async function seedDemoData(
     }
   }
 
+  if (!skipped) {
+    /*
+      THE DERIVED FLAG, LAST. It reads what the loop above wrote, so it can only run
+      after it — and it must run even when the rows were already present, which is why
+      the guard here is `!skipped` and not "did this run insert anything".
+    */
+    const derived = await reconcileIdentityVerified(db);
+    if (opts.verbose) {
+      console.log(`[seed] clients.identity_verified reconciled from the due-diligence records (${derived} row(s))`);
+    }
+  }
+
   // Storage is reconciled on EVERY run, including a skipped one: the database
   // can outlive the volume holding the bytes (a restart with a fresh /tmp), and
   // a document row with no file behind it is a broken download rather than a
@@ -220,8 +278,18 @@ export async function seedDemoData(
   }
 }
 
+/**
+ * THE SEED WRITES BOOLEANS AS BOOLEANS.
+ *
+ * This used to turn every boolean into a 0/1 before it reached the driver, which is not
+ * the convention the driver interface documents (`db/types.ts`: "booleans are written as
+ * the literals TRUE/FALSE and passed as JS booleans; the sqlite driver coerces parameters
+ * to 0/1"). It worked on Postgres only because text `'0'` is accepted where a boolean is
+ * expected — a fixture relying on an input coercion it never said it was relying on, and
+ * one that would have kept working if a boolean ever landed in a numeric column. Both
+ * drivers are handed the value the fixture actually holds.
+ */
 function normalize(v: unknown): unknown {
-  if (typeof v === 'boolean') return v ? 1 : 0;
   if (v instanceof Date) return v.toISOString();
   return v as never;
 }

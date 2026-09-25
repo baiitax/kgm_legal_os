@@ -76,6 +76,92 @@ export interface MatterAuthFacts {
   restrictedByMembershipId: string | null;
 }
 
+/**
+ * A due-diligence row, in the shape the callers read.
+ *
+ * EVERY FIELD IS MAPPED, including the ones nothing reads yet. The boundary is the
+ * point: a raw driver row crossing it is how `vat_number` came to be read as
+ * `vatNumber`, and how every standard tax invoice in the system came to be refused.
+ */
+function dueDiligenceFromRow(r: Row) {
+  return {
+    id: String(r.id), tenantId: String(r.tenant_id), clientId: String(r.client_id),
+    partyId: strOrNull(r.party_id), version: Number(r.version),
+    level: String(r.cdd_level), status: String(r.status),
+    legalName: strOrNull(r.legal_name), legalNameAr: strOrNull(r.legal_name_ar),
+    dateOfBirth: strOrNull(r.date_of_birth), nationality: strOrNull(r.nationality),
+    residenceCountry: strOrNull(r.residence_country), address: strOrNull(r.address),
+    idType: strOrNull(r.id_type), idNumberHash: strOrNull(r.id_number_hash),
+    idNumberMasked: strOrNull(r.id_number_masked),
+    idIssuedAt: strOrNull(r.id_issued_at), idExpiresAt: strOrNull(r.id_expires_at),
+    crNumber: strOrNull(r.cr_number), crIssuedAt: strOrNull(r.cr_issued_at),
+    incorporationCountry: strOrNull(r.incorporation_country),
+    businessActivity: strOrNull(r.business_activity),
+    ownershipStructure: strOrNull(r.ownership_structure),
+    sourceOfFunds: strOrNull(r.source_of_funds), sourceOfWealth: strOrNull(r.source_of_wealth),
+    purpose: strOrNull(r.purpose),
+    expectedAnnualVolumeSar: r.expected_annual_volume_sar === null
+      ? null : toNumber(r.expected_annual_volume_sar),
+    verificationMethod: strOrNull(r.verification_method),
+    verificationSource: strOrNull(r.verification_source),
+    verifiedByMembershipId: strOrNull(r.verified_by_membership_id), verifiedAt: strOrNull(r.verified_at),
+    pepStatus: strOrNull(r.pep_status) as CddPepStatus, pepDetails: strOrNull(r.pep_details),
+    riskRating: strOrNull(r.risk_rating) as CddRiskRating, riskReasons: jsonArrayColumn(r.risk_reasons),
+    riskAssessedAt: strOrNull(r.risk_assessed_at),
+    seniorApprovedByMembershipId: strOrNull(r.senior_approved_by_membership_id),
+    seniorApprovedAt: strOrNull(r.senior_approved_at),
+    seniorApprovalNote: strOrNull(r.senior_approval_note),
+    reviewDueAt: strOrNull(r.review_due_at), lastReviewedAt: strOrNull(r.last_reviewed_at),
+    completedAt: strOrNull(r.completed_at), completedByMembershipId: strOrNull(r.completed_by_membership_id),
+    unableReason: strOrNull(r.unable_reason), notes: strOrNull(r.notes),
+    supersededBy: strOrNull(r.superseded_by), createdAt: String(r.created_at), updatedAt: String(r.updated_at),
+  };
+}
+
+export type OwnerControlBasis = 'ownership' | 'voting_rights' | 'senior_management' | 'other';
+export type ScreeningDisposition = 'open' | 'false_positive' | 'true_match' | 'escalated';
+export type CddPepStatus = 'not_pep' | 'pep' | 'pep_family' | 'pep_associate';
+export type CddRiskRating = 'low' | 'medium' | 'high';
+
+/**
+ * A nullable text column as `string | null`.
+ *
+ * The driver's own type for a column that may be null widens to `{}`, which is true of
+ * every row and useless to a caller. The narrowing belongs here, at the boundary, for the
+ * same reason the projection does: what crosses it must be the shape the caller reads.
+ */
+function strOrNull(value: unknown): string | null {
+  return value === null || value === undefined ? null : String(value);
+}
+
+/** A JSON array column, tolerating both a string (SQLite) and a parsed array (Postgres). */
+function jsonArrayColumn(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map(String);
+  if (typeof value !== 'string' || value.trim() === '') return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * A value on its way into a due-diligence column.
+ *
+ * Two conversions, and both are the reason this function exists rather than a call to
+ * `normalize()`: a boolean becomes 1/0 for SQLite and stays a boolean for Postgres, and
+ * an array becomes JSON text for SQLite and stays whatever the driver takes for Postgres.
+ * The rule the project learned the hard way still holds — hand the repository a boolean,
+ * never `? 1 : 0` — and this is where that rule is honoured for these tables.
+ */
+function normalizeDdValue(value: unknown): Param {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'boolean') return value;
+  if (Array.isArray(value)) return JSON.stringify(value);
+  return value as Param;
+}
+
 export class FirmRepo {
   constructor(private readonly db: Db) {}
 
@@ -419,7 +505,11 @@ export class FirmRepo {
    */
   async getMatterRow(tenantId: string, matterId: string): Promise<Row | null> {
     const r = await this.q().get<Row>(
-      `select m.id, m.matter_number, m.case_number, m.title, m.title_ar,
+      // `m.client_id` is projected because the CUSTOMER DUE DILIGENCE GATE reads it: the
+      // gate is about the client behind the matter, and a projection that omitted the
+      // column would not fail — it would pass `undefined` into the assessment and clear
+      // every matter. A gate column that is not selected is a gate that is not there.
+      `select m.id, m.matter_number, m.case_number, m.title, m.title_ar, m.client_id,
               m.practice_area, m.practice_area_ar, m.court, m.court_ar,
               m.internal_status, m.client_status, m.summary, m.summary_ar,
               m.opened_at, m.closed_at, m.risk_rating, m.internal_notes, m.conflict_cleared,
@@ -3342,9 +3432,729 @@ export class FirmRepo {
     );
     return r.changes;
   }
+  /* ═════════════════════════════════════════════════════════════════════════════
+     P0.3 · CLIENT DUE DILIGENCE, THE OWNERS, THE SCREENING AND THE REPORT
+
+     WHY EVERY METHOD HERE RETURNS A MAPPED OBJECT. `getClientForInvoice` handed the
+     invoice route a raw driver row and the route read a camelCase field off it; every
+     buyer looked VAT-less and every standard invoice was refused. The defect was not
+     the missing field — it was the boundary being crossed. Raw rows do not leave this
+     file.
+
+     WHY NOTHING HERE DELETES. A due-diligence record, a screening and a report are
+     statements about what the firm knew and when. They are corrected by adding a
+     version, re-running the screening, or filing a new report — never by removal. The
+     Postgres grants in 0040 make that a privilege fact as well as a policy.
+     ═════════════════════════════════════════════════════════════════════════════ */
+
+  /** The current version of a client's identification record, or null. */
+  async getCurrentDueDiligence(tenantId: string, clientId: string) {
+    const row = await this.q().get<Row>(
+      `select * from client_due_diligence
+        where tenant_id = ? and client_id = ? and superseded_by is null`,
+      [tenantId, clientId],
+    );
+    return row ? dueDiligenceFromRow(row) : null;
+  }
+
+  async getDueDiligence(tenantId: string, id: string) {
+    const row = await this.q().get<Row>(
+      `select * from client_due_diligence where tenant_id = ? and id = ?`, [tenantId, id]);
+    return row ? dueDiligenceFromRow(row) : null;
+  }
+
+  async listDueDiligenceHistory(tenantId: string, clientId: string) {
+    const rows = await this.q().all<Row>(
+      `select d.*, u.email as completed_by_email
+         from client_due_diligence d
+         left join users u on u.id = (select user_id from firm_memberships m
+                                       where m.id = d.completed_by_membership_id)
+        where d.tenant_id = ? and d.client_id = ?
+        order by d.version desc`,
+      [tenantId, clientId],
+    );
+    return (rows ?? []).map((r) => ({ ...dueDiligenceFromRow(r), completedBy: r.completed_by_email ?? null }));
+  }
+
+  /**
+   * Opens a new version of a client's record.
+   *
+   * THE VERSION NUMBER IS COMPUTED, NOT SUPPLIED, and the previous current row is
+   * superseded in the same transaction. Two versions claiming to be current is the state
+   * the unique index exists to refuse, so it is prevented here rather than reported.
+   */
+  async openDueDiligence(opts: {
+    tenantId: string; clientId: string; partyId: string | null;
+    level: string; membershipId: string | null;
+  }): Promise<string> {
+    const now = new Date().toISOString();
+    const id = newId();
+    return this.tx(async () => {
+      const prior = await this.q().get<Row>(
+        `select id, version from client_due_diligence
+          where tenant_id = ? and client_id = ? and superseded_by is null
+          order by version desc`,
+        [opts.tenantId, opts.clientId],
+      );
+      const version = Number(prior?.version ?? 0) + 1;
+      if (prior) {
+        await this.q().run(
+          `update client_due_diligence
+              set superseded_by = ?, superseded_at = ?, updated_at = ?
+            where id = ? and tenant_id = ?`,
+          [id, now, now, String(prior.id), opts.tenantId],
+        );
+      }
+      await this.q().run(
+        `insert into client_due_diligence
+           (id, tenant_id, client_id, party_id, version, cdd_level, status,
+            risk_reasons, created_by_membership_id, created_at, updated_at)
+         values (?, ?, ?, ?, ?, ?, 'not_started', '[]', ?, ?, ?)`,
+        [id, opts.tenantId, opts.clientId, opts.partyId, version, opts.level,
+          opts.membershipId, now, now],
+      );
+      return id;
+    });
+  }
+
+  /**
+   * The fields a person fills in.
+   *
+   * `status` is not among them, deliberately. A record becomes `complete` through
+   * `completeDueDiligence`, which records who decided so and when — and the database
+   * refuses `complete` without both. A form that could set the status would be a form
+   * that can claim a completeness nobody decided.
+   */
+  async updateDueDiligence(opts: {
+    tenantId: string; id: string; fields: Record<string, unknown>;
+    membershipId: string | null;
+  }): Promise<void> {
+    const allowed = [
+      'cdd_level', 'legal_name', 'legal_name_ar', 'date_of_birth', 'nationality',
+      'residence_country', 'address', 'id_type', 'id_number_hash', 'id_number_masked',
+      'id_issued_at', 'id_expires_at', 'cr_number', 'cr_issued_at', 'incorporation_country',
+      'business_activity', 'ownership_structure', 'source_of_funds', 'source_of_wealth',
+      'purpose', 'expected_annual_volume_sar', 'verification_method', 'verification_source',
+      'verified_at', 'pep_status', 'pep_details', 'risk_rating', 'risk_reasons',
+      'risk_assessed_at', 'notes',
+    ];
+    /*
+      A WRITE NAMING A COLUMN THIS FEATURE DOES NOT OWN IS A BUG, NOT A NO-OP.
+      This filtered silently once, and a caller that sent camelCase field names — which
+      `firm.routes.ts` did — wrote nothing and was told it had succeeded. The allow-list
+      stays, so that a caller cannot reach a column the feature does not own; what changes
+      is that the filter now reports what it dropped instead of discarding it.
+    */
+    const cols = Object.keys(opts.fields);
+    const refused = cols.filter((c) => !allowed.includes(c));
+    if (refused.length > 0) {
+      throw new Error(
+        `updateDueDiligence: ${refused.join(', ')} ${
+          refused.length === 1 ? 'is not a column' : 'are not columns'
+        } of client_due_diligence this feature writes`);
+    }
+    if (cols.length === 0) return;
+    const now = new Date().toISOString();
+    const sets = cols.map((c) => `${c} = ?`).join(', ');
+    await this.q().run(
+      `update client_due_diligence set ${sets}, updated_at = ?
+        where id = ? and tenant_id = ? and superseded_by is null`,
+      [...cols.map((c) => normalizeDdValue(opts.fields[c])), now, opts.id, opts.tenantId],
+    );
+  }
+
+  /** Marks the current record complete, and says who completed it. */
+  async completeDueDiligence(opts: {
+    tenantId: string; id: string; membershipId: string; seniorApproval?: {
+      membershipId: string; note: string | null;
+    } | null;
+  }): Promise<void> {
+    const now = new Date().toISOString();
+    await this.q().run(
+      `update client_due_diligence
+          set status = 'complete', completed_at = ?, completed_by_membership_id = ?,
+              last_reviewed_at = coalesce(last_reviewed_at, ?), updated_at = ?
+        where id = ? and tenant_id = ? and superseded_by is null`,
+      [now, opts.membershipId, now, now, opts.id, opts.tenantId],
+    );
+    if (opts.seniorApproval) {
+      await this.q().run(
+        `update client_due_diligence
+            set senior_approved_by_membership_id = ?, senior_approved_at = ?,
+                senior_approval_note = ?, updated_at = ?
+          where id = ? and tenant_id = ?`,
+        [opts.seniorApproval.membershipId, now, opts.seniorApproval.note,
+          now, opts.id, opts.tenantId],
+      );
+    }
+  }
+
+  /**
+   * The refusal to act, recorded as a decision.
+   *
+   * `unable_to_complete` is not an unfinished form. It is the firm's conclusion that the
+   * client cannot be identified, it forbids the relationship, and the database refuses
+   * it without a ground of at least ten characters — because "unable" with no reason is
+   * an exit from an obligation that nobody can review.
+   */
+  async recordUnableToComplete(opts: {
+    tenantId: string; id: string; reason: string; membershipId: string;
+  }): Promise<void> {
+    const now = new Date().toISOString();
+    await this.q().run(
+      `update client_due_diligence
+          set status = 'unable_to_complete', unable_reason = ?, notes = ?,
+              completed_at = null, completed_by_membership_id = ?, updated_at = ?
+        where id = ? and tenant_id = ? and superseded_by is null`,
+      [opts.reason, opts.reason, opts.membershipId, now, opts.id, opts.tenantId],
+    );
+  }
+
+  /** When the record must next be looked at, decided by the rating. */
+  async setReviewDue(opts: { tenantId: string; id: string; dueAt: string | null }): Promise<void> {
+    await this.q().run(
+      `update client_due_diligence set review_due_at = ?, updated_at = ?
+        where id = ? and tenant_id = ?`,
+      [opts.dueAt, new Date().toISOString(), opts.id, opts.tenantId],
+    );
+  }
+
+  async listBeneficialOwners(tenantId: string, ddId: string) {
+    const rows = await this.q().all<Row>(
+      `select id, dd_id, client_id, party_id, owner_kind, full_name, full_name_ar,
+              date_of_birth, nationality, residence_country, address, id_type,
+              id_number_masked, cr_number, ownership_pct, control_basis, control_description,
+              pep_status, is_designated, source, verification_method, verified_at, notes
+         from beneficial_owners
+        where tenant_id = ? and dd_id = ?
+        order by ownership_pct desc nulls last, full_name`,
+      [tenantId, ddId],
+    );
+    return (rows ?? []).map((r) => ({
+      id: String(r.id), ddId: String(r.dd_id), clientId: String(r.client_id),
+      ownerKind: String(r.owner_kind), fullName: String(r.full_name),
+      fullNameAr: strOrNull(r.full_name_ar),
+      dateOfBirth: strOrNull(r.date_of_birth), nationality: strOrNull(r.nationality),
+      residenceCountry: strOrNull(r.residence_country), address: strOrNull(r.address),
+      idType: strOrNull(r.id_type), idNumberMasked: strOrNull(r.id_number_masked),
+      crNumber: strOrNull(r.cr_number),
+      ownershipPct: r.ownership_pct === null ? null : toNumber(r.ownership_pct),
+      controlBasis: String(r.control_basis) as OwnerControlBasis,
+      controlDescription: strOrNull(r.control_description),
+      pepStatus: strOrNull(r.pep_status),
+      isDesignated: r.is_designated === null ? null : toBool(r.is_designated),
+      source: strOrNull(r.source), verificationMethod: strOrNull(r.verification_method),
+      verifiedAt: strOrNull(r.verified_at), notes: strOrNull(r.notes),
+    }));
+  }
+
+  /**
+   * Records — or re-verifies — one person behind the client.
+   *
+   * AN UPSERT ON THE ID, because the row a person edits is the row that was created; a
+   * second row with the same owner is how a register comes to hold the same person twice
+   * and the arithmetic comes to double.
+   */
+  async upsertBeneficialOwner(opts: {
+    tenantId: string; id: string | null; ddId: string; clientId: string;
+    partyId: string | null; membershipId: string | null;
+    fields: Record<string, unknown>;
+  }): Promise<string> {
+    const f = opts.fields;
+    const now = new Date().toISOString();
+    const values: Record<string, unknown> = {
+      full_name: f.fullName, full_name_ar: f.fullNameAr ?? null,
+      owner_kind: f.ownerKind ?? 'natural_person',
+      date_of_birth: f.dateOfBirth ?? null, nationality: f.nationality ?? null,
+      residence_country: f.residenceCountry ?? null, address: f.address ?? null,
+      id_type: f.idType ?? null, id_number_hash: f.idNumberHash ?? null,
+      id_number_masked: f.idNumberMasked ?? null, cr_number: f.crNumber ?? null,
+      ownership_pct: f.ownershipPct ?? null, control_basis: f.controlBasis ?? 'ownership',
+      control_description: f.controlDescription ?? null,
+      pep_status: f.pepStatus ?? null, is_designated: f.isDesignated ?? null,
+      source: f.source ?? null, verification_method: f.verificationMethod ?? null,
+      verified_by_membership_id: f.verifiedAt ? opts.membershipId : null,
+      verified_at: f.verifiedAt ?? null, notes: f.notes ?? null,
+    };
+    const cols = Object.keys(values);
+    if (opts.id) {
+      return this.tx(async () => {
+        await this.q().run(
+          `update beneficial_owners
+              set ${cols.map((c) => `${c} = ?`).join(', ')}, updated_at = ?
+            where id = ? and tenant_id = ?`,
+          [...cols.map((c) => normalizeDdValue(values[c])), now, opts.id, opts.tenantId],
+        );
+        return opts.id!;
+      });
+    }
+    const id = newId();
+    await this.q().run(
+      `insert into beneficial_owners (id, tenant_id, dd_id, client_id, party_id,
+                                      ${cols.join(', ')}, created_at, updated_at)
+       values (?, ?, ?, ?, ?, ${cols.map(() => '?').join(', ')}, ?, ?)`,
+      [id, opts.tenantId, opts.ddId, opts.clientId, opts.partyId,
+        ...cols.map((c) => normalizeDdValue(values[c])), now, now],
+    );
+    return id;
+  }
+
+  async listScreeningRuns(tenantId: string, clientId: string) {
+    const rows = await this.q().all<Row>(
+      `select r.id, r.dd_id, r.subject_kind, r.subject_id, r.subject_name, r.list_sets,
+              r.list_as_of, r.provider, r.provider_reference, r.status, r.matches_found,
+              r.failure_reason, r.run_at, r.note,
+              (select count(*) from screening_matches m
+                where m.run_id = r.id and m.disposition = 'open') as open_matches
+         from screening_runs r
+        where r.tenant_id = ? and r.client_id = ?
+        order by r.run_at desc`,
+      [tenantId, clientId],
+    );
+    return (rows ?? []).map((r) => ({
+      id: String(r.id), ddId: strOrNull(r.dd_id),
+      subjectKind: String(r.subject_kind), subjectId: String(r.subject_id),
+      subjectName: String(r.subject_name), listSets: jsonArrayColumn(r.list_sets),
+      listAsOf: strOrNull(r.list_as_of), provider: String(r.provider),
+      providerReference: strOrNull(r.provider_reference), status: String(r.status),
+      matchesFound: Number(r.matches_found),
+      openMatches: Number(r.open_matches ?? 0),
+      failureReason: strOrNull(r.failure_reason), runAt: String(r.run_at), note: strOrNull(r.note),
+    }));
+  }
+
+  async listScreeningMatches(tenantId: string, runId: string) {
+    const rows = await this.q().all<Row>(
+      `select m.id, m.run_id, m.list_source, m.matched_name, m.matched_reference, m.match_kind,
+              m.score, m.disposition, m.disposition_reason, m.disposition_at,
+              u.email as disposition_by_email
+         from screening_matches m
+         left join users u on u.id = (select user_id from firm_memberships fm
+                                      where fm.id = m.disposition_by_membership_id)
+        where m.tenant_id = ? and m.run_id = ?
+        order by case m.disposition when 'open' then 0 else 1 end, m.score desc`,
+      [tenantId, runId],
+    );
+    return (rows ?? []).map((m) => ({
+      id: String(m.id), runId: String(m.run_id), listSource: String(m.list_source),
+      matchedName: String(m.matched_name), matchedReference: strOrNull(m.matched_reference),
+      matchKind: String(m.match_kind), score: m.score === null ? null : toNumber(m.score),
+      disposition: String(m.disposition) as ScreeningDisposition,
+      dispositionReason: strOrNull(m.disposition_reason),
+      dispositionAt: strOrNull(m.disposition_at), dispositionBy: strOrNull(m.disposition_by_email),
+    }));
+  }
+
+  /**
+   * One screening, with every hit it produced, written in one transaction.
+   *
+   * THE COUNT IS DERIVED FROM THE MATCHES, NOT SUPPLIED. A run that says "no matches" and
+   * carries two of them is the state the database refuses — and computing the number here
+   * is what makes that refusal unreachable rather than merely enforced.
+   */
+  async recordScreeningRun(opts: {
+    tenantId: string; clientId: string; ddId: string | null;
+    subjectKind: string; subjectId: string; subjectName: string;
+    listSets: string[]; listAsOf: string | null; provider: string;
+    providerReference: string | null; status: string; failureReason: string | null;
+    note: string | null; membershipId: string | null;
+    matches: Array<{
+      listSource: string; matchedName: string; matchedReference: string | null;
+      matchKind: string; score: number | null;
+    }>;
+  }): Promise<{ id: string; matchesFound: number }> {
+    const id = newId();
+    const now = new Date().toISOString();
+    return this.tx(async () => {
+      await this.q().run(
+        `insert into screening_runs
+           (id, tenant_id, dd_id, client_id, subject_kind, subject_id, subject_name,
+            list_sets, list_as_of, provider, provider_reference, status, matches_found,
+            failure_reason, run_at, run_by_membership_id, note, created_at)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, opts.tenantId, opts.ddId, opts.clientId, opts.subjectKind, opts.subjectId,
+          opts.subjectName, JSON.stringify(opts.listSets), opts.listAsOf, opts.provider,
+          opts.providerReference, opts.status, opts.matches.length, opts.failureReason,
+          now, opts.membershipId, opts.note, now],
+      );
+      for (const m of opts.matches) {
+        await this.q().run(
+          `insert into screening_matches
+             (id, tenant_id, run_id, list_source, matched_name, matched_reference,
+              match_kind, score, disposition, created_at)
+           values (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)`,
+          [newId(), opts.tenantId, id, m.listSource, m.matchedName, m.matchedReference,
+            m.matchKind, m.score, now],
+        );
+      }
+      return { id, matchesFound: opts.matches.length };
+    });
+  }
+
+  async getScreeningRun(tenantId: string, runId: string) {
+    const row = await this.q().get<Row>(
+      `select id, client_id, subject_kind, subject_id, status from screening_runs
+        where tenant_id = ? and id = ?`, [tenantId, runId]);
+    return row ? {
+      id: String(row.id), clientId: String(row.client_id),
+      subjectKind: String(row.subject_kind), subjectId: String(row.subject_id),
+      status: String(row.status),
+    } : null;
+  }
+
+  /** The decision about one hit. The database refuses a second one on the same row. */
+  async dispositionScreeningMatch(opts: {
+    tenantId: string; matchId: string; disposition: string;
+    reason: string; membershipId: string;
+  }): Promise<number> {
+    const now = new Date().toISOString();
+    const r = await this.q().run(
+      `update screening_matches
+          set disposition = ?, disposition_reason = ?, disposition_by_membership_id = ?,
+              disposition_at = ?
+        where id = ? and tenant_id = ? and disposition = 'open'`,
+      [opts.disposition, opts.reason, opts.membershipId, now, opts.matchId, opts.tenantId],
+    );
+    return Number(r.changes ?? 0);
+  }
+
+  async listRiskCountries(tenantId: string, onDate?: string) {
+    const asOf = onDate ?? new Date().toISOString().slice(0, 10);
+    const rows = await this.q().all<Row>(
+      `select id, country_code, country_name, country_name_ar, list_source, risk_level,
+              effective_from, effective_to, note
+         from aml_risk_countries
+        where tenant_id = ? and effective_from <= ?
+          and (effective_to is null or effective_to >= ?)
+        order by risk_level desc, country_code`,
+      [tenantId, asOf, asOf],
+    );
+    return (rows ?? []).map((r) => ({
+      id: String(r.id), countryCode: String(r.country_code), countryName: String(r.country_name),
+      countryNameAr: r.country_name_ar ?? null, listSource: String(r.list_source),
+      riskLevel: String(r.risk_level), effectiveFrom: r.effective_from,
+      effectiveTo: r.effective_to ?? null, note: r.note ?? null,
+    }));
+  }
+
+  async upsertRiskCountry(opts: {
+    tenantId: string; id: string | null; countryCode: string; countryName: string;
+    countryNameAr: string | null; listSource: string; riskLevel: string;
+    effectiveFrom: string; note: string | null; membershipId: string | null;
+  }): Promise<string> {
+    const now = new Date().toISOString();
+    if (opts.id) {
+      await this.q().run(
+        `update aml_risk_countries
+            set country_name = ?, country_name_ar = ?, risk_level = ?, note = ?, updated_at = ?
+          where id = ? and tenant_id = ?`,
+        [opts.countryName, opts.countryNameAr, opts.riskLevel, opts.note, now, opts.id, opts.tenantId],
+      );
+      return opts.id;
+    }
+    const id = newId();
+    await this.q().run(
+      `insert into aml_risk_countries
+         (id, tenant_id, country_code, country_name, country_name_ar, list_source, risk_level,
+          effective_from, effective_to, note, created_by_membership_id, created_at, updated_at)
+       values (?, ?, ?, ?, ?, ?, ?, ?, null, ?, ?, ?, ?)`,
+      [id, opts.tenantId, opts.countryCode, opts.countryName, opts.countryNameAr,
+        opts.listSource, opts.riskLevel, opts.effectiveFrom, opts.note, opts.membershipId, now, now],
+    );
+    return id;
+  }
+
+  async listStrReports(tenantId: string, filters: { status?: string; clientId?: string } = {}) {
+    const where = ['r.tenant_id = ?'];
+    const params: Param[] = [tenantId];
+    if (filters.status) { where.push('r.status = ?'); params.push(filters.status); }
+    if (filters.clientId) { where.push('r.client_id = ?'); params.push(filters.clientId); }
+    const rows = await this.q().all<Row>(
+      `select r.id, r.report_number, r.subject_kind, r.subject_name, r.client_id, r.matter_id,
+              r.grounds, r.status, r.amount_sar, r.currency, r.prepared_at, r.filed_due_at,
+              r.filed_at, r.fiu_reference, r.fiu_responded_at, r.closure_reason,
+              c.name as client_name, m.matter_number
+         from str_reports r
+         left join clients c on c.id = r.client_id
+         left join matters m on m.id = r.matter_id
+        where ${where.join(' and ')}
+        order by case when r.status = 'draft' then 0 else 1 end, r.filed_due_at desc nulls last`,
+      params,
+    );
+    return (rows ?? []).map((r) => ({
+      id: String(r.id), reportNumber: String(r.report_number),
+      subjectKind: String(r.subject_kind), subjectName: strOrNull(r.subject_name),
+      clientId: strOrNull(r.client_id), clientName: strOrNull(r.client_name),
+      matterId: strOrNull(r.matter_id), matterNumber: strOrNull(r.matter_number),
+      grounds: jsonArrayColumn(r.grounds), status: String(r.status),
+      amountSar: r.amount_sar === null ? null : toNumber(r.amount_sar),
+      currency: String(r.currency),
+      preparedAt: strOrNull(r.prepared_at), filedDueAt: strOrNull(r.filed_due_at),
+      filedAt: strOrNull(r.filed_at), fiuReference: strOrNull(r.fiu_reference),
+      fiuRespondedAt: strOrNull(r.fiu_responded_at), closureReason: strOrNull(r.closure_reason),
+    }));
+  }
+
+  async getStrReport(tenantId: string, id: string) {
+    const row = await this.q().get<Row>(
+      `select * from str_reports where tenant_id = ? and id = ?`, [tenantId, id]);
+    return row ? {
+      id: String(row.id), reportNumber: String(row.report_number),
+      subjectKind: String(row.subject_kind), subjectId: strOrNull(row.subject_id),
+      subjectName: strOrNull(row.subject_name), clientId: strOrNull(row.client_id),
+      matterId: strOrNull(row.matter_id), grounds: jsonArrayColumn(row.grounds),
+      narrativeAr: String(row.narrative_ar), narrativeEn: strOrNull(row.narrative_en),
+      amountSar: row.amount_sar === null ? null : toNumber(row.amount_sar),
+      currency: String(row.currency), transactionReference: strOrNull(row.transaction_reference),
+      transactionAt: strOrNull(row.transaction_at), status: String(row.status),
+      preparedAt: strOrNull(row.prepared_at), reviewedAt: strOrNull(row.reviewed_at),
+      filedAt: strOrNull(row.filed_at), filedDueAt: strOrNull(row.filed_due_at),
+      fiuReference: strOrNull(row.fiu_reference), fiuResponse: strOrNull(row.fiu_response),
+      fiuRespondedAt: strOrNull(row.fiu_responded_at),
+      tippingOffAcknowledgedAt: strOrNull(row.tipping_off_acknowledged_at),
+      closureReason: strOrNull(row.closure_reason),
+    } : null;
+  }
+
+  /**
+   * A new report, in draft.
+   *
+   * `prepared_at` is set here rather than left to the column default, because the
+   * three-working-day clock runs from when the firm formed the suspicion — and a draft
+   * that acquired its deadline only when somebody remembered to file it would have a
+   * clock that started late. The database sets `filed_due_at` from it, in both dialects:
+   * in Postgres by trigger, and here by the same arithmetic the domain layer exports.
+   */
+  async createStrReport(opts: {
+    tenantId: string; reportNumber: string; subjectKind: string; subjectId: string | null;
+    subjectName: string | null; clientId: string | null; matterId: string | null;
+    grounds: string[]; narrativeAr: string; narrativeEn: string | null;
+    amountSar: number | null; transactionReference: string | null;
+    transactionAt: string | null; membershipId: string | null;
+    preparedAt: Date; dueAt: string;
+  }): Promise<string> {
+    const id = newId();
+    const now = new Date().toISOString();
+    await this.q().run(
+      `insert into str_reports
+         (id, tenant_id, report_number, subject_kind, subject_id, subject_name, client_id,
+          matter_id, grounds, narrative_ar, narrative_en, amount_sar, currency,
+          transaction_reference, transaction_at, status, prepared_by_membership_id,
+          prepared_at, filed_due_at, created_by_membership_id, created_at, updated_at)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SAR', ?, ?, 'draft', ?, ?, ?, ?, ?, ?)`,
+      [id, opts.tenantId, opts.reportNumber, opts.subjectKind, opts.subjectId,
+        opts.subjectName, opts.clientId, opts.matterId, JSON.stringify(opts.grounds),
+        opts.narrativeAr, opts.narrativeEn, opts.amountSar, opts.transactionReference,
+        opts.transactionAt, opts.membershipId, opts.preparedAt.toISOString(),
+        opts.dueAt, opts.membershipId, now, now],
+    );
+    return id;
+  }
+
+  /** A draft may be revised. A filed report may not — the database refuses it. */
+  async updateStrReport(opts: {
+    tenantId: string; id: string;
+    fields: {
+      grounds?: string[]; narrativeAr?: string; narrativeEn?: string | null;
+      amountSar?: number | null; transactionReference?: string | null;
+      transactionAt?: string | null; preparedAt?: Date; dueAt?: string;
+    };
+    membershipId: string | null;
+  }): Promise<void> {
+    const f = opts.fields;
+    const now = new Date().toISOString();
+    const sets: string[] = [];
+    const params: Param[] = [];
+    const put = (col: string, value: Param) => { sets.push(`${col} = ?`); params.push(value); };
+    if (f.grounds) put('grounds', JSON.stringify(f.grounds));
+    if (f.narrativeAr !== undefined) put('narrative_ar', f.narrativeAr);
+    if (f.narrativeEn !== undefined) put('narrative_en', f.narrativeEn);
+    if (f.amountSar !== undefined) put('amount_sar', f.amountSar);
+    if (f.transactionReference !== undefined) put('transaction_reference', f.transactionReference);
+    if (f.transactionAt !== undefined) put('transaction_at', f.transactionAt);
+    if (f.preparedAt) { put('prepared_at', f.preparedAt.toISOString()); put('filed_due_at', f.dueAt ?? null); }
+    if (sets.length === 0) return;
+    put('updated_at', now);
+    await this.q().run(
+      `update str_reports set ${sets.join(', ')} where id = ? and tenant_id = ?`,
+      [...params, opts.id, opts.tenantId],
+    );
+  }
+
+  /**
+   * The decision to file, and the filing.
+   *
+   * SEPARATE FROM `fileStrReport` BECAUSE THEY ARE DIFFERENT ACTS BY DIFFERENT PEOPLE in
+   * this firm: the compliance officer reviews what the analyst wrote, and the record of
+   * that review is the name the schema demands before a report may reach `filed`.
+   */
+  async reviewStrReport(opts: {
+    tenantId: string; id: string; membershipId: string;
+  }): Promise<number> {
+    const now = new Date().toISOString();
+    const r = await this.q().run(
+      `update str_reports
+          set status = 'pending_review', reviewed_by_membership_id = ?, reviewed_at = ?, updated_at = ?
+        where id = ? and tenant_id = ? and status = 'draft'`,
+      [opts.membershipId, now, now, opts.id, opts.tenantId],
+    );
+    return Number(r.changes ?? 0);
+  }
+
+  async fileStrReport(opts: {
+    tenantId: string; id: string; membershipId: string; fiuReference: string;
+    tippingOffAcknowledged: boolean;
+  }): Promise<number> {
+    const now = new Date().toISOString();
+    const r = await this.q().run(
+      `update str_reports
+          set status = 'filed', filed_by_membership_id = ?, filed_at = ?, fiu_reference = ?,
+              tipping_off_acknowledged_at = ?, tipping_off_acknowledged_by_membership_id = ?,
+              updated_at = ?
+        where id = ? and tenant_id = ? and status = 'pending_review'`,
+      [opts.membershipId, now, opts.fiuReference,
+        opts.tippingOffAcknowledged ? now : null,
+        opts.tippingOffAcknowledged ? opts.membershipId : null,
+        now, opts.id, opts.tenantId],
+    );
+    return Number(r.changes ?? 0);
+  }
+
+  /** What the authority answered. The only part of a filed report that may still change. */
+  async recordFiuResponse(opts: {
+    tenantId: string; id: string; status: string; response: string | null;
+  }): Promise<number> {
+    const now = new Date().toISOString();
+    const r = await this.q().run(
+      `update str_reports
+          set status = ?, fiu_response = ?, fiu_responded_at = ?, updated_at = ?
+        where id = ? and tenant_id = ? and status = 'filed'`,
+      [opts.status, opts.response, now, now, opts.id, opts.tenantId],
+    );
+    return Number(r.changes ?? 0);
+  }
+
+  /**
+   * The queue: every client whose record needs attention, and why.
+   *
+   * ONE QUERY, BECAUSE THE SCREEN HAS TO ANSWER THE SAME QUESTION THE GATE DOES. A list
+   * assembled in the browser from three endpoints is a list that will disagree with the
+   * gate on the day it matters; this one is computed from the same facts.
+   */
+  async dueDiligenceQueue(tenantId: string) {
+    const rows = await this.q().all<Row>(
+      `select c.id as client_id, c.name as client_name, c.client_type,
+              d.id as dd_id, d.status, d.cdd_level, d.risk_rating, d.pep_status,
+              d.review_due_at, d.completed_at,
+              (select count(*) from beneficial_owners bo
+                where bo.dd_id = d.id and bo.verified_at is not null
+                  and bo.owner_kind = 'natural_person' and bo.control_basis = 'ownership') as owners_counted,
+              coalesce((select sum(bo.ownership_pct) from beneficial_owners bo
+                         where bo.dd_id = d.id and bo.verified_at is not null
+                           and bo.owner_kind = 'natural_person' and bo.control_basis = 'ownership'), 0) as owners_pct,
+              (select count(*) from beneficial_owners bo
+                where bo.dd_id = d.id and bo.control_basis <> 'ownership' and bo.verified_at is not null) as control_rights,
+              (select count(*) from screening_matches m
+                 join screening_runs r on r.id = m.run_id
+                where r.client_id = c.id and m.disposition = 'open') as open_matches,
+              (select count(*) from screening_matches m
+                 join screening_runs r on r.id = m.run_id
+                where r.client_id = c.id and m.disposition = 'true_match') as confirmed_matches,
+              (select count(*) from screening_runs r
+                where r.client_id = c.id and r.status = 'failed') as failed_runs,
+              (select count(*) from screening_runs r
+                where r.client_id = c.id and r.status <> 'failed') as usable_runs
+         from clients c
+         left join client_due_diligence d
+           on d.client_id = c.id and d.tenant_id = c.tenant_id and d.superseded_by is null
+        where c.tenant_id = ? and c.status <> 'archived'
+        order by c.name`,
+      [tenantId],
+    );
+    return (rows ?? []).map((r) => {
+      const ownersPct = toNumber(r.owners_pct);
+      const controlRights = Number(r.control_rights);
+      const isOrganization = String(r.client_type) !== 'individual';
+      const ownershipCovered = !isOrganization || ownersPct >= 25 || controlRights > 0;
+      const status = r.status === null ? 'not_started' : String(r.status);
+      const failure: string[] = [];
+      if (r.dd_id === null) failure.push('cdd_missing');
+      else if (status === 'unable_to_complete') failure.push('cdd_unable_to_complete');
+      else if (status !== 'complete') failure.push('cdd_incomplete');
+      else {
+        if (String(r.cdd_level) === 'enhanced') failure.push('senior_approval_required');
+        if (r.pep_status && String(r.pep_status) !== 'not_pep'
+            && String(r.cdd_level) !== 'enhanced') failure.push('senior_approval_required');
+        if (r.review_due_at && String(r.review_due_at) < new Date().toISOString().slice(0, 10)) {
+          failure.push('cdd_review_overdue');
+        }
+        if (!ownershipCovered) failure.push('cdd_beneficial_owner_missing');
+        if (Number(r.confirmed_matches) > 0) failure.push('sanctions_match');
+        else if (Number(r.open_matches) > 0) failure.push('screening_unresolved');
+        else if (Number(r.failed_runs) > 0 && Number(r.usable_runs) === 0) failure.push('screening_incomplete');
+        else if (Number(r.usable_runs) === 0) failure.push('screening_incomplete');
+      }
+      return {
+        clientId: String(r.client_id), clientName: String(r.client_name),
+        clientType: String(r.client_type), ddId: r.dd_id ?? null, status,
+        level: r.cdd_level ?? null, riskRating: r.risk_rating ?? null,
+        pepStatus: r.pep_status ?? null, reviewDueAt: r.review_due_at ?? null,
+        ownershipPct: ownersPct, controlRights, openMatches: Number(r.open_matches),
+        confirmedMatches: Number(r.confirmed_matches), failedRuns: Number(r.failed_runs),
+        allowed: failure.length === 0, blockers: [...new Set(failure)],
+      };
+    });
+  }
+
+  /** The numbers a compliance page opens with. */
+  async dueDiligenceCensus(tenantId: string) {
+    const row = await this.q().get<Row>(
+      `select
+         (select count(*) from clients where tenant_id = ? and status <> 'archived') as clients,
+         (select count(*) from client_due_diligence
+           where tenant_id = ? and superseded_by is null and status = 'complete') as complete,
+         (select count(*) from client_due_diligence
+           where tenant_id = ? and superseded_by is null and status = 'unable_to_complete') as unable,
+         (select count(*) from clients c
+           where c.tenant_id = ? and c.status <> 'archived'
+             and not exists (select 1 from client_due_diligence d
+                              where d.client_id = c.id and d.superseded_by is null)) as not_started,
+         (select count(*) from client_due_diligence
+           where tenant_id = ? and superseded_by is null and review_due_at is not null
+             and review_due_at < ?) as review_overdue,
+         (select count(*) from screening_matches m join screening_runs r on r.id = m.run_id
+           where r.tenant_id = ? and m.disposition = 'open') as open_matches,
+         (select count(*) from screening_runs where tenant_id = ? and status = 'failed') as failed_runs,
+         (select count(*) from str_reports where tenant_id = ? and status in ('draft','pending_review')) as reports_open,
+         (select count(*) from str_reports where tenant_id = ? and status = 'filed') as reports_filed,
+         (select count(*) from str_reports
+           where tenant_id = ? and status in ('draft','pending_review')
+             and filed_due_at is not null and filed_due_at < ?) as reports_late,
+         (select count(*) from matters m
+           where m.tenant_id = ? and m.internal_status = 'active'
+             and not exists (select 1 from client_due_diligence d
+                              where d.client_id = m.client_id and d.superseded_by is null
+                                and d.status = 'complete')) as active_matters_unidentified`,
+      [tenantId, tenantId, tenantId, tenantId, tenantId, new Date().toISOString(),
+        tenantId, tenantId, tenantId, tenantId, tenantId, new Date().toISOString(), tenantId],
+    );
+    const n = (v: unknown) => Number(v ?? 0);
+    return {
+      clients: n(row?.clients), complete: n(row?.complete), unable: n(row?.unable),
+      notStarted: n(row?.not_started), reviewOverdue: n(row?.review_overdue),
+      openMatches: n(row?.open_matches), failedRuns: n(row?.failed_runs),
+      reportsOpen: n(row?.reports_open), reportsFiled: n(row?.reports_filed),
+      reportsLate: n(row?.reports_late),
+      activeMattersUnidentified: n(row?.active_matters_unidentified),
+    };
+  }
+
 }
 
 // ============================================================================
+
+
+
 // MAPPERS
 // ============================================================================
 

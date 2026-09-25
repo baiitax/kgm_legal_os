@@ -6,7 +6,9 @@ import type {
   Db, Param, Queryable, RequestContext, Row, RunResult, Scope,
 } from './types.js';
 import { SQLITE_SCHEMA } from './schema.sqlite.js';
-import { FIRM_RBAC_SCHEMA, FISCAL_TRUST_BILLING_SCHEMA } from './schema.firm.sqlite.js';
+import { FIRM_RBAC_SCHEMA, FISCAL_TRUST_BILLING_SCHEMA,
+  CLIENT_DUE_DILIGENCE_SCHEMA,
+} from './schema.firm.sqlite.js';
 
 /**
  * SQLite driver (demo / development / test).
@@ -77,6 +79,12 @@ export class SqliteDb implements Db {
       `expenses` references `documents`.
     */
     this.db.exec(FISCAL_TRUST_BILLING_SCHEMA);
+    /*
+      P0.3 · client due diligence and the AML gates. A fourth literal, and it must run
+      after the third: `beneficial_owners` and `screening_runs` reference
+      `client_due_diligence`, and the screening gate on `matters` reads all three.
+    */
+    this.db.exec(CLIENT_DUE_DILIGENCE_SCHEMA);
     this.ensureColumns();
   }
 

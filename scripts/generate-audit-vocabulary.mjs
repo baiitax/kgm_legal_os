@@ -24,7 +24,7 @@
  * `--check` is the one to wire into CI: it fails when the migration on disk does not
  * match the union, which is the moment somebody edited one of the two lists by hand.
  */
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -139,9 +139,21 @@ function main() {
   if (check) {
     /* The newest generated migration is the one being verified: it is the one that will
        be applied, and it is the one that goes stale when the union grows. */
-    const candidates = existsSync(MIGRATIONS)
-      ? readFileSync(join(MIGRATIONS, '0037_audit_vocabulary_p02.sql'), 'utf8')
+    /*
+      THE NEWEST GENERATED MIGRATION, found rather than named. This line hardcoded
+      `0037_audit_vocabulary_p02.sql`, which was correct until the next phase added a
+      vocabulary of its own: the checker then compared the union against a file that had
+      been superseded and reported eighteen actions missing from a list that did not need
+      them. A checker that has to be edited every time the thing it checks advances is a
+      checker that will one day be edited wrongly.
+    */
+    const newest = existsSync(MIGRATIONS)
+      ? readdirSync(MIGRATIONS)
+        .filter((f) => /^\d{4}_audit_vocabulary.*\.sql$/.test(f))
+        .sort()
+        .pop() ?? null
       : null;
+    const candidates = newest ? readFileSync(join(MIGRATIONS, newest), 'utf8') : null;
     if (!candidates) {
       console.error('--check: no generated migration to compare against');
       process.exit(1);

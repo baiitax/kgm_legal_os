@@ -351,6 +351,141 @@ const SERVER_WRITES: Array<{
       'total_amount_sar', 'vat_category', 'receipt_document_id', 'reimbursable', 'invoice_id',
       'status', 'approved_by_user_id', 'approved_at', 'rejection_reason', 'created_at', 'updated_at'],
   },
+  /*
+    ── P0.3 · CLIENT DUE DILIGENCE ───────────────────────────────────────────────
+
+    Every statement the repository issues against the six new tables, with the columns it
+    writes and the columns it only reads. This list is the reason 0040's grants are not a
+    guess: the check compares each column against the privileges the migration actually
+    granted, and a column named in a statement with no privilege is how the eligibility
+    refusal became a 500 in 0027.
+  */
+  {
+    table: 'client_due_diligence', command: 'INSERT',
+    where: 'FirmRepo.openDueDiligence (first version, and each review)',
+    columns: ['id', 'tenant_id', 'client_id', 'party_id', 'version', 'cdd_level', 'status',
+      'risk_reasons', 'created_by_membership_id', 'created_at', 'updated_at'],
+  },
+  {
+    table: 'client_due_diligence', command: 'UPDATE',
+    where: 'FirmRepo.updateDueDiligence (allow-listed fields, including the derived rating)',
+    // The SET list is built from an allow-list, so the union of everything it may set is
+    // what has to be granted — under-granting here is invisible until somebody edits a
+    // field the draft phase never touched.
+    columns: ['legal_name', 'legal_name_ar', 'date_of_birth', 'nationality',
+      'residence_country', 'address', 'id_type', 'id_number_hash', 'id_number_masked',
+      'id_issued_at', 'id_expires_at', 'cr_number', 'cr_issued_at', 'incorporation_country',
+      'business_activity', 'ownership_structure', 'source_of_funds', 'source_of_wealth',
+      'purpose', 'expected_annual_volume_sar', 'pep_status', 'pep_details',
+      'verification_method', 'verification_source', 'verified_at', 'risk_rating',
+      'risk_reasons', 'risk_assessed_at', 'review_due_at', 'notes', 'updated_at'],
+    readColumns: ['id', 'tenant_id', 'status'],
+  },
+  {
+    table: 'client_due_diligence', command: 'UPDATE',
+    where: 'FirmRepo.completeDueDiligence (status, completion and the reviewer)',
+    columns: ['status', 'completed_at', 'completed_by_membership_id', 'last_reviewed_at',
+      'updated_at'],
+    readColumns: ['id', 'tenant_id'],
+  },
+  {
+    table: 'client_due_diligence', command: 'UPDATE',
+    where: 'FirmRepo.completeDueDiligence (senior approval, when the level requires one)',
+    columns: ['senior_approved_by_membership_id', 'senior_approved_at',
+      'senior_approval_note', 'updated_at'],
+    readColumns: ['id', 'tenant_id'],
+  },
+  {
+    table: 'client_due_diligence', command: 'UPDATE',
+    where: 'FirmRepo.recordUnableToComplete (the manual prohibition)',
+    columns: ['status', 'unable_reason', 'notes', 'completed_at',
+      'completed_by_membership_id', 'updated_at'],
+    readColumns: ['id', 'tenant_id'],
+  },
+  {
+    table: 'client_due_diligence', command: 'UPDATE',
+    where: 'FirmRepo.setReviewDue (the next review, derived from the rating)',
+    columns: ['review_due_at', 'updated_at'], readColumns: ['id', 'tenant_id'],
+  },
+  {
+    table: 'client_due_diligence', command: 'UPDATE',
+    where: 'FirmRepo.openDueDiligence (supersede the previous version)',
+    columns: ['superseded_by', 'superseded_at', 'updated_at'],
+    readColumns: ['id', 'tenant_id', 'superseded_by'],
+  },
+  {
+    table: 'beneficial_owners', command: 'INSERT', where: 'FirmRepo.upsertBeneficialOwner (new)',
+    columns: ['id', 'tenant_id', 'dd_id', 'client_id', 'party_id', 'owner_kind', 'full_name',
+      'full_name_ar', 'date_of_birth', 'nationality', 'residence_country', 'address', 'id_type',
+      'id_number_hash', 'id_number_masked', 'cr_number', 'ownership_pct', 'control_basis',
+      'control_description', 'pep_status', 'is_designated', 'source', 'verification_method',
+      'verified_at', 'verified_by_membership_id', 'notes', 'created_at', 'updated_at'],
+  },
+  {
+    table: 'beneficial_owners', command: 'UPDATE',
+    where: 'FirmRepo.upsertBeneficialOwner (correcting a recorded owner)',
+    columns: ['owner_kind', 'full_name', 'full_name_ar', 'date_of_birth', 'nationality',
+      'residence_country', 'address', 'id_type', 'id_number_hash', 'id_number_masked',
+      'cr_number', 'ownership_pct', 'control_basis', 'control_description', 'pep_status',
+      'is_designated', 'source', 'verification_method', 'verified_at',
+      'verified_by_membership_id', 'notes', 'updated_at'],
+    readColumns: ['id', 'tenant_id', 'dd_id', 'client_id'],
+  },
+  {
+    table: 'screening_runs', command: 'INSERT', where: 'FirmRepo.recordScreeningRun',
+    columns: ['id', 'tenant_id', 'dd_id', 'client_id', 'subject_kind', 'subject_id',
+      'subject_name', 'list_sets', 'list_as_of', 'provider', 'provider_reference', 'status',
+      'matches_found', 'failure_reason', 'run_at', 'run_by_membership_id', 'note', 'created_at'],
+  },
+  {
+    table: 'screening_matches', command: 'INSERT',
+    where: 'FirmRepo.recordScreeningRun (the hits it returned)',
+    columns: ['id', 'tenant_id', 'run_id', 'list_source', 'matched_name', 'matched_reference',
+      'match_kind', 'score', 'disposition', 'created_at'],
+  },
+  {
+    table: 'screening_matches', command: 'UPDATE',
+    where: 'FirmRepo.dispositionScreeningMatch (false positive, true match, escalation)',
+    /*
+      NO `updated_at`, and the check is what settled it. The table has none — a match is
+      created and then decided once, and `already_dispositioned` refuses a second answer,
+      so an `updated_at` here would be a second name for `disposition_at`. It was in this
+      list because most of the P0.3 tables have one, which is exactly the kind of listing
+      by resemblance the column check is for.
+    */
+    columns: ['disposition', 'disposition_reason', 'disposition_by_membership_id',
+      'disposition_at'],
+    readColumns: ['id', 'tenant_id', 'disposition'],
+  },
+  {
+    table: 'aml_risk_countries', command: 'INSERT', where: 'FirmRepo.upsertRiskCountry (new)',
+    columns: ['id', 'tenant_id', 'country_code', 'country_name', 'country_name_ar',
+      'list_source', 'risk_level', 'effective_from', 'effective_to', 'note',
+      'created_by_membership_id', 'created_at', 'updated_at'],
+  },
+  {
+    table: 'aml_risk_countries', command: 'UPDATE',
+    where: 'FirmRepo.upsertRiskCountry (a listing changes level)',
+    columns: ['country_name', 'country_name_ar', 'risk_level', 'note', 'updated_at'],
+    readColumns: ['id', 'tenant_id'],
+  },
+  {
+    table: 'str_reports', command: 'INSERT', where: 'FirmRepo.createStrReport',
+    columns: ['id', 'tenant_id', 'report_number', 'subject_kind', 'subject_id', 'subject_name',
+      'client_id', 'matter_id', 'grounds', 'narrative_ar', 'narrative_en', 'amount_sar',
+      'currency', 'transaction_reference', 'transaction_at', 'status',
+      'prepared_by_membership_id', 'prepared_at', 'filed_due_at', 'created_by_membership_id',
+      'created_at', 'updated_at'],
+  },
+  {
+    table: 'str_reports', command: 'UPDATE',
+    where: 'FirmRepo.updateStrReport / reviewStrReport / fileStrReport / recordFiuResponse',
+    columns: ['status', 'reviewed_by_membership_id', 'reviewed_at', 'filed_by_membership_id',
+      'filed_at', 'fiu_reference', 'tipping_off_acknowledged_at',
+      'tipping_off_acknowledged_by_membership_id', 'fiu_response', 'fiu_responded_at',
+      'narrative_ar', 'narrative_en', 'grounds', 'amount_sar', 'updated_at'],
+    readColumns: ['id', 'tenant_id', 'status'],
+  },
   {
     table: 'expenses', command: 'UPDATE', where: 'FirmRepo.decideExpense',
     columns: ['status', 'approved_by_user_id', 'approved_at', 'rejection_reason', 'updated_at'],

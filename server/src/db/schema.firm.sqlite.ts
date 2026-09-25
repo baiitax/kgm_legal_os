@@ -1399,3 +1399,581 @@ create trigger if not exists expense_billed_figures_guard
   end;
 
 `;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+export const CLIENT_DUE_DILIGENCE_SCHEMA = `
+-- ═══════════════════════════════════════════════════════════════════════════════
+--  P0.3 · CLIENT DUE DILIGENCE AND THE AML GATES — the SQLite mirror of 0040.
+--
+--  Column for column with the migration, so 'scripts/verify/schema-parity.ts'
+--  compares them and fails when they drift. What cannot be mirrored is stated
+--  where it lives rather than left for somebody to discover:
+--
+--    · ROW-LEVEL SECURITY does not exist here. The authorization enforcement point
+--      for the demo is server/src/domain/permissions.ts, the same resolver
+--      production uses behind its policies.
+--    · COLUMN GRANTS do not exist here either. The Postgres grants in 0040 are the
+--      specification, and the parity checker measures the server's statements
+--      against them.
+--    · UNICODE SCRIPTS CANNOT BE TESTED. The Arabic-narrative rule is enforced in
+--      'server/src/domain/aml.ts' — one implementation, both dialects — and by the
+--      Postgres trigger with a script range. This dialect can only say that the
+--      narrative contains something outside ASCII, and says so.
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+create table if not exists aml_risk_countries (
+  id                        text primary key,
+  tenant_id                 text not null references tenants(id),
+  country_code              text not null,
+  country_name              text not null,
+  country_name_ar           text,
+  list_source               text not null check (list_source in
+                              ('fatf_call_for_action','fatf_grey','un_sanctions','eu_consolidated',
+                               'sama_circular','internal')),
+  risk_level                text not null check (risk_level in ('high','prohibited')),
+  effective_from            text not null,
+  effective_to              text,
+  note                      text,
+  created_by_membership_id  text,
+  created_at                text not null,
+  updated_at                text not null,
+  check (effective_to is null or effective_to >= effective_from)
+);
+
+create unique index if not exists aml_risk_countries_key
+  on aml_risk_countries(tenant_id, country_code, list_source, effective_from);
+
+create table if not exists client_due_diligence (
+  id                               text primary key,
+  tenant_id                        text not null references tenants(id),
+  client_id                        text not null references clients(id),
+  party_id                         text,
+  version                          integer not null default 1 check (version >= 1),
+  cdd_level                        text not null default 'standard'
+                                     check (cdd_level in ('simplified','standard','enhanced')),
+  status                           text not null default 'not_started'
+                                     check (status in ('not_started','in_progress','complete',
+                                                       'unable_to_complete','expired')),
+  legal_name                       text,
+  legal_name_ar                    text,
+  date_of_birth                    text,
+  nationality                      text,
+  residence_country                text,
+  address                          text,
+  id_type                          text check (id_type in
+                                     ('national_id','iqama','passport','gcc_id','commercial_registration')),
+  id_number_hash                   text,
+  id_number_masked                 text,
+  id_issued_at                     text,
+  id_expires_at                    text,
+  cr_number                        text,
+  cr_issued_at                     text,
+  incorporation_country            text,
+  business_activity                text,
+  ownership_structure              text,
+  source_of_funds                  text,
+  source_of_wealth                 text,
+  purpose                          text,
+  expected_annual_volume_sar       real,
+  verification_method              text check (verification_method in
+                                     ('original_seen','certified_copy','electronic','relying_on_third_party')),
+  verification_source              text,
+  verified_by_membership_id        text,
+  verified_at                      text,
+  pep_status                       text check (pep_status in ('not_pep','pep','pep_family','pep_associate')),
+  pep_details                      text,
+  risk_rating                      text check (risk_rating in ('low','medium','high')),
+  -- JSON, serialised by the repository. Postgres uses jsonb for the same value.
+  risk_reasons                     text not null default '[]',
+  risk_assessed_at                 text,
+  senior_approved_by_membership_id text,
+  senior_approved_at               text,
+  senior_approval_note             text,
+  review_due_at                    text,
+  last_reviewed_at                 text,
+  completed_at                     text,
+  completed_by_membership_id       text,
+  unable_reason                    text,
+  notes                            text,
+  superseded_by                    text,
+  superseded_at                    text,
+  created_by_membership_id         text,
+  created_at                       text not null,
+  updated_at                       text not null,
+  check (status <> 'unable_to_complete'
+         or (unable_reason is not null and length(trim(unable_reason)) >= 10)),
+  check (status <> 'complete'
+         or (completed_at is not null and completed_by_membership_id is not null)),
+  check (cdd_level <> 'enhanced' or status <> 'complete'
+         or senior_approved_by_membership_id is not null),
+  check ((risk_rating is null) = (risk_assessed_at is null)),
+  check (id_expires_at is null or id_issued_at is null or id_expires_at > id_issued_at)
+);
+
+create unique index if not exists client_due_diligence_current_idx
+  on client_due_diligence(tenant_id, client_id) where superseded_by is null;
+create unique index if not exists client_due_diligence_version_idx
+  on client_due_diligence(tenant_id, client_id, version);
+
+create table if not exists beneficial_owners (
+  id                        text primary key,
+  tenant_id                 text not null references tenants(id),
+  dd_id                     text not null references client_due_diligence(id) on delete cascade,
+  client_id                 text not null references clients(id),
+  party_id                  text,
+  owner_kind                text not null check (owner_kind in ('natural_person','legal_person')),
+  full_name                 text not null,
+  full_name_ar              text,
+  date_of_birth             text,
+  nationality               text,
+  residence_country         text,
+  address                   text,
+  id_type                   text check (id_type in ('national_id','iqama','passport','gcc_id')),
+  id_number_hash            text,
+  id_number_masked          text,
+  cr_number                 text,
+  ownership_pct             real,
+  control_basis             text not null check (control_basis in
+                              ('ownership','voting_rights','senior_management','other')),
+  control_description       text,
+  pep_status                text check (pep_status in ('not_pep','pep','pep_family','pep_associate')),
+  is_designated             integer,
+  source                    text,
+  verification_method       text check (verification_method in
+                              ('original_seen','certified_copy','electronic','relying_on_third_party')),
+  verified_by_membership_id text,
+  verified_at               text,
+  notes                     text,
+  created_at                text not null,
+  updated_at                text not null,
+  check (ownership_pct is null or (ownership_pct >= 0 and ownership_pct <= 100)),
+  check (control_basis <> 'ownership' or (ownership_pct is not null and ownership_pct > 0)),
+  check (control_basis = 'ownership'
+         or (control_description is not null and length(trim(control_description)) >= 10)),
+  check (owner_kind <> 'natural_person' or (date_of_birth is not null and nationality is not null)),
+  check (owner_kind <> 'legal_person' or (cr_number is not null and length(trim(cr_number)) >= 4))
+);
+
+create table if not exists screening_runs (
+  id                   text primary key,
+  tenant_id            text not null references tenants(id),
+  dd_id                text references client_due_diligence(id) on delete cascade,
+  client_id            text not null references clients(id),
+  subject_kind         text not null check (subject_kind in
+                         ('client','party','beneficial_owner','staff')),
+  subject_id           text not null,
+  subject_name         text not null,
+  list_sets            text not null default '[]',
+  list_as_of           text,
+  provider             text not null check (provider in
+                         ('internal_register','manual_review','external_provider','regulator_feed')),
+  provider_reference   text,
+  status               text not null check (status in ('clear','potential_match','match','failed')),
+  matches_found        integer not null default 0 check (matches_found >= 0),
+  failure_reason       text,
+  run_at               text not null,
+  run_by_membership_id text,
+  note                 text,
+  created_at           text not null,
+  check (status <> 'failed'
+         or (failure_reason is not null and length(trim(failure_reason)) >= 5)),
+  check (status <> 'clear' or matches_found = 0),
+  check (status <> 'potential_match' or matches_found > 0),
+  check (status <> 'match' or matches_found > 0)
+);
+
+create index if not exists screening_runs_subject_idx
+  on screening_runs(tenant_id, subject_kind, subject_id, run_at desc);
+
+create table if not exists screening_matches (
+  id                           text primary key,
+  tenant_id                    text not null references tenants(id),
+  run_id                       text not null references screening_runs(id) on delete cascade,
+  list_source                  text not null,
+  matched_name                 text not null,
+  matched_reference            text,
+  match_kind                   text not null check (match_kind in
+                                 ('exact_name','fuzzy_name','national_id','alias','date_of_birth','address')),
+  score                        real,
+  disposition                  text not null default 'open' check (disposition in
+                                 ('open','false_positive','true_match','escalated')),
+  disposition_reason           text,
+  disposition_by_membership_id text,
+  disposition_at               text,
+  created_at                   text not null,
+  check (score is null or (score >= 0 and score <= 100)),
+  check (disposition = 'open' or (disposition_reason is not null
+                                  and length(trim(disposition_reason)) >= 10
+                                  and disposition_at is not null
+                                  and disposition_by_membership_id is not null)),
+  check (disposition <> 'open' or (disposition_reason is null and disposition_at is null))
+);
+
+create table if not exists str_reports (
+  id                                         text primary key,
+  tenant_id                                  text not null references tenants(id),
+  report_number                              text not null,
+  subject_kind                               text not null check (subject_kind in
+                                               ('client','party','beneficial_owner','staff','transaction')),
+  subject_id                                 text,
+  subject_name                               text,
+  client_id                                  text references clients(id),
+  matter_id                                  text references matters(id),
+  grounds                                    text not null default '[]',
+  narrative_ar                               text not null,
+  narrative_en                               text,
+  amount_sar                                 real,
+  currency                                   text not null default 'SAR',
+  transaction_reference                      text,
+  transaction_at                             text,
+  status                                     text not null default 'draft' check (status in
+                                               ('draft','pending_review','filed','acknowledged',
+                                                'rejected_by_fiu','withdrawn')),
+  prepared_by_membership_id                  text,
+  prepared_at                                text,
+  reviewed_by_membership_id                  text,
+  reviewed_at                                text,
+  filed_by_membership_id                     text,
+  filed_at                                   text,
+  filed_due_at                               text,
+  fiu_reference                              text,
+  fiu_response                               text,
+  fiu_responded_at                           text,
+  tipping_off_acknowledged_at                text,
+  tipping_off_acknowledged_by_membership_id  text,
+  closure_reason                             text,
+  closed_at                                  text,
+  created_by_membership_id                   text,
+  created_at                                 text not null,
+  updated_at                                 text not null,
+  unique (tenant_id, report_number),
+  check (amount_sar is null or amount_sar >= 0),
+  check (status not in ('filed','acknowledged','rejected_by_fiu')
+         or (filed_at is not null and filed_by_membership_id is not null
+             and fiu_reference is not null
+             and tipping_off_acknowledged_at is not null
+             and tipping_off_acknowledged_by_membership_id is not null)),
+  check (status <> 'acknowledged' or fiu_responded_at is not null),
+  check (status <> 'withdrawn' or (closure_reason is not null and closed_at is not null))
+);
+
+/*
+  ── THE DERIVED IDENTITY FLAG ────────────────────────────────────────────────
+  'clients.identity_verified' is not a field anybody types. The claim it makes —
+  that this client's identity has been verified — is refused unless a current
+  due-diligence record supports it, in the same terms in both dialects. Asserting
+  the NEGATIVE is always allowed: a false that should have been true is a gap, and
+  is visible as one; a true that should have been false is a lie the portal repeats
+  back to the client.
+*/
+create trigger if not exists clients_identity_derived_insert
+  before insert on clients
+  for each row when new.identity_verified = 1
+    and not exists (select 1 from client_due_diligence d
+                     where d.tenant_id = new.tenant_id and d.client_id = new.id
+                       and d.superseded_by is null and d.status = 'complete')
+  begin
+    select raise(ABORT, 'identity_verification_not_derived: clients.identity_verified follows from a complete due-diligence record and may not be asserted');
+  end;
+
+create trigger if not exists clients_identity_derived_update
+  before update on clients
+  for each row when new.identity_verified = 1
+    and not exists (select 1 from client_due_diligence d
+                     where d.tenant_id = new.tenant_id and d.client_id = new.id
+                       and d.superseded_by is null and d.status = 'complete')
+  begin
+    select raise(ABORT, 'identity_verification_not_derived: clients.identity_verified follows from a complete due-diligence record and may not be asserted');
+  end;
+
+/*
+  ── THE GATE ON ACCEPTING THE WORK ───────────────────────────────────────────
+
+  ONE TRIGGER, AND ITS CHECKS IN A DELIBERATE ORDER.
+
+  The obvious mirror of the Postgres function is one trigger per condition. It is
+  the wrong mirror: SQLite does not define the order in which several triggers on
+  the same event fire, so which refusal a person reads would be the database's
+  choice rather than the rule's. The conditions overlap by construction — a client
+  with no ownership record and no screening fails both — so the messages would
+  differ between two runs of the same test.
+
+  Statements inside ONE trigger body do run in order, and that gives exactly the
+  precedence the Postgres function states: the prohibition before the backlog, the
+  backlog before the arithmetic, the screening last because it is the one that
+  most often looks finished.
+
+  The gate guards the TRANSITION into 'active' and nothing else. Matters that
+  predate this phase are already sitting there for clients nobody identified, and a
+  blanket check would refuse the firm permission to touch its own files — the same
+  reasoning, and the same shape, as the conflict gate in 0029.
+*/
+create trigger if not exists matter_cdd_gate
+  before update on matters
+  for each row when new.internal_status = 'active' and old.internal_status <> 'active'
+  begin
+    /* (1) No record at all. */
+    select raise(ABORT, 'cdd_missing: no client due diligence has been recorded for this client')
+     where not exists (select 1 from client_due_diligence d
+                        where d.tenant_id = new.tenant_id and d.client_id = new.client_id
+                          and d.superseded_by is null);
+
+    /* (2) The prohibition the manual is clearest about, and it comes FIRST. */
+    select raise(ABORT, 'cdd_unable_to_complete: customer due diligence could not be completed for this client — the firm may not act (AML Law, M/20)')
+     where exists (select 1 from client_due_diligence d
+                    where d.tenant_id = new.tenant_id and d.client_id = new.client_id
+                      and d.superseded_by is null and d.status = 'unable_to_complete');
+
+    /* (3) A record that exists and has not been finished. */
+    select raise(ABORT, 'cdd_incomplete: this client''s due diligence is not complete — a matter may not be opened on an unidentified client')
+     where exists (select 1 from client_due_diligence d
+                    where d.tenant_id = new.tenant_id and d.client_id = new.client_id
+                      and d.superseded_by is null
+                      and d.status not in ('complete','unable_to_complete'));
+
+    /* (4) Enhanced due diligence with nobody named to accept the risk. */
+    select raise(ABORT, 'senior_approval_required: enhanced due diligence requires a named senior approver')
+     where exists (select 1 from client_due_diligence d
+                    where d.tenant_id = new.tenant_id and d.client_id = new.client_id
+                      and d.superseded_by is null and d.status = 'complete'
+                      and d.cdd_level = 'enhanced' and d.senior_approved_by_membership_id is null);
+
+    /*
+      (5) A PEP WHOSE PROCESS WAS NOT RAISED TO MEET THE DETERMINATION.
+
+      The manual does not prohibit acting for a politically exposed person; it requires
+      enhanced due diligence and senior approval before the firm does. So the refusal is
+      not "this client is a PEP" — it is that the determination was recorded and the
+      level was left where it was, which leaves the record claiming a completeness it
+      does not have.
+    */
+    select raise(ABORT, 'senior_approval_required: this client is a politically exposed person — due diligence must be enhanced and approved by senior management')
+     where exists (select 1 from client_due_diligence d
+                    where d.tenant_id = new.tenant_id and d.client_id = new.client_id
+                      and d.superseded_by is null and d.status = 'complete'
+                      and d.pep_status is not null and d.pep_status <> 'not_pep'
+                      and d.cdd_level <> 'enhanced');
+
+    /* (6) A review that has fallen due is a record nobody has looked at since. */
+    select raise(ABORT, 'cdd_review_overdue: this client''s due diligence is due for review — look before you act')
+     where exists (select 1 from client_due_diligence d
+                    where d.tenant_id = new.tenant_id and d.client_id = new.client_id
+                      and d.superseded_by is null and d.status = 'complete'
+                      and d.review_due_at is not null and d.review_due_at < date('now'));
+
+    /*
+      (7) The persons behind a legal person.
+
+      A COMPANY THAT OWNS ITSELF PASSES A NAIVE SUM AND FAILS THIS. The identified
+      percentage counts only VERIFIED NATURAL PERSONS — a chain ending in a holding
+      company contributes nothing, however large the number written beside it —
+      and a control right counts only when somebody has verified it.
+    */
+    select raise(ABORT, 'cdd_beneficial_owner_missing: the persons who control this client have not been identified to the 25% threshold, and no control right is recorded')
+     where (select client_type from clients where id = new.client_id) is not 'individual'
+       and exists (select 1 from client_due_diligence d
+                    where d.tenant_id = new.tenant_id and d.client_id = new.client_id
+                      and d.superseded_by is null and d.status = 'complete')
+       and not (
+         coalesce((select sum(bo.ownership_pct) from beneficial_owners bo
+                    join client_due_diligence d on d.id = bo.dd_id
+                   where d.tenant_id = new.tenant_id and d.client_id = new.client_id
+                     and d.superseded_by is null and bo.control_basis = 'ownership'
+                     and bo.owner_kind = 'natural_person' and bo.verified_at is not null), 0) >= 25
+         or exists (select 1 from beneficial_owners bo
+                     join client_due_diligence d on d.id = bo.dd_id
+                    where d.tenant_id = new.tenant_id and d.client_id = new.client_id
+                      and d.superseded_by is null and bo.control_basis <> 'ownership'
+                      and bo.verified_at is not null)
+       );
+
+    /*
+      (8) Every person in the relationship, screened, resolved and not designated.
+
+      A RUN THAT FAILED IS NOT A CLEARANCE, and an open hit is not a clearance
+      either — both leave the subject unscreened. A confirmed designation is the end
+      of the matter rather than a risk to weigh.
+    */
+    select raise(ABORT, 'screening_incomplete: a person in this relationship has an unresolved or failed screening')
+     where exists (
+       with subjects as (
+         select 'client' as kind, new.client_id as id
+         union all
+         select 'beneficial_owner', bo.id from beneficial_owners bo
+           join client_due_diligence d on d.id = bo.dd_id
+          where d.tenant_id = new.tenant_id and d.client_id = new.client_id
+            and d.superseded_by is null and bo.verified_at is not null
+            and (coalesce(bo.ownership_pct, 0) >= 25 or bo.control_basis <> 'ownership')
+       )
+       select 1 from subjects s
+        where not exists (select 1 from screening_runs r
+                           where r.tenant_id = new.tenant_id
+                             and r.subject_kind = s.kind and r.subject_id = s.id
+                             and r.status <> 'failed'
+                             and not exists (select 1 from screening_matches m
+                                              where m.run_id = r.id and m.disposition = 'open'))
+     );
+
+    select raise(ABORT, 'sanctions_match: a confirmed designation is recorded for a person in this relationship — the relationship may not be established')
+     where exists (
+       select 1 from screening_matches m join screening_runs r on r.id = m.run_id
+        where r.tenant_id = new.tenant_id and m.disposition = 'true_match'
+          and (r.subject_kind = 'client' and r.subject_id = new.client_id
+               or r.subject_kind = 'beneficial_owner'
+                  and r.subject_id in (select bo.id from beneficial_owners bo
+                                         join client_due_diligence d on d.id = bo.dd_id
+                                        where d.tenant_id = new.tenant_id
+                                          and d.client_id = new.client_id
+                                          and d.superseded_by is null))
+     );
+  end;
+
+/*
+  ── THE REPORT ───────────────────────────────────────────────────────────────
+  The due date is computed by the repository — one implementation of the working-day
+  arithmetic in server/src/domain/aml.ts, used by both dialects — and the database
+  refuses a report that arrives without one, so a draft can never be filed against a
+  clock nobody started.
+*/
+create trigger if not exists str_reports_due_date_required
+  before insert on str_reports
+  for each row when new.filed_due_at is null
+  begin
+    select raise(ABORT, 'str_due_date_missing: a report carries the working-day deadline computed when it was prepared');
+  end;
+
+create trigger if not exists str_reports_narrative_guard
+  before insert on str_reports
+  for each row when length(trim(new.narrative_ar)) < 40
+  begin
+    select raise(ABORT, 'str_narrative_too_short: a report is a narrative, not a label');
+  end;
+
+/*
+  AND THE NARRATIVE IS NOT ASCII. SQLite cannot test a Unicode script class, so this is
+  the weak form of the rule: at least one character outside ASCII, which the shared
+  domain check ('containsArabic') and the Postgres trigger both make precise. Stated
+  rather than implied, because a rule that quietly differs between engines is how this
+  project has been wrong before.
+*/
+create trigger if not exists str_reports_narrative_script_guard
+  before insert on str_reports
+  for each row when length(hex(new.narrative_ar)) / 2 = length(new.narrative_ar)
+  begin
+    select raise(ABORT, 'str_narrative_not_arabic: the narrative of a report to SAFIU must be written in Arabic');
+  end;
+
+create trigger if not exists str_reports_filing_guard
+  before insert on str_reports
+  for each row when new.status in ('filed','acknowledged','rejected_by_fiu')
+    and (new.reviewed_by_membership_id is null or new.reviewed_at is null)
+  begin
+    select raise(ABORT, 'str_not_approved: a report is filed on the compliance officer''s decision, recorded by name');
+  end;
+
+create trigger if not exists str_reports_filed_immutable
+  before update on str_reports
+  for each row when old.status in ('filed','acknowledged','rejected_by_fiu')
+    and (new.narrative_ar is not old.narrative_ar
+      or new.grounds is not old.grounds
+      or new.subject_id is not old.subject_id
+      or new.subject_kind is not old.subject_kind
+      or new.client_id is not old.client_id
+      or new.amount_sar is not old.amount_sar
+      or new.transaction_reference is not old.transaction_reference
+      or new.report_number is not old.report_number
+      or new.filed_at is not old.filed_at
+      or new.filed_due_at is not old.filed_due_at)
+  begin
+    select raise(ABORT, 'str_filed_immutable: a filed report is the record of what was reported — correct it with a new report');
+  end;
+
+create trigger if not exists str_reports_filing_approved
+  before update on str_reports
+  for each row when new.status in ('filed','acknowledged','rejected_by_fiu')
+    and new.status is not old.status
+    and (new.reviewed_by_membership_id is null or new.reviewed_at is null)
+  begin
+    select raise(ABORT, 'str_not_approved: a report is filed on the compliance officer''s decision, recorded by name');
+  end;
+
+/*
+  ── A DISPOSITION IS FINAL ───────────────────────────────────────────────────
+  The decision about a match is what an inspection reads, so it is as fixed as the
+  finding it answers. A match may not be re-decided; a new screening is run instead.
+*/
+create trigger if not exists screening_matches_disposition_final
+  before update on screening_matches
+  for each row when old.disposition <> 'open' and new.disposition is not old.disposition
+  begin
+    select raise(ABORT, 'already_dispositioned: this match has been decided — run a new screening rather than re-deciding it');
+  end;
+
+create trigger if not exists screening_matches_reason_final
+  before update on screening_matches
+  for each row when old.disposition <> 'open'
+    and (new.disposition_reason is not old.disposition_reason
+      or new.disposition_by_membership_id is not old.disposition_by_membership_id)
+  begin
+    select raise(ABORT, 'already_dispositioned: the reason for a decision is as fixed as the decision');
+  end;
+
+/*
+  ═══════════════════════════════════════════════════════════════════════════════
+  RETENTION · THE RECORDS OF WHAT THE FIRM KNEW ARE KEPT FOR TEN YEARS
+  ═══════════════════════════════════════════════════════════════════════════════
+
+  Royal Decree M/20 requires a DNFBP to keep its customer due-diligence records, its
+  screening results and its reports for ten years. Until 0043 this system's answer to that
+  was an ABSENT PRIVILEGE — firm_api simply holds no DELETE on these tables — which is
+  half an answer. The other half is this guard, and both halves are needed: a privilege can
+  be granted by a later migration nobody thinks about, and a trigger can be dropped by a
+  superuser before an offboarding script runs in a hurry. Neither alone is the rule.
+
+  WHY NOTHING HERE MAY BE DELETED, STATED AS THE PRODUCT'S REASON. These rows are not
+  current state that a workflow corrects; they are statements about what the firm knew on a
+  date. A record corrected by deletion is a record nobody can rely on, and the obligations
+  attached to them — the review clock, the screening subject set, the ten-year retention —
+  are all read from the history rather than from the latest version.
+
+  A PURGE AFTER TEN YEARS IS AN OPERATOR ACTION, not an application feature: it means
+  disabling these guards deliberately, with the reason written down, and this refusal
+  message is what makes that a decision rather than an accident.
+*/
+create trigger if not exists client_due_diligence_retention
+  before delete on client_due_diligence
+  begin
+    select raise(ABORT, 'aml_record_retention: a due-diligence record is kept for ten years (AML Law M/20) — correct it with a new version, never by deletion');
+  end;
+
+create trigger if not exists beneficial_owners_retention
+  before delete on beneficial_owners
+  begin
+    select raise(ABORT, 'aml_record_retention: a beneficial owner is part of the identification record and is kept for ten years (AML Law M/20)');
+  end;
+
+create trigger if not exists screening_runs_retention
+  before delete on screening_runs
+  begin
+    select raise(ABORT, 'aml_record_retention: a screening is evidence of what was checked, and is kept for ten years (AML Law M/20)');
+  end;
+
+create trigger if not exists screening_matches_retention
+  before delete on screening_matches
+  begin
+    select raise(ABORT, 'aml_record_retention: a name hit and its disposition are kept for ten years (AML Law M/20)');
+  end;
+
+create trigger if not exists str_reports_retention
+  before delete on str_reports
+  begin
+    select raise(ABORT, 'aml_record_retention: a report to SAFIU is kept for ten years (AML Law M/20)');
+  end;
+
+create trigger if not exists aml_risk_countries_retention
+  before delete on aml_risk_countries
+  begin
+    select raise(ABORT, 'aml_record_retention: a jurisdiction risk listing is dated, not deleted — a risk assessment reads the list that was in force on the date it was made');
+  end;
+
+`;

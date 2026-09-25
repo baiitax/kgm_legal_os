@@ -42,6 +42,12 @@ import {
 } from '../domain/permissions.js';
 import { projectMatter, projectMatterList } from '../domain/classification.js';
 import {
+  UBO_THRESHOLD_PCT, REVIEW_MONTHS, assessCdd, activationOutcome, containsArabic, deriveRisk,
+  isThresholdOwner, ownershipCoverage, requirementsFor, reviewDueAt, screeningState,
+  screeningSubjects, strDueAt, strReadiness, STR_INDICATORS,
+  type CddFacts, type OwnerFacts, type ScreeningRunFacts, type ScreeningSubjectKind,
+} from '../domain/aml.js';
+import {
   GENESIS_PIH, buildInvoiceXml, buildQrPayload, invoiceHash, reconcileInvoice,
   reportingDeadline, supplyTimestamp,
 } from '../domain/zatca.js';
@@ -1263,6 +1269,29 @@ export function firmRouter(c: Container): Router {
       }, requestInfo(req, c.trustProxy));
       throw badRequest('conflict_gate',
         `Rule 11: this matter cannot leave conflict_check — ${state.reasons.join('; ')}`);
+    }
+
+    /*
+      ═══ THE CUSTOMER DUE DILIGENCE GATE · P0.3 ═══
+
+      The obligation is about the RELATIONSHIP, and this is the moment the relationship
+      begins: a matter does not become active for a client the firm has not identified.
+      Asked here for the same reason the conflict gate is — so the refusal arrives with
+      its reason, and so it is audited — and refused again by the database underneath,
+      which is what makes it a gate rather than a formality.
+
+      IT GUARDS THE TRANSITION INTO `active` ONLY. A matter may be opened at intake, put
+      through conflict check and reviewed while the client is still producing documents:
+      that is how a firm works, and a gate that blocked intake would only teach people to
+      create the matter elsewhere. What it may not do is become ACTIVE — the state in
+      which the firm acts — on an unidentified client.
+
+      A CLIENT WITH NO MATTER AT ALL IS NOT MENTIONED HERE. There is no relationship to
+      gate; the manual's prohibition bites when the firm acts, and the firm acts through
+      matters.
+    */
+    if (body.internalStatus === 'active' && from !== 'active') {
+      await assertCddAdmits(req, p, String(row.client_id), matterId);
     }
 
     await c.firm.tx(async () => {
@@ -3160,6 +3189,853 @@ export function firmRouter(c: Container): Router {
     }, requestInfo(req, c.trustProxy));
 
     ok(res, { id: invoiceId, writtenOff: invoice.outstanding, status: 'written_off', taxAdjusted: false });
+  }));
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+     P0.3 · CLIENT DUE DILIGENCE, SCREENING AND THE REPORT
+
+     WHERE THE GATE LIVES. The obligation is enforced in three places and each of
+     them answers a different question:
+
+       · the ROUTE refuses with a named code, so the person reading it learns which
+         field is missing (this file);
+       · the DOMAIN assessment (`assessCdd`) is what the route asks, and it is the
+         same function the queue on the screen uses — so the list and the gate cannot
+         disagree about who is admissible;
+       · the DATABASE refuses the transition into `active` whether or not the
+         application asked (0040 and its SQLite mirror). A last line of defence that
+         depends on the application being right is not one.
+
+     The last of those is why the test suite attacks the update directly with SQL as
+     well as through the API: the refusal has to hold against a caller who is not the
+     server.
+     ═════════════════════════════════════════════════════════════════════════════ */
+
+  /** Everything the assessment needs, assembled once, from the record. */
+  async function loadDdFacts(p: { tenantId: string }, clientId: string) {
+    const dd = await c.firm.getCurrentDueDiligence(p.tenantId, clientId);
+    const owners = dd ? await c.firm.listBeneficialOwners(p.tenantId, dd.id) : [];
+    const runs = await c.firm.listScreeningRuns(p.tenantId, clientId);
+    const client = await c.firm.getClientForTenant(p.tenantId, clientId);
+    if (!client) return null;
+
+    const ownerFacts: OwnerFacts[] = owners.map((o) => ({
+      fullName: o.fullName, ownerKind: o.ownerKind as OwnerFacts['ownerKind'],
+      ownershipPct: o.ownershipPct, controlBasis: o.controlBasis as OwnerFacts['controlBasis'],
+      nationality: o.nationality, residenceCountry: o.residenceCountry,
+      dateOfBirth: o.dateOfBirth, idNumberHash: null, isPep: o.pepStatus !== null && o.pepStatus !== 'not_pep',
+      verifiedAt: o.verifiedAt,
+    }));
+    const ownership = ownershipCoverage(ownerFacts);
+    /*
+      THE SUBJECTS ARE COMPUTED, NOT LISTED. `screeningSubjects` is the same function
+      the screen uses to say who still has to be screened, and the same rule the
+      database applies in its own words — one definition of "who is in this
+      relationship", in three places that must agree.
+    */
+    const subjects = screeningSubjects(
+      { id: clientId, name: String(client.name) },
+      owners.map((o, i) => ({ id: o.id, fullName: o.fullName, owner: ownerFacts[i] })),
+    );
+    const runFacts: ScreeningRunFacts[] = [];
+    for (const r of runs) {
+      const matches = await c.firm.listScreeningMatches(p.tenantId, r.id);
+      runFacts.push({
+        id: r.id, subjectKind: r.subjectKind as ScreeningSubjectKind, subjectId: r.subjectId,
+        listSets: r.listSets, listAsOf: r.listAsOf, status: r.status as ScreeningRunFacts['status'],
+        matches: matches.map((m) => ({ id: m.id, disposition: m.disposition as ScreeningRunFacts['matches'][number]['disposition'] })),
+        runAt: String(r.runAt),
+      });
+    }
+    const screening = screeningState(subjects, runFacts);
+    const clientType = String(client.client_type ?? client.clientType ?? 'individual');
+    const kind: 'individual' | 'organization' = clientType === 'individual' ? 'individual' : 'organization';
+
+    const facts: CddFacts = {
+      clientKind: kind, level: (dd?.level ?? 'standard') as CddFacts['level'],
+      status: (dd?.status ?? 'not_started') as CddFacts['status'],
+      legalName: dd?.legalName ?? null, legalNameAr: dd?.legalNameAr ?? null,
+      dateOfBirth: dd?.dateOfBirth ?? null, nationality: dd?.nationality ?? null,
+      residenceCountry: dd?.residenceCountry ?? null, address: dd?.address ?? null,
+      crNumber: dd?.crNumber ?? null, incorporationCountry: dd?.incorporationCountry ?? null,
+      businessActivity: dd?.businessActivity ?? null,
+      idType: dd?.idType ?? null, idNumberHash: dd?.idNumberHash ?? null,
+      sourceOfFunds: dd?.sourceOfFunds ?? null, sourceOfWealth: dd?.sourceOfWealth ?? null,
+      purpose: dd?.purpose ?? null, verificationMethod: dd?.verificationMethod ?? null,
+      pepStatus: (dd?.pepStatus ?? null) as CddFacts['pepStatus'],
+      seniorApprovedByMembershipId: dd?.seniorApprovedByMembershipId ?? null,
+      reviewDueAt: dd?.reviewDueAt ?? null, screening, ownership,
+    };
+    return { client, dd, owners, ownersFacts: ownerFacts, subjects, runs, facts,
+      /*
+        `gateFacts` IS NULL WHEN THERE IS NO RECORD, and the distinction is not cosmetic.
+        The display shape always has a facts object — a screen has to render empty fields —
+        and feeding that object to the gate made a client with NO record at all read as a
+        record with missing evidence: the route said `cdd_incomplete` while the database
+        said `cdd_missing`. Two names for one situation, and the one the person can act on
+        is the one that says there is nothing to act on yet.
+      */
+      gateFacts: dd ? facts : null,
+      assessment: assessCdd(facts) };
+  }
+
+  /** The gate's answer about a loaded record, from the same facts the screen is built on. */
+  function gateOutcome(loaded: Awaited<ReturnType<typeof loadDdFacts>>) {
+    if (!loaded) return activationOutcome({ facts: null, assessment: null });
+    return activationOutcome({ facts: loaded.gateFacts, assessment: loaded.assessment });
+  }
+
+  /**
+   * The gate, as a route asks it.
+   *
+   * REFUSES WITH THE DOMAIN'S OWN CODE AND MESSAGE. A gate that produced a generic
+   * validation error would leave the person to work out which of seven requirements
+   * blocked them, and the record itself — which the obligation is about — is the
+   * thing they would not read.
+   */
+  async function assertCddAdmits(
+    req: import('express').Request,
+    p: { tenantId: string; userId: string }, clientId: string,
+    matterId: string | null,
+  ): Promise<void> {
+    const loaded = await loadDdFacts(p, clientId);
+    const outcome = gateOutcome(loaded);
+    if (outcome.allowed) return;
+    await c.audit.tryWrite({
+      action: 'CDD_GATE_DENIED',
+      actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+      outcome: 'denied', resourceType: 'matter', resourceId: matterId ?? undefined,
+      reasonCode: outcome.code,
+      /*
+        `refusal`, NOT `code`. The audit writer's denylist refuses a metadata key named
+        `code` — it is one of the keys an OTP or a recovery code would arrive under — and
+        `tryWrite` swallows that refusal with a console warning. The first version of this
+        gate therefore refused correctly and recorded NOTHING, which is the failure mode
+        this codebase keeps meeting: correct in the direction anybody looks, silent in the
+        other. The harness caught it by asking the database for the row.
+      */
+      metadata: {
+        clientId, refusal: outcome.code,
+        missing: loaded?.assessment?.missing.map((m) => m.key) ?? [],
+      },
+    }, requestInfo(req, c.trustProxy));
+    throw badRequest(outcome.code, outcome.message);
+  }
+
+  // ── the client's record ────────────────────────────────────────────────────
+  r.get('/clients/:clientId/due-diligence', ah(async (req, res) => {
+    const p = principal(req);
+    c.permissions.assertCan(p, 'compliance.read', { type: 'client', id: String(req.params.clientId) });
+    const clientId = String(req.params.clientId);
+    const loaded = await loadDdFacts(p, clientId);
+    if (!loaded) throw notFoundOrForbidden('client', clientId);
+
+    ok(res, {
+      client: {
+        id: clientId, name: loaded.client.name, nameAr: loaded.client.name_ar ?? null,
+        type: loaded.facts.clientKind,
+      },
+      record: loaded.dd ? {
+        id: loaded.dd.id, version: loaded.dd.version, level: loaded.dd.level,
+        status: loaded.dd.status, completedAt: loaded.dd.completedAt,
+        reviewDueAt: loaded.dd.reviewDueAt, unableReason: loaded.dd.unableReason,
+        riskRating: loaded.dd.riskRating, riskReasons: loaded.dd.riskReasons,
+        pepStatus: loaded.dd.pepStatus, pepDetails: loaded.dd.pepDetails,
+        seniorApprovedByMembershipId: loaded.dd.seniorApprovedByMembershipId,
+        sourceOfFunds: loaded.dd.sourceOfFunds, purpose: loaded.dd.purpose,
+        verificationMethod: loaded.dd.verificationMethod, verifiedAt: loaded.dd.verifiedAt,
+        // The identifier is returned masked, and only masked: the hash is a matching
+        // device and the mask is what a screen may show.
+        idType: loaded.dd.idType, idNumberMasked: loaded.dd.idNumberMasked,
+        crNumber: loaded.dd.crNumber,
+      } : null,
+      /*
+        THE REQUIREMENTS THEMSELVES, SENT TO THE CLIENT. A screen that shows a list of
+        fields and a red badge is a screen that makes the reader guess which field the
+        gate is about; this sends the rule, with the missing ones marked.
+      */
+      requirements: requirementsFor(loaded.facts.clientKind, loaded.facts.level).map((r) => ({
+        key: r.key, label: r.label, labelAr: r.labelAr,
+        satisfied: !loaded.assessment.missing.some((m) => m.key === r.key),
+      })),
+      ownership: {
+        identifiedPct: loaded.assessment.ownership.identifiedPct,
+        thresholdPct: UBO_THRESHOLD_PCT,
+        controlRights: loaded.assessment.ownership.controlBasisCount,
+        covered: loaded.assessment.ownership.covered,
+        reason: loaded.assessment.ownership.reason,
+        owners: loaded.owners,
+      },
+      screening: {
+        required: loaded.subjects,
+        unscreened: loaded.assessment.screening.unscreened,
+        unresolvedMatches: loaded.assessment.screening.unresolvedMatches,
+        confirmedMatches: loaded.assessment.screening.confirmedMatches,
+        failedRuns: loaded.assessment.screening.failedRuns,
+        complete: loaded.assessment.screening.complete,
+        runs: loaded.runs.map((r) => ({
+          id: r.id, subjectKind: r.subjectKind, subjectName: r.subjectName,
+          status: r.status, listSets: r.listSets, listAsOf: r.listAsOf,
+          matchesFound: r.matchesFound, openMatches: r.openMatches,
+          failureReason: r.failureReason, runAt: r.runAt,
+        })),
+      },
+      assessment: {
+        complete: loaded.assessment.complete,
+        missing: loaded.assessment.missing.map((m) => m.key),
+        reason: loaded.assessment.reason,
+      },
+      /* The screen and the gate answer from one call, so a record that reads as
+         admissible on the page cannot be refused by the write. */
+      admissible: gateOutcome(loaded).allowed,
+      refusal: (() => {
+        const o = gateOutcome(loaded);
+        return o.allowed ? null : { code: o.code, message: o.message };
+      })(),
+    });
+  }));
+
+  r.post('/clients/:clientId/due-diligence', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const clientId = String(req.params.clientId);
+    c.permissions.assertCan(p, 'clients.kyc', { type: 'client', id: clientId });
+    const body = strictBody(z.object({
+      level: z.enum(['simplified', 'standard', 'enhanced']).optional(),
+    }).strict(), req, c, '/api/firm/clients/:clientId/due-diligence');
+
+    const client = await c.firm.getClientForTenant(p.tenantId, clientId);
+    if (!client) throw notFoundOrForbidden('client', clientId);
+    const existing = await c.firm.getCurrentDueDiligence(p.tenantId, clientId);
+    if (existing && existing.status !== 'expired') {
+      throw conflict('cdd_already_open',
+        'this client already has a current due-diligence record — add a version only when the review falls due');
+    }
+    const id = await c.firm.openDueDiligence({
+      tenantId: p.tenantId, clientId, partyId: (client.party_id as string | null) ?? null,
+      level: body.level ?? 'standard', membershipId: p.membershipId,
+    });
+    await c.audit.write({
+      action: 'CDD_RECORDED',
+      actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+      outcome: 'success', resourceType: 'client', resourceId: clientId,
+      metadata: { dueDiligenceId: id, level: body.level ?? 'standard', superseded: Boolean(existing) },
+    }, requestInfo(req, c.trustProxy));
+    ok(res, { id }, 201);
+  }));
+
+  r.patch('/due-diligence/:id', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const ddId = String(req.params.id);
+    c.permissions.assertCan(p, 'clients.kyc', { type: 'due_diligence', id: ddId });
+    const body = strictBody(z.object({
+      legalName: z.string().trim().min(2).max(200).optional(),
+      legalNameAr: z.string().trim().min(2).max(200).nullable().optional(),
+      dateOfBirth: z.string().date().nullable().optional(),
+      nationality: z.string().trim().length(2).nullable().optional(),
+      residenceCountry: z.string().trim().length(2).nullable().optional(),
+      address: z.string().trim().min(5).max(500).nullable().optional(),
+      idType: z.enum(['national_id', 'iqama', 'passport', 'gcc_id', 'commercial_registration']).nullable().optional(),
+      idNumber: z.string().trim().min(4).max(60).nullable().optional(),
+      idIssuedAt: z.string().date().nullable().optional(),
+      idExpiresAt: z.string().date().nullable().optional(),
+      crNumber: z.string().trim().min(4).max(30).nullable().optional(),
+      crIssuedAt: z.string().date().nullable().optional(),
+      incorporationCountry: z.string().trim().length(2).nullable().optional(),
+      businessActivity: z.string().trim().min(3).max(500).nullable().optional(),
+      ownershipStructure: z.string().trim().min(3).max(1000).nullable().optional(),
+      sourceOfFunds: z.string().trim().min(5).max(1000).nullable().optional(),
+      sourceOfWealth: z.string().trim().min(5).max(1000).nullable().optional(),
+      purpose: z.string().trim().min(5).max(1000).nullable().optional(),
+      expectedAnnualVolumeSar: z.number().min(0).max(1_000_000_000).nullable().optional(),
+      peSubmission: z.never().optional(),
+      pepStatus: z.enum(['not_pep', 'pep', 'pep_family', 'pep_associate']).nullable().optional(),
+      pepDetails: z.string().trim().max(1000).nullable().optional(),
+      verificationMethod: z.enum(['original_seen', 'certified_copy', 'electronic', 'relying_on_third_party']).nullable().optional(),
+      verificationSource: z.string().trim().max(500).nullable().optional(),
+      notes: z.string().trim().max(2000).nullable().optional(),
+    }).strict(), req, c, '/api/firm/due-diligence/:id');
+
+    const dd = await c.firm.getDueDiligence(p.tenantId, ddId);
+    if (!dd) throw notFoundOrForbidden('due_diligence', ddId);
+    if (dd.status === 'complete' || dd.status === 'unable_to_complete') {
+      throw conflict('cdd_record_closed',
+        'a completed record is superseded by a new version, never edited — open a review');
+    }
+
+    /*
+      THE FORM'S FIELD NAMES AND THE COLUMN NAMES ARE NOT THE SAME NAMES, AND THE
+      TRANSLATION HAS TO BE WRITTEN DOWN.
+
+      The repository's write takes COLUMN names — an allow-list of them, so that a body
+      cannot name a column the feature does not own. The first version of this route passed
+      the parsed body straight through, so every camelCase key was filtered out inside the
+      repository and the route answered 200 having written nothing at all: a due-diligence
+      form that silently stored no answers, with the gate downstream reporting the record
+      as incomplete and nobody able to see why. The map below is the translation, and the
+      guard after it is the point: a field added to the schema above and forgotten here
+      fails the request rather than disappearing into a 200.
+    */
+    const CD_COLUMNS: Record<string, string> = {
+      legalName: 'legal_name', legalNameAr: 'legal_name_ar',
+      dateOfBirth: 'date_of_birth', nationality: 'nationality',
+      residenceCountry: 'residence_country', address: 'address',
+      idType: 'id_type', idIssuedAt: 'id_issued_at', idExpiresAt: 'id_expires_at',
+      crNumber: 'cr_number', crIssuedAt: 'cr_issued_at',
+      incorporationCountry: 'incorporation_country', businessActivity: 'business_activity',
+      ownershipStructure: 'ownership_structure', sourceOfFunds: 'source_of_funds',
+      sourceOfWealth: 'source_of_wealth', purpose: 'purpose',
+      expectedAnnualVolumeSar: 'expected_annual_volume_sar',
+      pepStatus: 'pep_status', pepDetails: 'pep_details',
+      verificationMethod: 'verification_method', verificationSource: 'verification_source',
+      notes: 'notes',
+    };
+    const untranslated = Object.keys(body).filter((k) => k !== 'idNumber' && !CD_COLUMNS[k]);
+    if (untranslated.length > 0) {
+      throw badRequest('validation_failed',
+        'these fields are not accepted by this route', { fields: untranslated });
+    }
+    const fields: Record<string, unknown> = {};
+    for (const [sent, column] of Object.entries(CD_COLUMNS)) {
+      if (sent in body) fields[column] = (body as Record<string, unknown>)[sent];
+    }
+
+    /*
+      THE IDENTIFIER IS HASHED HERE, NOT STORED. What the firm keeps is a keyed hash it
+      can match against and a mask it can display; the number itself is not needed to
+      satisfy the obligation, and a column that held it would be the first thing taken in
+      a breach. `keyedHash` is the same primitive the national identifier already uses.
+    */
+    if (body.idNumber !== undefined) {
+      fields.id_number_hash = body.idNumber === null ? null : keyedHash(body.idNumber);
+      fields.id_number_masked = body.idNumber === null ? null : maskNationalId(body.idNumber);
+    }
+    if (body.verificationMethod) fields.verified_at = new Date().toISOString();
+
+    await c.firm.updateDueDiligence({
+      tenantId: p.tenantId, id: ddId, fields, membershipId: p.membershipId,
+    });
+    await c.audit.write({
+      action: 'CDD_UPDATED',
+      actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+      outcome: 'success', resourceType: 'client', resourceId: dd.clientId,
+      metadata: { dueDiligenceId: ddId, fields: Object.keys(body) },
+    }, requestInfo(req, c.trustProxy));
+    ok(res, { id: ddId, updated: Object.keys(body) });
+  }));
+
+  /**
+   * Completing the record — and the assessment that has to agree with it.
+   *
+   * THE RATING IS RECOMPUTED HERE rather than accepted from the caller, from the record
+   * as it now stands. A form that submits its own risk rating is a form that can claim
+   * 'low' about a client whose record says otherwise, and the reasons — which are what
+   * make the rating reviewable a year later — would be the caller's prose rather than
+   * the register's facts.
+   */
+  r.post('/due-diligence/:id/complete', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const ddId = String(req.params.id);
+    c.permissions.assertCan(p, 'clients.kyc', { type: 'due_diligence', id: ddId });
+    const body = strictBody(z.object({
+      seniorApprovedByMembershipId: z.string().uuid().optional().nullable(),
+      seniorApprovalNote: z.string().trim().max(1000).optional().nullable(),
+    }).strict(), req, c, '/api/firm/due-diligence/:id/complete');
+
+    const dd = await c.firm.getDueDiligence(p.tenantId, ddId);
+    if (!dd) throw notFoundOrForbidden('due_diligence', ddId);
+
+    /*
+      THE RATING IS DERIVED FROM THE RECORD AS IT NOW STANDS, through the same assembly the
+      screen uses — not from a facts object built here by hand. The first version of this
+      route assembled one, with `ownership: ownershipCoverage([])` and a client kind
+      guessed from an empty string: it produced `opaque_ownership` on every client,
+      including individuals that own nothing, and it never looked at the jurisdiction
+      register, so a client resident in a listed country rated high for a different reason
+      and the reason list did not mention the country. The reasons are the reviewable part
+      of a rating; a reason that is true of everybody is not a reason.
+    */
+    const loaded = await loadDdFacts(p, dd.clientId);
+    const countries = await c.firm.listRiskCountries(p.tenantId);
+    const { rating, reasons } = deriveRisk({
+      facts: {
+        clientKind: loaded?.facts.clientKind ?? 'organization',
+        nationality: dd.nationality, residenceCountry: dd.residenceCountry,
+        incorporationCountry: dd.incorporationCountry, businessActivity: dd.businessActivity,
+        ownership: loaded?.assessment.ownership ?? ownershipCoverage([]),
+        pepStatus: dd.pepStatus,
+        expectedAnnualVolumeSar: dd.expectedAnnualVolumeSar,
+      },
+      countries: countries.map((k) => ({
+        countryCode: k.countryCode, listSource: k.listSource,
+        riskLevel: k.riskLevel as 'high' | 'prohibited',
+      })),
+    });
+    await c.firm.updateDueDiligence({
+      tenantId: p.tenantId, id: ddId, membershipId: p.membershipId,
+      fields: {
+        risk_rating: rating, risk_reasons: JSON.stringify(reasons),
+        risk_assessed_at: new Date().toISOString(),
+      },
+    });
+    await c.firm.setReviewDue({
+      tenantId: p.tenantId, id: ddId, dueAt: reviewDueAt(rating, new Date()),
+    });
+    await c.firm.completeDueDiligence({
+      tenantId: p.tenantId, id: ddId, membershipId: p.membershipId,
+      seniorApproval: body.seniorApprovedByMembershipId
+        ? { membershipId: body.seniorApprovedByMembershipId, note: body.seniorApprovalNote ?? null }
+        : null,
+    });
+
+    /*
+      READ AGAIN AFTER THE WRITES. `loaded` was read before the rating, the review clock
+      and the completion were written, so its `status` was `not_started` and the gate built
+      on it answered `cdd_incomplete` about the record this request had just completed —
+      the screen disagreeing with the register in the response to the request that made
+      them agree. The evidence is unchanged; only the completeness is, and completeness is
+      exactly what this route decides.
+    */
+    const completed = await loadDdFacts(p, dd.clientId);
+    const outcome = gateOutcome(completed);
+    await c.audit.write({
+      action: 'CDD_COMPLETED',
+      actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+      outcome: 'success', resourceType: 'client', resourceId: dd.clientId,
+      metadata: {
+        dueDiligenceId: ddId, riskRating: rating,
+        riskReasons: reasons.map((r) => r.code), admissible: outcome.allowed,
+        refusal: outcome.allowed ? null : outcome.code,
+      },
+    }, requestInfo(req, c.trustProxy));
+
+    ok(res, {
+      id: ddId, riskRating: rating, riskReasons: reasons,
+      reviewDueAt: reviewDueAt(rating, new Date()),
+      admissible: outcome.allowed,
+      refusal: outcome.allowed ? null : { code: outcome.code, message: outcome.message },
+      missing: completed?.assessment.missing.map((m) => m.key) ?? [],
+    });
+  }));
+
+  /**
+   * The prohibition, recorded as a decision.
+   *
+   * THIS IS NOT A WAY TO CLOSE A FILE. It is the answer the manual gives when a client
+   * cannot be identified, and it carries a ground the database refuses to do without.
+   * The firm's remedy is a new version if the client produces the documents — which is
+   * exactly why this does not delete the record.
+   */
+  r.post('/due-diligence/:id/unable', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const ddId = String(req.params.id);
+    c.permissions.assertCan(p, 'compliance.approve', { type: 'due_diligence', id: ddId });
+    const body = strictBody(z.object({
+      reason: z.string().trim().min(20).max(1000),
+    }).strict(), req, c, '/api/firm/due-diligence/:id/unable');
+
+    const dd = await c.firm.getDueDiligence(p.tenantId, ddId);
+    if (!dd) throw notFoundOrForbidden('due_diligence', ddId);
+    await c.firm.recordUnableToComplete({
+      tenantId: p.tenantId, id: ddId, reason: body.reason, membershipId: p.membershipId,
+    });
+    await c.audit.write({
+      action: 'CDD_UNABLE_TO_COMPLETE',
+      actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+      outcome: 'success', resourceType: 'client', resourceId: dd.clientId,
+      reasonCode: 'cdd_unable_to_complete',
+      metadata: { dueDiligenceId: ddId, reason: body.reason },
+    }, requestInfo(req, c.trustProxy));
+    ok(res, { id: ddId, status: 'unable_to_complete' });
+  }));
+
+  // ── the persons behind the client ──────────────────────────────────────────
+  r.post('/due-diligence/:id/owners', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const ddId = String(req.params.id);
+    c.permissions.assertCan(p, 'clients.kyc', { type: 'due_diligence', id: ddId });
+    const body = strictBody(z.object({
+      id: z.string().uuid().optional().nullable(),
+      ownerKind: z.enum(['natural_person', 'legal_person']).default('natural_person'),
+      fullName: z.string().trim().min(3).max(200),
+      fullNameAr: z.string().trim().max(200).nullable().optional(),
+      dateOfBirth: z.string().date().nullable().optional(),
+      nationality: z.string().trim().length(2).nullable().optional(),
+      residenceCountry: z.string().trim().length(2).nullable().optional(),
+      address: z.string().trim().max(500).nullable().optional(),
+      idType: z.enum(['national_id', 'iqama', 'passport', 'gcc_id']).nullable().optional(),
+      idNumber: z.string().trim().min(4).max(60).nullable().optional(),
+      crNumber: z.string().trim().min(4).max(30).nullable().optional(),
+      ownershipPct: z.number().min(0).max(100).nullable().optional(),
+      controlBasis: z.enum(['ownership', 'voting_rights', 'senior_management', 'other']).default('ownership'),
+      controlDescription: z.string().trim().min(10).max(500).nullable().optional(),
+      pepStatus: z.enum(['not_pep', 'pep', 'pep_family', 'pep_associate']).nullable().optional(),
+      isDesignated: z.boolean().nullable().optional(),
+      source: z.string().trim().max(500).nullable().optional(),
+      verificationMethod: z.enum(['original_seen', 'certified_copy', 'electronic', 'relying_on_third_party']).nullable().optional(),
+      verified: z.boolean().default(false),
+      notes: z.string().trim().max(1000).nullable().optional(),
+    }).strict(), req, c, '/api/firm/due-diligence/:id/owners');
+
+    const dd = await c.firm.getDueDiligence(p.tenantId, ddId);
+    if (!dd) throw notFoundOrForbidden('due_diligence', ddId);
+
+    /*
+      THE SHAPE OF A PERSON, CHECKED BEFORE THE DATABASE HAS TO. The table carries CHECKs
+      that a natural person has a date of birth and a nationality, and that an ownership
+      stake is a positive number — they exist because a register of people with no
+      birthdays is a list of names — and without these lines a caller who omitted one got a
+      CHECK violation surfaced as a 500. The same rule, in the caller's terms, with the
+      field named.
+    */
+    if (body.ownerKind === 'natural_person' && (!body.dateOfBirth || !body.nationality)) {
+      throw badRequest('validation_failed',
+        'a natural person is recorded with a date of birth and a nationality', {
+          fields: [...(!body.dateOfBirth ? ['dateOfBirth'] : []), ...(!body.nationality ? ['nationality'] : [])],
+        });
+    }
+    if (body.controlBasis === 'ownership' && !(Number(body.ownershipPct ?? 0) > 0)) {
+      throw badRequest('validation_failed',
+        'an owner recorded by shareholding is recorded with the share, or with the control right that puts them there', {
+          fields: ['ownershipPct', 'controlBasis'],
+        });
+    }
+    if (body.controlBasis !== 'ownership' && !body.controlDescription) {
+      throw badRequest('validation_failed',
+        'a control right is recorded with the document that creates it', { fields: ['controlDescription'] });
+    }
+
+    const id = await c.firm.upsertBeneficialOwner({
+      tenantId: p.tenantId, id: body.id ?? null, ddId, clientId: dd.clientId,
+      partyId: null, membershipId: p.membershipId,
+      fields: {
+        ...body,
+        idNumberHash: body.idNumber ? keyedHash(body.idNumber) : null,
+        idNumberMasked: body.idNumber ? maskNationalId(body.idNumber) : null,
+        verifiedAt: body.verified ? new Date().toISOString() : null,
+      },
+    });
+    await c.audit.write({
+      action: body.verified ? 'BENEFICIAL_OWNER_VERIFIED' : 'BENEFICIAL_OWNER_RECORDED',
+      actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+      outcome: 'success', resourceType: 'client', resourceId: dd.clientId,
+      metadata: {
+        dueDiligenceId: ddId, ownerId: id, ownershipPct: body.ownershipPct ?? null,
+        controlBasis: body.controlBasis, thresholdOwner:
+          body.controlBasis !== 'ownership' || Number(body.ownershipPct ?? 0) >= UBO_THRESHOLD_PCT,
+      },
+    }, requestInfo(req, c.trustProxy));
+    ok(res, { id }, body.id ? 200 : 201);
+  }));
+
+  // ── screening ──────────────────────────────────────────────────────────────
+  /**
+   * Recording what a screening actually returned.
+   *
+   * THE PROVIDER IS NOT CALLED HERE. This route records the RESULT of a screening —
+   * against the internal register, by hand, or from a feed — because the system has no
+   * integration with a screening provider and a route that pretended to have one would
+   * be a claim nothing computed, which is the defect class this whole phase exists to
+   * remove. What it refuses to do is let a failed screening pass for a clear one: the
+   * status is the caller's, the count is derived from the matches, and the database
+   * refuses `clear` with matches or `failed` without a reason.
+   */
+  r.post('/clients/:clientId/screening-runs', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const clientId = String(req.params.clientId);
+    c.permissions.assertCan(p, 'clients.kyc', { type: 'client', id: clientId });
+    const body = strictBody(z.object({
+      subjectKind: z.enum(['client', 'party', 'beneficial_owner', 'staff']),
+      subjectId: z.string().uuid(),
+      subjectName: z.string().trim().min(2).max(200),
+      listSets: z.array(z.enum(['un_consolidated', 'eu_consolidated', 'sama_designations',
+        'internal_register', 'local_media'])).min(1),
+      listAsOf: z.string().date().nullable().optional(),
+      provider: z.enum(['internal_register', 'manual_review', 'external_provider', 'regulator_feed']),
+      providerReference: z.string().trim().max(200).nullable().optional(),
+      status: z.enum(['clear', 'potential_match', 'match', 'failed']),
+      failureReason: z.string().trim().min(5).max(500).nullable().optional(),
+      note: z.string().trim().max(1000).nullable().optional(),
+      matches: z.array(z.object({
+        listSource: z.string().trim().min(2).max(100),
+        matchedName: z.string().trim().min(2).max(200),
+        matchedReference: z.string().trim().max(200).nullable().optional(),
+        matchKind: z.enum(['exact_name', 'fuzzy_name', 'national_id', 'alias', 'date_of_birth', 'address']),
+        score: z.number().min(0).max(100).nullable().optional(),
+      })).max(50).default([]),
+    }).strict(), req, c, '/api/firm/clients/:clientId/screening-runs');
+
+    const dd = await c.firm.getCurrentDueDiligence(p.tenantId, clientId);
+    if (!dd) throw badRequest('cdd_missing', 'this client has no due-diligence record to screen against');
+    if (body.status === 'clear' && body.matches.length > 0) {
+      throw badRequest('validation_failed', 'a clearance with matches on it is not a clearance');
+    }
+    if (body.status !== 'clear' && body.matches.length === 0) {
+      throw badRequest('validation_failed', 'a run that found something must carry what it found');
+    }
+    if (body.status === 'failed' && !body.failureReason) {
+      throw badRequest('validation_failed', 'a failed screening says what failed');
+    }
+    const run = await c.firm.recordScreeningRun({
+      tenantId: p.tenantId, clientId, ddId: dd.id,
+      subjectKind: body.subjectKind, subjectId: body.subjectId, subjectName: body.subjectName,
+      listSets: body.listSets, listAsOf: body.listAsOf ?? null, provider: body.provider,
+      providerReference: body.providerReference ?? null, status: body.status,
+      failureReason: body.failureReason ?? null, note: body.note ?? null,
+      membershipId: p.membershipId,
+      matches: body.matches.map((m) => ({
+        listSource: m.listSource, matchedName: m.matchedName,
+        matchedReference: m.matchedReference ?? null, matchKind: m.matchKind, score: m.score ?? null,
+      })),
+    });
+    await c.audit.write({
+      action: body.status === 'failed' ? 'SCREENING_FAILED'
+        : body.matches.length > 0 ? 'SCREENING_MATCH_FOUND' : 'SCREENING_RUN',
+      actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+      outcome: 'success', resourceType: 'client', resourceId: clientId,
+      metadata: {
+        runId: run.id, subjectKind: body.subjectKind, subjectId: body.subjectId,
+        status: body.status, listSets: body.listSets, listAsOf: body.listAsOf ?? null,
+        matchesFound: run.matchesFound, failureReason: body.failureReason ?? null,
+      },
+    }, requestInfo(req, c.trustProxy));
+    ok(res, { id: run.id, matchesFound: run.matchesFound }, 201);
+  }));
+
+  r.post('/screening-matches/:matchId/disposition', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const matchId = String(req.params.matchId);
+    c.permissions.assertCan(p, 'compliance.review', { type: 'screening_match', id: matchId });
+    const body = strictBody(z.object({
+      disposition: z.enum(['false_positive', 'true_match', 'escalated']),
+      reason: z.string().trim().min(10).max(1000),
+    }).strict(), req, c, '/api/firm/screening-matches/:matchId/disposition');
+
+    const changed = await c.firm.dispositionScreeningMatch({
+      tenantId: p.tenantId, matchId, disposition: body.disposition,
+      reason: body.reason, membershipId: p.membershipId,
+    });
+    if (changed === 0) {
+      throw conflict('already_dispositioned',
+        'this match has already been decided — run a new screening rather than re-deciding it');
+    }
+    await c.audit.write({
+      action: 'SCREENING_MATCH_DISPOSITIONED',
+      actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+      outcome: 'success', resourceType: 'screening_match', resourceId: matchId,
+      metadata: { disposition: body.disposition, reason: body.reason },
+    }, requestInfo(req, c.trustProxy));
+    ok(res, { id: matchId, disposition: body.disposition });
+  }));
+
+  // ── the report ─────────────────────────────────────────────────────────────
+  r.get('/str-reports', ah(async (req, res) => {
+    const p = principal(req);
+    c.permissions.assertCan(p, 'compliance.read', { type: 'compliance_collection' });
+    const rows = await c.firm.listStrReports(p.tenantId, {
+      status: typeof req.query.status === 'string' ? req.query.status : undefined,
+      clientId: typeof req.query.clientId === 'string' ? req.query.clientId : undefined,
+    });
+    const now = Date.now();
+    ok(res, {
+      reports: rows.map((r) => ({
+        ...r,
+        // Late is computed, not stored: a stored flag would be wrong by the next morning.
+        late: r.status !== 'filed' && r.filedDueAt !== null && new Date(String(r.filedDueAt)).getTime() < now,
+      })),
+      indicators: STR_INDICATORS,
+    });
+  }));
+
+  r.post('/str-reports', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    c.permissions.assertCan(p, 'compliance.create', { type: 'str_report' });
+    const body = strictBody(z.object({
+      reportNumber: z.string().trim().min(3).max(40),
+      subjectKind: z.enum(['client', 'party', 'beneficial_owner', 'staff', 'transaction']),
+      subjectId: z.string().uuid().nullable().optional(),
+      subjectName: z.string().trim().max(200).nullable().optional(),
+      clientId: z.string().uuid().nullable().optional(),
+      matterId: z.string().uuid().nullable().optional(),
+      grounds: z.array(z.string().trim().min(2).max(60)).min(1),
+      narrativeAr: z.string().trim().min(40).max(20_000),
+      narrativeEn: z.string().trim().max(20_000).nullable().optional(),
+      amountSar: z.number().min(0).nullable().optional(),
+      transactionReference: z.string().trim().max(200).nullable().optional(),
+      transactionAt: z.string().datetime().nullable().optional(),
+    }).strict(), req, c, '/api/firm/str-reports');
+
+    const readiness = strReadiness({
+      narrativeAr: body.narrativeAr, grounds: body.grounds,
+      subjectKind: body.subjectKind, status: 'draft',
+    });
+    if (!readiness.ready) {
+      /*
+        THE CODE NAMES THE RULE THAT BIT. `str_narrative_not_arabic` is the refusal the
+        database raises and the manual implies — SAFIU is addressed in Arabic — so a
+        narrative in English is reported as that, not as a general incompleteness. Two
+        codes for one problem would mean the person at the desk sees one of them
+        depending on which layer noticed first, which is how a vocabulary stops meaning
+        anything.
+      */
+      const arabicProblem = !containsArabic(body.narrativeAr);
+      throw badRequest(arabicProblem ? 'str_narrative_not_arabic' : 'str_narrative_incomplete',
+        readiness.reasons.join('; '));
+    }
+    const preparedAt = new Date();
+    const id = await c.firm.createStrReport({
+      tenantId: p.tenantId, reportNumber: body.reportNumber, subjectKind: body.subjectKind,
+      subjectId: body.subjectId ?? null, subjectName: body.subjectName ?? null,
+      clientId: body.clientId ?? null, matterId: body.matterId ?? null,
+      grounds: body.grounds, narrativeAr: body.narrativeAr, narrativeEn: body.narrativeEn ?? null,
+      amountSar: body.amountSar ?? null, transactionReference: body.transactionReference ?? null,
+      transactionAt: body.transactionAt ?? null, membershipId: p.membershipId,
+      preparedAt, dueAt: strDueAt(preparedAt),
+    });
+    await c.audit.write({
+      action: 'STR_PREPARED',
+      actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+      outcome: 'success', resourceType: 'str_report', resourceId: id,
+      metadata: {
+        reportNumber: body.reportNumber, subjectKind: body.subjectKind,
+        grounds: body.grounds, amountSar: body.amountSar ?? null,
+        filedDueAt: strDueAt(preparedAt),
+      },
+    }, requestInfo(req, c.trustProxy));
+    ok(res, { id, reportNumber: body.reportNumber, filedDueAt: strDueAt(preparedAt) }, 201);
+  }));
+
+  r.post('/str-reports/:id/review', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const id = String(req.params.id);
+    c.permissions.assertCan(p, 'compliance.approve', { type: 'str_report', id });
+    /*
+      THE ROW IS LOOKED UP FIRST, and the reason is the 404/409 distinction. Without the
+      lookup, a report id that does not exist returns "only a draft can be sent for review"
+      — a statement about a report that is not there, and an existence oracle in reverse.
+      The lookup also answers the question the status cannot: a report in another tenant
+      is not found, which is what a caller should learn.
+    */
+    const report = await c.firm.getStrReport(p.tenantId, id);
+    if (!report) throw notFoundOrForbidden('str_report', id);
+    const changed = await c.firm.reviewStrReport({
+      tenantId: p.tenantId, id, membershipId: p.membershipId,
+    });
+    if (changed === 0) throw conflict('str_not_draft', 'only a draft can be sent for review');
+    await c.audit.write({
+      action: 'STR_REVIEWED',
+      actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+      outcome: 'success', resourceType: 'str_report', resourceId: id,
+    }, requestInfo(req, c.trustProxy));
+    ok(res, { id, status: 'pending_review' });
+  }));
+
+  /**
+   * THE FILING, AND THE ACKNOWLEDGEMENT THAT GOES WITH IT.
+   *
+   * `tippingOffAcknowledged` is required and it is not a checkbox for its own sake:
+   * tipping off is a separate offence under the same law, and a firm that has not
+   * recorded that the client was not told has not given the instruction. The database
+   * refuses a filed report without it, so a caller that omits it is refused here too.
+   */
+  r.post('/str-reports/:id/file', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const id = String(req.params.id);
+    c.permissions.assertCan(p, 'compliance.approve', { type: 'str_report', id });
+    const body = strictBody(z.object({
+      fiuReference: z.string().trim().min(3).max(100),
+      tippingOffAcknowledged: z.literal(true),
+    }).strict(), req, c, '/api/firm/str-reports/:id/file');
+
+    const report = await c.firm.getStrReport(p.tenantId, id);
+    if (!report) throw notFoundOrForbidden('str_report', id);
+    const changed = await c.firm.fileStrReport({
+      tenantId: p.tenantId, id, membershipId: p.membershipId,
+      fiuReference: body.fiuReference, tippingOffAcknowledged: true,
+    });
+    if (changed === 0) {
+      throw conflict('str_not_reviewed', 'a report is reviewed before it is filed');
+    }
+    await c.audit.write({
+      action: 'STR_FILED',
+      actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+      outcome: 'success', resourceType: 'str_report', resourceId: id,
+      // The reference, the issuer and the moment — not the narrative. A log row is not
+      // where a report's contents belong; the report is.
+      metadata: { fiuReference: body.fiuReference, tippingOffAcknowledged: true },
+    }, requestInfo(req, c.trustProxy));
+    ok(res, { id, status: 'filed' });
+  }));
+
+  r.post('/str-reports/:id/response', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const id = String(req.params.id);
+    c.permissions.assertCan(p, 'compliance.approve', { type: 'str_report', id });
+    const body = strictBody(z.object({
+      status: z.enum(['acknowledged', 'rejected_by_fiu']),
+      response: z.string().trim().max(5000).nullable().optional(),
+    }).strict(), req, c, '/api/firm/str-reports/:id/response');
+    const report = await c.firm.getStrReport(p.tenantId, id);
+    if (!report) throw notFoundOrForbidden('str_report', id);
+    const changed = await c.firm.recordFiuResponse({
+      tenantId: p.tenantId, id, status: body.status, response: body.response ?? null,
+    });
+    if (changed === 0) throw conflict('str_not_filed', 'only a filed report has an answer to record');
+    await c.audit.write({
+      action: 'STR_RESPONSE_RECORDED',
+      actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+      outcome: 'success', resourceType: 'str_report', resourceId: id,
+      metadata: { status: body.status },
+    }, requestInfo(req, c.trustProxy));
+    ok(res, { id, status: body.status });
+  }));
+
+  // ── the queue, the census and the register ─────────────────────────────────
+  r.get('/compliance/due-diligence', ah(async (req, res) => {
+    const p = principal(req);
+    c.permissions.assertCan(p, 'compliance.read', { type: 'compliance_collection' });
+    const [queue, census, countries] = await Promise.all([
+      c.firm.dueDiligenceQueue(p.tenantId),
+      c.firm.dueDiligenceCensus(p.tenantId),
+      c.firm.listRiskCountries(p.tenantId),
+    ]);
+    ok(res, {
+      census, countries, queue,
+      thresholdPct: UBO_THRESHOLD_PCT,
+      reviewMonths: REVIEW_MONTHS,
+      /* Who this firm may not act for, in one list — the first thing a compliance page
+         should answer, and the answer the gate gives. */
+      refused: queue.filter((q) => !q.allowed)
+        .map((q) => ({ clientId: q.clientId, clientName: q.clientName, blockers: q.blockers })),
+    });
+  }));
+
+  r.post('/compliance/risk-countries', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    c.permissions.assertCan(p, 'compliance.approve', { type: 'risk_register' });
+    const body = strictBody(z.object({
+      id: z.string().uuid().nullable().optional(),
+      countryCode: z.string().trim().length(2),
+      countryName: z.string().trim().min(3).max(120),
+      countryNameAr: z.string().trim().max(120).nullable().optional(),
+      listSource: z.enum(['fatf_call_for_action', 'fatf_grey', 'un_sanctions', 'eu_consolidated', 'sama_circular', 'internal']),
+      riskLevel: z.enum(['high', 'prohibited']),
+      effectiveFrom: z.string().date(),
+      note: z.string().trim().max(500).nullable().optional(),
+    }).strict(), req, c, '/api/firm/compliance/risk-countries');
+
+    const id = await c.firm.upsertRiskCountry({
+      tenantId: p.tenantId, id: body.id ?? null, countryCode: body.countryCode.toUpperCase(),
+      countryName: body.countryName, countryNameAr: body.countryNameAr ?? null,
+      listSource: body.listSource, riskLevel: body.riskLevel, effectiveFrom: body.effectiveFrom,
+      note: body.note ?? null, membershipId: p.membershipId,
+    });
+    await c.audit.write({
+      action: 'RISK_COUNTRY_RECORDED',
+      actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+      outcome: 'success', resourceType: 'risk_country', resourceId: id,
+      metadata: { countryCode: body.countryCode, listSource: body.listSource, riskLevel: body.riskLevel },
+    }, requestInfo(req, c.trustProxy));
+    ok(res, { id }, body.id ? 200 : 201);
   }));
 
   return r;
