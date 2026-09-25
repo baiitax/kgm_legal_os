@@ -203,14 +203,34 @@ export class PostgresDb implements Db {
       connectionString: withoutSslParams(connectionString),
       max,
       /*
-        A COLD CONNECT IS ALLOWED TO BE SLOW; A REQUEST IS NOT ALLOWED TO WAIT FOREVER.
-        8 s was already here and is kept: longer than a pooler cold start, shorter than
-        the 30 s function budget, and the retry below turns one slow attempt into a
-        second rather than into a 500.
+        WAITING FOR A SESSION IS NORMAL; FAILING BECAUSE OF ONE IS NOT.
+
+        8 s was already here. On a saturated pooler a request that cannot get a
+        connection is better off waiting than failing — the wait ends as soon as any
+        other request finishes — so this is generous, and the 30 s function budget is
+        the ceiling that keeps it honest.
       */
-      connectionTimeoutMillis: 8_000,
-      idleTimeoutMillis: 60_000,
-      allowExitOnIdle: false,
+      connectionTimeoutMillis: 15_000,
+      /*
+        AND A WARM INSTANCE MUST NOT SIT ON A SESSION IT IS NOT USING.
+
+        This is the defect that took the deployment down, and it is worth stating
+        exactly: the Supabase session pooler publishes ONE pool for the role —
+        `pool_size: 15` — and a session is a connection, because `SET ROLE` and session
+        `set_config()` do not survive transaction pooling and the RLS model depends on
+        both. With `idleTimeoutMillis: 60_000` every instance that had ever served a
+        request kept its connection for a minute; a burst of thirty sign-ins warmed
+        fifteen instances, the budget was gone, and every instance that started after
+        that could not connect at all. The symptom was not slowness. It was
+        `FUNCTION_INVOCATION_FAILED` on every request, because the cold-start role check
+        is the first thing to need a connection.
+
+        One second of idle is long enough to reuse a connection across the several
+        requests a page makes and short enough that the fleet's footprint returns to
+        "the instances currently answering a request".
+      */
+      idleTimeoutMillis: 1_000,
+      allowExitOnIdle: true,
       ssl: sslFor(connectionString),
     });
     this.pool.on('error', (err) => {
@@ -226,10 +246,25 @@ export class PostgresDb implements Db {
    * boundary. See role-guard.ts for why each condition matters.
    */
   async assertSafeRole(): Promise<void> {
-    const res = await this.pool.query<{
+    /*
+      THE BOOT GATE USES THE SAME LADDER AS EVERYTHING ELSE.
+
+      This query is the first thing a cold instance runs, so it is the first thing to
+      meet a pooler that is momentarily full — and its failure is fatal by design: the
+      function never reaches the request handler, and the caller gets the platform's
+      generic crash page. That is correct for a connection which can bypass RLS and
+      wrong for a connection that simply has not been granted a slot yet. The retry
+      draws that line: a transient failure is waited out, and the verdict itself is
+      never softened.
+    */
+    const client = await this.connect();
+    let res: pg.QueryResult<{
       rolname: string; rolsuper: boolean; rolbypassrls: boolean; owned_tables: string;
-    }>(
-      `select current_user as rolname,
+    }>;
+    try {
+      res = await client.query<{
+        rolname: string; rolsuper: boolean; rolbypassrls: boolean; owned_tables: string;
+      }>(`select current_user as rolname,
               r.rolsuper,
               r.rolbypassrls,
               (select count(*)
@@ -239,8 +274,10 @@ export class PostgresDb implements Db {
                   and c.relkind = 'r'
                   and pg_get_userbyid(c.relowner) = current_user)::text as owned_tables
          from pg_roles r
-        where r.rolname = current_user`,
-    );
+        where r.rolname = current_user`);
+    } finally {
+      client.release();
+    }
 
     const row = res.rows[0];
     if (!row) {
@@ -363,15 +400,26 @@ export class PostgresDb implements Db {
    * that waits 8 s three times is already past its function budget.
    */
   private async connect(): Promise<pg.PoolClient> {
+    /*
+      THE LADDER. Six attempts over roughly three seconds, doubling: a pooler that is at
+      its client limit frees slots as other requests finish, so the correct behaviour is
+      to wait for one rather than to report a failure the reader can do nothing about. A
+      permanent failure (a bad password, a missing database) fails on the first attempt —
+      retrying it would only delay the answer.
+    */
+    const backoffMs = [100, 200, 400, 800, 1_600];
     let lastError: unknown;
-    for (let attempt = 1; attempt <= 3; attempt++) {
+    for (let attempt = 1; attempt <= backoffMs.length + 1; attempt++) {
       try {
         return await this.pool.connect();
       } catch (err) {
         lastError = err;
         if (!isTransientConnectionError(err)) throw err;
-        console.warn(`[db] connect attempt ${attempt} failed (${(err as Error).message}); retrying`);
-        await new Promise((r) => setTimeout(r, attempt * 75));
+        if (attempt > backoffMs.length) break;
+        const wait = backoffMs[attempt - 1];
+        console.warn(`[db] connect attempt ${attempt} failed (${(err as Error).message}); `
+          + `retrying in ${wait}ms`);
+        await new Promise((r) => setTimeout(r, wait));
       }
     }
     throw lastError;

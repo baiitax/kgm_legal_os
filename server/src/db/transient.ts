@@ -44,6 +44,18 @@ const TRANSIENT_MESSAGE = new RegExp([
   'Client has encountered a connection error',
   'timeout expired', 'Connection terminated unexpectedly',
   'remaining connection slots are reserved', 'too many clients already',
+  /*
+    SUPAVISOR'S OWN WORDS. The session pooler publishes one pool for the role — 15 clients
+    — and refuses the sixteenth with a driver error whose SQLSTATE is `XX000`, which is the
+    generic "internal error" state and therefore useless for this decision. The message is
+    the only signal there is:
+
+        (EMAXCONNSESSION) max clients reached in session mode - max clients are limited to
+        pool_size: 15
+
+    This is the failure that took the deployment down, so it is matched by name.
+  */
+  'EMAXCONNSESSION', 'max clients reached in session mode', 'max clients are limited to pool_size',
   'Timed out fetching a new connection from the connection pool',
 ].join('|'), 'i');
 

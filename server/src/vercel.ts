@@ -39,6 +39,7 @@ import { createContainer } from './container.js';
 import { createApp } from './app.js';
 import { getDb } from './db/index.js';
 import { PostgresDb } from './db/postgres.js';
+import { isTransientConnectionError } from './db/transient.js';
 
 const db = getDb();
 const container = createContainer({ db });
@@ -104,9 +105,51 @@ function ensureSafe(): Promise<void> {
   return ready;
 }
 
+/**
+ * A BOOT GATE THAT CANNOT GET A CONNECTION IS NOT A BROKEN DEPLOYMENT.
+ *
+ * `ensureSafe()` fails for two entirely different reasons, and the first version of this
+ * handler treated them the same way — by letting the error escape, which on this platform
+ * means the instance never reaches the request handler and the caller receives
+ * `FUNCTION_INVOCATION_FAILED` instead of anything this application wrote. A pooler at its
+ * client limit therefore did not look like congestion; it looked like the product was
+ * down, on every request, until the warm instances holding the sessions expired.
+ *
+ * So the two are separated:
+ *   · a TRANSIENT failure to connect is answered with this API's own 503 envelope —
+ *     retryable, with the request id — and the check is tried again on the next request;
+ *   · a VERDICT (this connection can bypass Row Level Security) still throws, because a
+ *     deployment wired to the wrong database identity must not quietly serve.
+ */
+function answerNotReady(res: ServerResponse, requestId: string | null): void {
+  res.statusCode = 503;
+  res.setHeader('content-type', 'application/json; charset=utf-8');
+  res.setHeader('retry-after', '2');
+  res.setHeader('cache-control', 'no-store');
+  if (requestId) res.setHeader('x-request-id', requestId);
+  res.end(JSON.stringify({
+    ok: false,
+    error: {
+      code: 'service_unavailable',
+      message: 'the database is temporarily unavailable',
+      retryable: true,
+    },
+  }));
+}
+
 export default async function handler(req: IncomingMessage, res: ServerResponse): Promise<void> {
   normalizeRequestUrl(req, res);
-  await ensureSafe();
+  const requestId = (res.getHeader('x-request-id') as string | undefined) ?? null;
+  try {
+    await ensureSafe();
+  } catch (err) {
+    if (isTransientConnectionError(err)) {
+      console.warn('[boot] the role check could not reach the database; answering 503');
+      answerNotReady(res, requestId);
+      return;
+    }
+    throw err;
+  }
   /*
     `req.url` arrives intact (`/api/client/matters` and friends) because the
     function is mounted at `/api` without a path-rewriting rule, so Express routes

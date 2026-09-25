@@ -182,10 +182,19 @@ describe('§49 · judgeAssumedRoles', () => {
 // 2 · THE WIRING
 // ==========================================================================
 
-/** Builds a PostgresDb with pg.Pool stubbed to answer the role query. */
+/**
+ * Builds a PostgresDb with pg.Pool stubbed to answer the role query.
+ *
+ * THE STUB ANSWERS ON A CLIENT, NOT ON THE POOL, because that is where the boot check
+ * runs: `assertSafeRole()` acquires a connection through the driver's retry ladder before
+ * it asks anything — the gate has to meet the same pooler every other query meets, and on
+ * a saturated one the first thing it gets is a refusal. A stub that only implements
+ * `pool.query` would test a code path the product no longer has.
+ */
 async function withStubbedPool(answer: Record<string, unknown> | null) {
   vi.resetModules();
   const query = vi.fn(async () => ({ rows: answer ? [answer] : [] }));
+  const release = vi.fn();
   const on = vi.fn();
 
   vi.doMock('pg', () => ({
@@ -194,7 +203,7 @@ async function withStubbedPool(answer: Record<string, unknown> | null) {
         query = query;
         on = on;
         end = vi.fn();
-        connect = vi.fn();
+        connect = vi.fn(async () => ({ query, release }));
       },
     },
   }));

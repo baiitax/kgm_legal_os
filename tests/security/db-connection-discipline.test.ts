@@ -163,6 +163,21 @@ describe('the connection discipline the driver promises', () => {
     expect(pool.connects).toBe(3);
   });
 
+  it('waits out a pooler that is at its client limit rather than failing the request', async () => {
+    /* The real thing: Supavisor answering the sixteenth session with EMAXCONNSESSION.
+       Six attempts over about three seconds — the ladder this test exercises end to end
+       with a shortened clock is the ladder production runs. */
+    const saturated = Object.assign(
+      new Error('(EMAXCONNSESSION) max clients reached in session mode - max clients are limited to pool_size: 15'),
+      { code: 'XX000' },
+    );
+    const pool = new FakePool(undefined, (attempt) => (attempt <= 5 ? saturated : null));
+    const db = build(pool);
+
+    await db.all('select 1');
+    expect(pool.connects).toBe(6);
+  }, 15_000);
+
   it('does not retry a failure that is about the statement', async () => {
     const pool = new FakePool(undefined, () => typo());
     const db = build(pool);
@@ -208,6 +223,29 @@ describe('what a transient failure looks like to the person at the desk', () => 
     expect(bug.status).toBe(500);
     expect(bug.code).toBe('internal_error');
     expect(bug.retryable).toBeFalsy();
+  });
+
+  it('knows the pooler by name, and answers it with a 503 rather than a shrug', () => {
+    const saturated = Object.assign(
+      new Error('(EMAXCONNSESSION) max clients reached in session mode'),
+      { code: 'XX000' },
+    );
+    /* `XX000` is the generic internal-error state, so the SQLSTATE tells us nothing —
+       the message is the only signal, and it is the failure that took the site down. */
+    expect(isTransientConnectionError(saturated)).toBe(true);
+    expect(toPortalError(saturated).status).toBe(503);
+    expect(toPortalError(saturated).code).toBe('service_unavailable');
+  });
+
+  it('gives the session back instead of holding it while warm', () => {
+    /* Constructed for real, because this is a property of the pool rather than of a
+       query: a warm serverless instance holding a session pooler connection spends the
+       whole fleet's budget on itself. */
+    const db = new PostgresDb('postgres://portal_api@example.invalid:5432/postgres', 1);
+    const options = (db as unknown as { pool: { options: Record<string, unknown> } }).pool.options;
+    expect(options.max).toBe(1);
+    expect(options.idleTimeoutMillis).toBe(1_000);
+    expect(options.allowExitOnIdle).toBe(true);
   });
 
   it('recognises the failures worth retrying, and none of the ones that are not', () => {
