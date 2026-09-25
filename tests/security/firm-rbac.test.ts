@@ -340,6 +340,14 @@ describe('§6 · the firm audience is separate from the client audience', () => 
       expect(res.status, p).toBe(404);
       expect(res.body.error.code, p).toBe('not_found');
     }
+    /*
+      Read BEFORE any settle, on purpose. The escalation row is written with an
+      `await` inside the guard, before the 404 is sent — an audit trail that a
+      serverless invocation can lose on the way out is worse than none, because a
+      §72 review reads it as complete. If the write ever goes back to
+      fire-and-forget, this line is the one that fails.
+    */
+    expect((await auditRows('ESCALATION_ATTEMPT', 'cross_audience')).length).toBe(paths.length);
     await settle();
     const rows = await auditRows('ESCALATION_ATTEMPT', 'cross_audience');
     expect(rows.length).toBe(paths.length);
@@ -1818,7 +1826,22 @@ describe('§71 · row level security does not recurse', () => {
   });
 
   it('matter_visible is the only gate the matter-scoped policies use', () => {
-    const matterScoped = ['matters', 'hearings', 'deadlines', 'documents', 'matter_timeline', 'message_threads', 'invoices'];
+    /*
+      `matters` IS NOT IN THIS LIST, and that is the P0.1 change (migration 0033).
+
+      The rule these six tables embody is "the firm projects, it does not write
+      through RLS" — `with check (false)`, so the firm role can read a row and never
+      change it. That was true of every matter-scoped table when 0006 wrote them, and
+      it is still true of these six.
+
+      It stopped being true of `matters` itself when the matter lifecycle became the
+      firm's own: `POST /matters/:id/status` moves a file through conflict_check and
+      records its derived clearance, and on the live database it answered "new row
+      violates row-level security policy for table matters". The policy for that one
+      table is asserted separately below, with the reason its WITH CHECK is weaker
+      than its USING.
+    */
+    const matterScoped = ['hearings', 'deadlines', 'documents', 'matter_timeline', 'message_threads', 'invoices'];
     for (const table of matterScoped) {
       const policies = policiesOn(table).filter((p) => /firm_matter_scope/.test(p));
       expect(policies.length, `${table} must have a firm_matter_scope policy`).toBe(1);
@@ -1831,6 +1854,77 @@ describe('§71 · row level security does not recurse', () => {
       expect(policies[0], `${table} policy must require the tenant`).toMatch(/kgm_tenant\s*\(\s*\)/);
       // Read-only: the firm role projects, it does not write through RLS.
       expect(policies[0], `${table} policy must not permit writes`).toMatch(/with check \(false\)/);
+    }
+  });
+
+  /**
+   * The policies as they stand AFTER every migration, not as 0006 left them.
+   *
+   * `policiesOn` reads one file, which is right for the assertions above — they are
+   * about what 0006 establishes. It cannot express a policy that a LATER migration
+   * drops, and the state of `matters` is exactly that: 0006 created `firm_matter_scope`
+   * with `with check (false)` and migration 0033 replaces it. Asserting against 0006
+   * here would check a policy that no longer exists on the database.
+   *
+   * So the migrations are replayed in order: a `create policy` records the text, a
+   * `drop policy` removes it. What comes out is the set Postgres would have.
+   */
+  function resolvedPolicies(): Array<{ name: string; table: string; text: string }> {
+    const dir = 'supabase/migrations';
+    const files = require('node:fs').readdirSync(dir).filter((f: string) => f.endsWith('.sql')).sort();
+    const out = new Map<string, { name: string; table: string; text: string }>();
+    for (const f of files) {
+      // Comments are stripped: the policies in this codebase carry their reasoning
+      // inline, and a comment that NAMES a function is not a call to it. The first
+      // run of this helper failed on exactly that — a `with check` whose comment
+      // said "no matter_visible() here" was read as though it called the function.
+      const text = (readFileSync(`${dir}/${f}`, 'utf8') as string).replace(/--[^\n]*/g, '');
+      for (const stmt of text.split(';')) {
+        const drop = /drop policy if exists\s+(\w+)\s+on\s+(?:public\.)?(\w+)/i.exec(stmt);
+        if (drop) out.delete(`${drop[2]}.${drop[1]}`);
+        const create = /create policy\s+(\w+)\s+on\s+(?:public\.)?(\w+)/i.exec(stmt);
+        if (create) {
+          out.set(`${create[2]}.${create[1]}`, {
+            name: create[1], table: create[2], text: `${stmt};`,
+          });
+        }
+      }
+    }
+    return [...out.values()];
+  }
+
+  it('the firm may update a matter it can see, and may not create or delete one', () => {
+    // P0.1 · the policy that made the conflict gate reachable. The shape is the
+    // assertion: USING is the visibility rule, WITH CHECK is deliberately weaker
+    // because the write may be the one that hides the row.
+    const rows = resolvedPolicies().filter((p) => p.table === 'matters' && /to firm_api/i.test(p.text))
+      .map((p) => p.text);
+    const write = rows.filter((p) => /matters_firm_write/.test(p));
+    expect(write.length, 'matters must have exactly one write policy').toBe(1);
+
+    expect(write[0], 'the write policy must be UPDATE, not ALL').toMatch(/for update/i);
+    expect(write[0], 'the actor may only touch a row they can see').toMatch(/using \([\s\S]*matter_visible\s*\(/i);
+    expect(write[0], 'the write policy must require the firm phase').toMatch(/kgm_is_firm\s*\(\s*\)/);
+    expect(write[0], 'the write policy must require the tenant').toMatch(/kgm_tenant\s*\(\s*\)/);
+
+    // The load-bearing one. A WITH CHECK that re-tested visibility would refuse the
+    // restriction that removes it — the 0021 lesson, which this table now joins.
+    const check = write[0].slice(write[0].search(/with check/i));
+    expect(check, 'WITH CHECK must not re-test visibility').not.toMatch(/matter_visible/);
+
+    // Read-only halves: the SELECT policy keeps visibility, and the superseded ALL
+    // policy is gone.
+    const read = rows.filter((p) => /matters_firm_read/.test(p));
+    expect(read.length).toBe(1);
+    expect(read[0]).toMatch(/for select/i);
+    expect(read[0]).toMatch(/matter_visible\s*\(/);
+    expect(rows.filter((p) => /firm_matter_scope/.test(p)).length).toBe(0);
+
+    // No INSERT or DELETE policy: the product creates a matter through provisioning
+    // and destroys one through nothing at all.
+    for (const p of rows) {
+      expect(p, 'no firm policy on matters may be ALL or INSERT or DELETE')
+        .not.toMatch(/to firm_api[\s\S]*?(for all|for insert|for delete)/i);
     }
   });
 

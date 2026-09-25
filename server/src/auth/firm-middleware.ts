@@ -103,6 +103,15 @@ export function requireFirm(c: Container): RequestHandler {
 
     // A client-portal caller probing the firm API. Refused as "does not exist"
     // and recorded: this is the row a §72 review looks for.
+    //
+    // THE WRITE IS AWAITED, DELIBERATELY. It used to be fire-and-forget — the
+    // response went out and the escalation row was left to land on its own. On a
+    // serverless platform the invocation can be frozen or reclaimed the moment the
+    // response is written, so the row that a privilege-escalation review exists to
+    // find would be present or absent depending on scheduling. An audit trail with
+    // a hole nobody can see is worse than no trail, because the review reads it as
+    // complete. `tryWrite` cannot throw, so awaiting it cannot turn a refusal into
+    // a 500; it only delays a refusal that is already going to be refused.
     if (hasClientSession) {
       void (async () => {
         await c.audit.tryWrite(
@@ -122,8 +131,9 @@ export function requireFirm(c: Container): RequestHandler {
           },
           requestInfo(req, c.trustProxy),
         );
+        uniform404(res);
       })();
-      return uniform404(res);
+      return;
     }
 
     // Presented a firm credential that did not resolve. They already know the

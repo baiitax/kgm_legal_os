@@ -250,3 +250,60 @@ describe('§49 · assertSafeRole wiring', () => {
     vi.doUnmock('pg');
   });
 });
+
+describe('the demo fixture can be replayed into an empty PostgreSQL database', () => {
+  /*
+    WHY THIS IS HERE AND NOT IN A SEEDER TEST
+
+    `buildDemoSeed()` is executed as a flat list of inserts, in array order, by both
+    drivers. SQLite does not enforce `clients.party_id → parties.id` because the
+    column was added to an existing table (`schema.sqlite.ts`); PostgreSQL does,
+    because 0029 created it with the constraint. So the ORDER of two blocks inside
+    one function is a PostgreSQL-only correctness property, and it failed only when
+    a real seed was attempted:
+
+        insert or update on table "clients" violates foreign key constraint
+        "clients_party_id_fkey"
+
+    The move that was meant to fix it had silently not executed once already, so the
+    property is asserted rather than eyeballed: every non-null `clients.party_id`
+    must name a party that the seed has ALREADY emitted at that point. That is the
+    whole rule, and it is the same rule PostgreSQL applies.
+  */
+  it('never writes a client whose party row has not been emitted yet', async () => {
+    const { buildDemoSeed } = await import('../../server/src/db/demo-data.js');
+    const rows = buildDemoSeed();
+
+    const partyIds = new Set<string>();
+    const offenders: string[] = [];
+
+    for (const row of rows) {
+      if (row.table === 'parties') {
+        partyIds.add(String((row.row as { id: unknown }).id));
+        continue;
+      }
+      if (row.table !== 'clients') continue;
+      const link = (row.row as { party_id?: unknown }).party_id;
+      if (link == null) continue;
+      const id = String(link);
+      if (!partyIds.has(id)) {
+        offenders.push(`${String((row.row as { id: unknown }).id)} → ${id}`);
+      }
+    }
+
+    expect(offenders, `clients linked to a party not yet seeded:\n${offenders.join('\n')}`).toEqual([]);
+  });
+
+  it('seeds the party register before the client list, and in one pass', async () => {
+    const { buildDemoSeed } = await import('../../server/src/db/demo-data.js');
+    const rows = buildDemoSeed();
+    const firstClient = rows.findIndex((r) => r.table === 'clients');
+    const firstParty = rows.findIndex((r) => r.table === 'parties');
+    expect(firstParty).toBeGreaterThanOrEqual(0);
+    expect(firstParty).toBeLessThan(firstClient);
+    // No duplicate emission of a primary key: a second pass would mean two blocks that
+    // disagree, which is how the ordering was lost the first time.
+    const clientIds = rows.filter((r) => r.table === 'clients').map((r) => String((r.row as { id: unknown }).id));
+    expect(new Set(clientIds).size).toBe(clientIds.length);
+  });
+});

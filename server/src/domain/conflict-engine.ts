@@ -137,6 +137,11 @@ export type Severity = 'actual' | 'potential' | 'none';
 export type ConflictFinding = {
   /** The party as recorded on the matter being screened. */
   partyId: string;
+  /**
+   * Real row ids ONLY. Every one of these is written to a `uuid` column, so each is
+   * either a genuine primary key or null — never a synthetic matching label.
+   * `tests/security/conflicts.test.ts` asserts that over every branch of the engine.
+   */
   matchedPartyId: string | null;
   matchedMatterId: string | null;
   matchedClientId: string | null;
@@ -158,6 +163,17 @@ export type ConflictFinding = {
 
 export type EvaluationInput = {
   matter: {
+    /**
+     * The prospective client's PARTY row, when it has one.
+     *
+     * `clientIdentity.id` is not usable as a database key: for a client that predates
+     * the party register, `loadConflictDataset` mints a synthetic `client:<uuid>`
+     * identity so the matcher has something to compare against. That label is fine
+     * for matching and for the explanation text, and it is poison in a `uuid` column
+     * — it took a production 500 ("invalid input syntax for type uuid") to make this
+     * explicit, on the first check that matched a client rather than a counterparty.
+     */
+    clientPartyId: string | null;
     id: string;
     matterNumber: string;
     caseNumber: string | null;
@@ -290,7 +306,10 @@ export function evaluateConflicts(input: EvaluationInput): EvaluationResult {
 
         findings.push({
           partyId: party.id,
-          matchedPartyId: client.identity.id,
+          // The client ROW is always a real key. Its party row may not exist — a
+          // client that predates the register — and in that case this is null rather
+          // than the synthetic matching label.
+          matchedPartyId: client.partyId,
           matchedMatterId: null,
           matchedClientId: client.clientId,
           relation,
@@ -298,7 +317,13 @@ export function evaluateConflicts(input: EvaluationInput): EvaluationResult {
           matchBasis: basisOf(party, client.identity, strength),
           // The consent Rule 8 requires is the affected party's own: the current or
           // former client being acted against, never the prospective client's.
-          affectedPartyId: client.identity.id,
+          //
+          // Null when that client has no party row. The waiver route then refuses with
+          // `no_affected_party`, which is the truth: there is nobody on the register
+          // whose consent could be recorded, and the remedy is to register them. A
+          // synthetic label here would instead have produced a foreign-key violation
+          // or, worse, silently matched nothing.
+          affectedPartyId: client.partyId,
           severity,
           ruleCited: isCurrent ? RULE.currentClient : RULE.formerClient,
           relationshipEndedOn: client.relationshipEndedOn,
@@ -403,12 +428,12 @@ export function evaluateConflicts(input: EvaluationInput): EvaluationResult {
   for (const match of sameCaseMatches) {
     const caseNumber = normalizeCaseNumber(input.matter.caseNumber);
     for (const affected of [
-      { id: match.client.identity.id, who: `the existing client «${match.client.identity.name}»` },
-      { id: input.matter.clientIdentity.id, who: `the prospective client «${input.matter.clientIdentity.name}»` },
+      { id: match.client.partyId, who: `the existing client «${match.client.identity.name}»` },
+      { id: input.matter.clientPartyId, who: `the prospective client «${input.matter.clientIdentity.name}»` },
     ]) {
       findings.push({
         partyId: match.party.id,
-        matchedPartyId: match.client.identity.id,
+        matchedPartyId: match.client.partyId,
         matchedMatterId: null,
         matchedClientId: match.client.clientId,
         relation: 'same_case_opponent',

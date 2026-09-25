@@ -1398,7 +1398,12 @@ export class FirmRepo {
         `select p.id, p.tenant_id, p.kind, p.name, p.name_ar, p.name_normalized,
                 p.commercial_registration, p.vat_number, p.national_id_masked, p.status,
                 p.notes, p.created_at,
-                (select count(*) from matter_parties mp where mp.party_id = p.id) as matter_count
+                (select count(*) from matter_parties mp where mp.party_id = p.id) as matter_count,
+                -- How many names this party is known by. A register that shows one
+                -- name per company hides the reason the company was hard to find: it
+                -- appears differently in a court filing, in Najiz and on its CR, and
+                -- the conflict search only finds it if somebody recorded the variants.
+                (select count(*) from party_aliases a where a.party_id = p.id) as alias_count
            from parties p
           where p.tenant_id = ?
             and (p.name_normalized like ?
@@ -1412,7 +1417,8 @@ export class FirmRepo {
         `select p.id, p.tenant_id, p.kind, p.name, p.name_ar, p.name_normalized,
                 p.commercial_registration, p.vat_number, p.national_id_masked, p.status,
                 p.notes, p.created_at,
-                (select count(*) from matter_parties mp where mp.party_id = p.id) as matter_count
+                (select count(*) from matter_parties mp where mp.party_id = p.id) as matter_count,
+                (select count(*) from party_aliases a where a.party_id = p.id) as alias_count
            from parties p
           where p.tenant_id = ?
           order by p.name
@@ -1778,7 +1784,22 @@ export class FirmRepo {
   }
 
   /** The identity of the client of a matter, for the engine's other half. */
-  async clientIdentityForMatter(tenantId: string, clientId: string): Promise<PartyIdentity | null> {
+  /**
+   * The prospective client, as the conflict engine needs it.
+   *
+   * TWO FIELDS, because they answer different questions. `identity` is what to MATCH
+   * against — and for a client that predates the party register it carries a
+   * synthetic `client:<uuid>` id, which is fine for comparison and fatal in a `uuid`
+   * column. `partyId` is the actual `parties` row, or null when there is not one.
+   *
+   * They were one return value until a live check found a client rather than a
+   * counterparty and PostgreSQL rejected `client:cccccccc-…` as a uuid. Returning
+   * them together, under names that cannot be confused, is the fix that makes the
+   * mistake structurally hard instead of merely fixed.
+   */
+  async clientIdentityForMatter(
+    tenantId: string, clientId: string,
+  ): Promise<{ identity: PartyIdentity; partyId: string | null } | null> {
     const row = await this.q().get<Row>(
       `select p.id, p.kind, p.name, p.name_ar, p.commercial_registration, p.vat_number,
               p.national_id_hash
@@ -1793,12 +1814,15 @@ export class FirmRepo {
         [tenantId, req(row.id)],
       );
       return {
-        id: req(row.id), kind: req(row.kind), name: req(row.name),
-        nameAr: row.name_ar == null ? null : req(row.name_ar),
-        aliases: aliases.map((a) => req(a.alias)),
-        commercialRegistration: row.commercial_registration == null ? null : req(row.commercial_registration),
-        vatNumber: row.vat_number == null ? null : req(row.vat_number),
-        nationalIdHash: row.national_id_hash == null ? null : req(row.national_id_hash),
+        partyId: req(row.id),
+        identity: {
+          id: req(row.id), kind: req(row.kind), name: req(row.name),
+          nameAr: row.name_ar == null ? null : req(row.name_ar),
+          aliases: aliases.map((a) => req(a.alias)),
+          commercialRegistration: row.commercial_registration == null ? null : req(row.commercial_registration),
+          vatNumber: row.vat_number == null ? null : req(row.vat_number),
+          nationalIdHash: row.national_id_hash == null ? null : req(row.national_id_hash),
+        },
       };
     }
     // A client that predates the register. It is matched on its own name columns,
@@ -1811,14 +1835,19 @@ export class FirmRepo {
     );
     if (!legacy) return null;
     return {
-      id: `client:${req(legacy.id)}`,
-      kind: req(legacy.client_type) === 'organization' ? 'company' : 'individual',
-      name: req(legacy.name),
-      nameAr: legacy.name_ar == null ? null : req(legacy.name_ar),
-      aliases: [],
-      commercialRegistration: null,
-      vatNumber: null,
-      nationalIdHash: legacy.national_id_hash == null ? null : req(legacy.national_id_hash),
+      // No party row: a legal answer of "nobody is on the register for this client",
+      // which is different from "this client has no identity".
+      partyId: null,
+      identity: {
+        id: `client:${req(legacy.id)}`,
+        kind: req(legacy.client_type) === 'organization' ? 'company' : 'individual',
+        name: req(legacy.name),
+        nameAr: legacy.name_ar == null ? null : req(legacy.name_ar),
+        aliases: [],
+        commercialRegistration: null,
+        vatNumber: null,
+        nationalIdHash: legacy.national_id_hash == null ? null : req(legacy.national_id_hash),
+      },
     };
   }
 
@@ -1867,7 +1896,20 @@ export class FirmRepo {
       [opts.id, opts.tenantId, opts.checkId, opts.matterId, f.partyId, f.matchedPartyId,
        f.matchedMatterId, f.matchedClientId, f.relation, f.matchStrength, f.matchBasis,
        f.affectedPartyId, f.severity, f.ruleCited, f.relationshipEndedOn, f.windowYears,
-       f.windowLiftsOn, f.withinWindow == null ? null : (f.withinWindow ? 1 : 0), now, now],
+       /*
+         A BOOLEAN, not 1/0.
+
+         This was `f.withinWindow ? 1 : 0`, which SQLite accepts — it has no boolean
+         type, and the driver converts booleans to 0/1 on the way in — and which
+         PostgreSQL rejects outright: `column "within_window" is of type boolean but
+         expression is of type integer`. Every conflict check that found a party whose
+         window had been measured returned HTTP 500 in production while 368 tests
+         passed, because the tests run on the dialect that has no boolean type.
+
+         The driver layer exists to absorb exactly this. The repository hands over a
+         JavaScript boolean and lets each driver decide how to store it.
+       */
+       f.windowLiftsOn, f.withinWindow, now, now],
     );
   }
 
@@ -2101,7 +2143,9 @@ export class FirmRepo {
     await this.q().run(
       `update matters set conflict_cleared = ?, updated_at = ?
         where id = ? and tenant_id = ?`,
-      [opts.cleared ? 1 : 0, new Date().toISOString(), opts.matterId, opts.tenantId],
+      // A JavaScript boolean: SQLite stores 0/1 through the driver, PostgreSQL
+      // stores a real boolean. See the note on within_window above.
+      [opts.cleared, new Date().toISOString(), opts.matterId, opts.tenantId],
     );
   }
 
@@ -2112,7 +2156,7 @@ export class FirmRepo {
     await this.q().run(
       `update matters set internal_status = ?, conflict_cleared = ?, updated_at = ?
         where id = ? and tenant_id = ?`,
-      [opts.internalStatus, opts.conflictCleared ? 1 : 0,
+      [opts.internalStatus, opts.conflictCleared,
        new Date().toISOString(), opts.matterId, opts.tenantId],
     );
   }
@@ -2294,7 +2338,10 @@ export type PartyRow = {
   id: string; kind: string; name: string; nameAr: string | null;
   normalized: string; commercialRegistration: string | null; vatNumber: string | null;
   nationalIdMasked: string | null; status: string; notes: string | null;
-  matterCount: number; createdAt: string;
+  matterCount: number;
+  /** How many recorded name variants this party is known by. */
+  aliasCount: number;
+  createdAt: string;
 };
 
 function toPartyRow(r: Row): PartyRow {
@@ -2308,6 +2355,7 @@ function toPartyRow(r: Row): PartyRow {
     status: req(r.status),
     notes: r.notes == null ? null : req(r.notes),
     matterCount: toNumber(r.matter_count ?? 0),
+    aliasCount: toNumber(r.alias_count ?? 0),
     createdAt: req(toIso(r.created_at)),
   };
 }

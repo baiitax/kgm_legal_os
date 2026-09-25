@@ -455,6 +455,94 @@ describe('P0.1 · the matter lifecycle gate — conflict_check is a locked room'
   });
 });
 
+describe('P0.1 · the engine emits database keys, never matching labels', () => {
+  /*
+    THE DEFECT THIS PINS
+
+    A client that predates the party register has no `parties` row, so
+    `loadConflictDataset` mints a synthetic identity — `client:<uuid>` — for the
+    matcher to compare against. The engine then returned that label in
+    `matchedPartyId` and `affectedPartyId`, and the route wrote it into a `uuid`
+    column. On SQLite this is invisible: the column is TEXT and the write succeeds.
+    On PostgreSQL the first check that matched a CLIENT rather than a counterparty
+    answered
+
+        invalid input syntax for type uuid: "client:cccccccc-0000-4000-8000-000000000002"
+
+    as HTTP 500 in production, with 368 tests green.
+
+    The structural fix is that the engine now carries `partyId` and `clientId`
+    separately from the identity it matched on. This test is the thing that keeps it
+    that way: every id-shaped field of every finding, over every matter in the
+    tenant, across every branch the engine has.
+  */
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  it('never returns a synthetic label in a field that becomes a database key', async () => {
+    const { evaluateConflicts } = await import('../../server/src/domain/conflict-engine.js');
+
+    const matters = await s.db.all<{ id: string; client_id: string }>(
+      `select id, client_id from matters where tenant_id = ?`, [IDS.tenantKgm]);
+    expect(matters.length).toBeGreaterThan(0);
+
+    let findingsSeen = 0;
+    const offenders: string[] = [];
+
+    for (const m of matters) {
+      const dataset = await s.c.firm.loadConflictDataset(IDS.tenantKgm, m.id);
+      if (!dataset.matter) continue;
+      const client = await s.c.firm.clientIdentityForMatter(IDS.tenantKgm, String(dataset.matter.client_id));
+      if (!client) continue;
+
+      const result = evaluateConflicts({
+        matter: {
+          id: m.id,
+          matterNumber: String(dataset.matter.matter_number ?? ''),
+          caseNumber: dataset.matter.case_number == null ? null : String(dataset.matter.case_number),
+          clientId: String(dataset.matter.client_id),
+          clientIdentity: client.identity,
+          clientPartyId: client.partyId,
+        },
+        parties: dataset.parties,
+        priorAppearances: dataset.priorAppearances,
+        clients: dataset.clients,
+        affiliations: dataset.affiliations,
+        clientMatters: dataset.clientMatters,
+      });
+
+      for (const f of result.findings) {
+        findingsSeen += 1;
+        for (const key of ['partyId', 'matchedPartyId', 'matchedMatterId',
+          'matchedClientId', 'affectedPartyId'] as const) {
+          const v = f[key];
+          if (v === null) continue;
+          if (!UUID.test(v)) offenders.push(`${m.id} · ${f.relation} · ${key} = ${v}`);
+        }
+      }
+    }
+
+    // The dataset must actually exercise the engine, or this proves nothing.
+    expect(findingsSeen).toBeGreaterThan(0);
+    expect(offenders, `non-key values reached a uuid column:\n${offenders.join('\n')}`).toEqual([]);
+  });
+
+  it('matches a legacy client by name while reporting no party row for it', async () => {
+    // The other half of the same rule: dropping the synthetic id must not stop the
+    // client from being MATCHED. The register's job is to find them; the party row's
+    // absence is a fact the reviewer is told about, not a reason to miss the finding.
+    const legacy = await s.db.get<{ party_id: string | null }>(
+      `select party_id from clients where id = ?`, [IDS.clientAhmed]);
+    // The demo dataset links its clients, so unlink one to reproduce the case.
+    if (legacy?.party_id) await s.db.run(`update clients set party_id = null where id = ?`, [IDS.clientAhmed]);
+
+    const client = await s.c.firm.clientIdentityForMatter(IDS.tenantKgm, IDS.clientAhmed);
+    expect(client).not.toBeNull();
+    expect(client!.partyId).toBeNull();
+    expect(client!.identity.id).toBe(`client:${IDS.clientAhmed}`);
+    expect(client!.identity.name.length).toBeGreaterThan(0);
+  });
+});
+
 describe('P0.1 · the guard on matters — an assertion is refused, a carried value is not', () => {
   /*
     THE DEFECT THESE TESTS PIN (fixed in migration 0032)

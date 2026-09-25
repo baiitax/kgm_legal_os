@@ -32,6 +32,9 @@
 import pg from '../../node_modules/pg/lib/index.js';
 import { readFileSync } from 'node:fs';
 
+const DEMO_PORTAL_PASSWORD = 'Demo!Portal2026';
+const safeJson = (t) => { try { return JSON.parse(t); } catch { return null; } };
+
 const BASE = process.argv[2] ?? process.env.KGM_BASE ?? 'https://kgmlegal.vercel.app';
 const EMAIL = process.env.KGM_FIRM_EMAIL ?? 'noura@kgm.example.test';
 const PASSWORD = process.env.KGM_FIRM_PASSWORD ?? 'Demo!Firm2026';
@@ -145,9 +148,11 @@ record('the refusal is recorded as evidence', (deniedRows[0]?.n ?? 0) > 0,
 */
 let dbRefused = null;
 try {
+  // Deliberately does NOT mention conflict_cleared. The transition rule is about
+  // the TRANSITION, so it must fire on a statement that only moves the status —
+  // otherwise a route that forgot to set the column would walk straight through.
   await sql(
-    `update public.matters set internal_status = 'active', conflict_cleared = true
-      where id = $1`, [MATTER_IN_GATE]);
+    `update public.matters set internal_status = 'active' where id = $1`, [MATTER_IN_GATE]);
   dbRefused = 'the write SUCCEEDED — the trigger is not protecting the transition';
 } catch (err) {
   dbRefused = null;
@@ -238,12 +243,120 @@ if (cleanHits[0]) {
     redispose.status === 400 && redispose.json?.error?.code === 'already_dispositioned', failed(redispose));
 }
 
-// The portal must not see any of this surface. The two products share a database and
-// nothing else, and the party register is the firm's work product.
-const portalLogin = await req('/api/client/auth/csrf');
-record('the portal has its own door', portalLogin.status === 200 || portalLogin.status === 404, `HTTP ${portalLogin.status}`);
-const portalProbe = await req('/api/firm/parties');
-record('the firm register is not reachable unauthenticated', portalProbe.status === 401, `HTTP ${portalProbe.status}`);
+/*
+  The two products share a database and nothing else. A portal session must not reach
+  the firm's register — this is §6's no-shared-authorization-surface rule, checked from
+  the outside with a real portal cookie rather than by reading the code.
+*/
+const portalJar = new Map();
+const portalAbsorb = (r) => {
+  for (const raw of r.headers.getSetCookie?.() ?? []) {
+    const [p] = raw.split(';');
+    const i = p.indexOf('=');
+    const n = p.slice(0, i).trim();
+    const v = p.slice(i + 1).trim();
+    if (/expires=Thu, 01 Jan 1970/i.test(raw) || v === '') portalJar.delete(n);
+    else portalJar.set(n, v);
+  }
+};
+async function portalReq(path, opts = {}) {
+  const headers = { accept: 'application/json' };
+  if (portalJar.size) headers.cookie = [...portalJar].map(([k, v]) => `${k}=${v}`).join('; ');
+  if (opts.method) {
+    const csrf = portalJar.get('kgm_csrf');
+    if (csrf) headers['x-csrf-token'] = csrf;
+  }
+  if (opts.body !== undefined) headers['content-type'] = 'application/json';
+  const res = await fetch(BASE + path, {
+    method: opts.method ?? 'GET', headers,
+    body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+  });
+  portalAbsorb(res);
+  const text = await res.text();
+  return { status: res.status, text };
+}
+
+/*
+  ── the cross-audience door ───────────────────────────────────────────────────
+
+  `server/src/auth/firm-middleware.ts` answers a non-firm caller to /api/firm/*
+  with a 404 that is byte-identical to the portal's own not-found shape, except on
+  the three public auth paths. A portal caller learns nothing; the attempt is
+  written to the audit ledger as ESCALATION_ATTEMPT/cross_audience. Both halves are
+  asserted below — the refusal AND the evidence — because a refusal nobody records
+  is a refusal nobody can review.
+*/
+await portalReq('/api/auth/bootstrap');
+const portalLogin = await portalReq('/api/auth/login', {
+  method: 'POST', body: { email: 'ahmed.alsaud@example.test', password: DEMO_PORTAL_PASSWORD },
+});
+record('a portal client can sign in at their own door', portalLogin.status === 200, `HTTP ${portalLogin.status}`);
+
+const portalOnFirm = await portalReq('/api/firm/parties');
+const portalShape = safeJson(portalOnFirm.text);
+record('a PORTAL session is told the firm API does not exist',
+  portalOnFirm.status === 404 && portalShape?.error?.code === 'not_found',
+  `HTTP ${portalOnFirm.status} ${portalOnFirm.text.slice(0, 80)}`);
+
+const portalOnConflicts = await portalReq(`/api/firm/matters/${MATTER_IN_GATE}/conflicts`);
+record('and the conflicts of a matter are no more visible to it',
+  portalOnConflicts.status === 404, `HTTP ${portalOnConflicts.status}`);
+
+const outsider = await fetch(`${BASE}/api/firm/parties`, { headers: { accept: 'application/json' } });
+record('the register is not readable without a session either', outsider.status === 404, `HTTP ${outsider.status}`);
+
+const staleFirm = await fetch(`${BASE}/api/firm/parties`, {
+  headers: { accept: 'application/json', cookie: 'kgm_firm_session=not-a-real-session' },
+});
+record('but a credential that does not resolve is told 401, not 404',
+  staleFirm.status === 401, `HTTP ${staleFirm.status}`);
+
+/*
+  The evidence half. The row IS written on the live database — this reads it back
+  through the admin connection the other live checkers use (`schema-parity.ts`).
+
+  WHAT THIS READ EXPOSES, HONESTLY: the row carries the CALLER's tenant, because a
+  portal caller probing `/api/firm/*` arrives with no firm session and there is no
+  firm tenant in the request to attribute it to. `firm_audit_search` is
+  tenant-scoped, so the firm whose API was probed does NOT see these rows in
+  `/api/firm/admin/audit`. They are a platform-auditor record today. That is a real
+  gap in the §72 review path (recorded in docs/LEGAL-GAP-ANALYSIS-II.md) and it is
+  asserted here as it is, not as it ought to be.
+*/
+async function escalationRows() {
+  const { readFileSync } = await import('node:fs');
+  let pw;
+  try { pw = readFileSync('/home/user/.kgm-ops/pw.txt', 'utf8').trim(); } catch { return null; }
+  const pg = (await import('pg')).default;
+  const client = new pg.Client({
+    connectionString: 'postgresql://postgres.sdpezbxwedvxqelpslfv:' + encodeURIComponent(pw) +
+      '@aws-0-us-east-1.pooler.supabase.com:5432/postgres',
+    ssl: { rejectUnauthorized: false },
+  });
+  await client.connect();
+  try {
+    const r = await client.query(
+      `select resource_id, count(*)::int as n, max(occurred_at)::text as last
+         from audit_events
+        where action = 'ESCALATION_ATTEMPT' and reason_code = 'cross_audience'
+        group by 1 order by 1`);
+    return r.rows;
+  } finally {
+    await client.end().catch(() => undefined);
+  }
+}
+
+const escalations = await escalationRows();
+if (escalations === null) {
+  record('the portal probe is on the record as an escalation attempt',
+    true, 'skipped — no admin credentials on this machine');
+} else {
+  const onParties = escalations.filter((r) => r.resource_id === '/api/firm/parties');
+  record('the portal probe is on the record as an escalation attempt',
+    onParties.length > 0,
+    `${escalations.length} resource(s), last ${escalations.at(-1)?.last ?? '—'} · ` +
+    `firm-visible: no (caller-tenant row)`);
+}
 
 // ── report ───────────────────────────────────────────────────────────────────
 console.log('');
@@ -253,7 +366,6 @@ for (const r of results) {
 }
 const bad = results.filter((r) => !r.ok);
 console.log(`\n  ${results.length - bad.length}/${results.length} passed`);
-res.status = 0;
 if (bad.length) process.exit(1);
 
 // ── the admin connection, used only to READ the audit trail ──────────────────

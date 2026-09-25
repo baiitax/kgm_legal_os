@@ -217,3 +217,50 @@ Revised order inside P0: **judgments + service → deadline_rules + court_calend
 > Those are not features. They are the substance of professional diligence, and each of them is currently a state the software will happily record without ever having checked the condition it stands for.
 >
 > The remedy is not six projects. It is one pattern, four times already present in the codebase, applied to authority instead of to columns: **derive the precondition, store what evidences it, and make the database refuse to move past it.**
+
+---
+
+## §7 · Findings raised by the P0.1 live harness
+
+*Added 2026-09-25, from `scripts/verify/conflict-live.mjs` running 25/25 against
+`https://kgmlegal.vercel.app` and the production Supabase database.*
+
+### F-1 · A cross-audience escalation is not visible to the firm it was aimed at
+
+A portal session that probes `/api/firm/*` is refused with the uniform
+`not_found` and written to `audit_events` as `ESCALATION_ATTEMPT` /
+`reason_code = cross_audience` (`server/src/auth/firm-middleware.ts`). That row is
+attributed to the **caller's** tenant, because a portal caller arrives with no firm
+session and there is no firm tenant anywhere in the request to attribute it to.
+
+`firm_audit_search()` is tenant-scoped. So the firm whose API was probed cannot see
+these rows in `GET /api/firm/admin/audit`. They are, today, a platform-auditor
+record — read with the admin connection, not through either product.
+
+The refusal is correct and the write is correct; what is missing is the **review
+path**. §72 asks for a privilege-escalation review, and the row that review exists
+to find is not reachable from the surface that is supposed to conduct it.
+
+Options, cheapest first:
+
+| # | Option | Cost | Note |
+|---|---|---|---|
+| a | A platform-auditor read path (an operator role, not a tenant role) that lists `ESCALATION_ATTEMPT` rows across tenants | small | Honest about the attribution; does not pretend the row belongs to the firm |
+| b | When the deployment has exactly one firm tenant, resolve it and write a **second** row under it, marked as mirrored (`metadata.mirrored_from_tenant`) | medium | Correct for the common single-firm case; must not be attempted in a multi-firm deployment |
+| c | Attribute the row to the *target surface* instead of the actor | large | Needs a firm identity on a route that by definition has none |
+
+Do **not** solve this by widening `firm_audit_search` to all tenants. That would
+hand every firm the ability to read every other firm's audit ledger in order to fix
+one row, which trades a review gap for a tenancy breach.
+
+### Observation · The review surface reports a BASIS, not a verdict
+
+The four candidates the gate raised on KGM-2026-0163 are all `match_basis = alias`
+— «الفجر» matching an alias of a client rather than the client's own name. The
+harness reads this as designed (a `candidate` is a judgement for a human, and
+`proposed_severity` is a proposal that is never a decision). The route exposes
+`matchStrength`, `matchBasis`, `ruleCited` and the window, but **not** the engine's
+free-text `explanation`. That is the right trade — a UI must present the basis and
+the window, never a sentence that reads like a ruling — but the firm-side review
+screen must be built to show the basis prominently, or a reviewer will disposition
+four rows without learning that the thread tying them together is an alias.

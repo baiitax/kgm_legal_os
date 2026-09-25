@@ -891,8 +891,8 @@ export function firmRouter(c: Container): Router {
     if (!dataset.matter) throw notFoundOrForbidden('matter', matterId);
 
     const clientId = String(dataset.matter.client_id);
-    const clientIdentity = await c.firm.clientIdentityForMatter(p.tenantId, clientId);
-    if (!clientIdentity) throw notFoundOrForbidden('client', clientId);
+    const client = await c.firm.clientIdentityForMatter(p.tenantId, clientId);
+    if (!client) throw notFoundOrForbidden('client', clientId);
 
     const result = evaluateConflicts({
       matter: {
@@ -900,7 +900,10 @@ export function firmRouter(c: Container): Router {
         matterNumber: String(dataset.matter.matter_number ?? ''),
         caseNumber: dataset.matter.case_number == null ? null : String(dataset.matter.case_number),
         clientId,
-        clientIdentity,
+        clientIdentity: client.identity,
+        // Real row id or null — never the synthetic matching label. See the note on
+        // `clientIdentityForMatter`.
+        clientPartyId: client.partyId,
       },
       parties: dataset.parties,
       priorAppearances: dataset.priorAppearances,
