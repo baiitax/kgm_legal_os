@@ -1,3 +1,5 @@
+import { isTransientConnectionError } from '../db/transient.js';
+
 /**
  * Error model (§32).
  *
@@ -151,7 +153,15 @@ export type ErrorCode =
   | 'csrf_failed'
   | 'conflict'
   | 'unavailable'
-  | 'internal_error';
+  | 'internal_error'
+  /**
+   * The database was unreachable for this request and the failure was transient: the
+   * pooler refused a connection, an idle one was closed underneath us, or a cold
+   * instance's connect timed out. Distinct from `internal_error` because it is worth
+   * trying again, and because telling a user "something unexpected went wrong" when the
+   * server knows exactly what went wrong is not an error message, it is a shrug.
+   */
+  | 'service_unavailable';
 
 export class PortalError extends Error {
   readonly status: number;
@@ -175,6 +185,11 @@ export class PortalError extends Error {
    * generic error code.
    */
   readonly alreadyAudited?: boolean;
+  /**
+   * Safe to send the identical request again. Only ever true for a failure that happened
+   * before the statement ran, or for a read that failed on a dead connection.
+   */
+  readonly retryable?: boolean;
 
   constructor(
     status: number,
@@ -186,6 +201,7 @@ export class PortalError extends Error {
       auditReason?: string;
       resource?: { type: string; id: string | null };
       alreadyAudited?: boolean;
+      retryable?: boolean;
     } = {},
   ) {
     super(message);
@@ -197,6 +213,7 @@ export class PortalError extends Error {
     this.auditReason = opts.auditReason;
     this.resource = opts.resource;
     this.alreadyAudited = opts.alreadyAudited;
+    this.retryable = opts.retryable;
   }
 }
 
@@ -318,6 +335,30 @@ export function toPortalError(err: unknown): PortalError {
       cause: err,
       auditReason: token,
     });
+  }
+
+  /*
+    A CONNECTION THAT FAILED IS NOT AN INTERNAL ERROR.
+
+    Everything above this line answers questions about the request: is the body
+    well-formed, is the record in a state that permits this, did a guard refuse it. This
+    final case is the only one that is about the SERVER — and the first version of it
+    reported a pooler at its connection limit to the person signing in as "The request
+    could not be completed. Something unexpected went wrong. Please try again." The user
+    was told to try again by a message that also implied trying again would not help, with
+    no reference to quote and nothing in the log tying the two together.
+
+    503 with `retryable`, an honest sentence, and the request id the handler already
+    attaches — because the remedy really is to try again, and the second attempt really
+    does work.
+  */
+  if (isTransientConnectionError(err)) {
+    return new PortalError(503, 'service_unavailable',
+      'the database is temporarily unavailable', {
+        cause: err,
+        retryable: true,
+        details: { retryable: true },
+      });
   }
 
   return new PortalError(500, 'internal_error', 'internal error', { cause: err });

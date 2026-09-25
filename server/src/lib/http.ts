@@ -91,6 +91,12 @@ export function fail(res: Response, err: PortalError): void {
       // copy from `code`; this string is for developers and logs only.
       message: err.message,
       ...(err.safeDetails ? { details: err.safeDetails } : {}),
+      /*
+        The client uses this to offer "try again" rather than "contact support". It rides
+        OUTSIDE `details` because it is a property of the error, not of the resource, and
+        a caller should not have to know which guard produced the refusal to read it.
+      */
+      ...(err.retryable ? { retryable: true } : {}),
     },
   });
 }

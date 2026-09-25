@@ -474,6 +474,16 @@ const AR = {
   'err.invalid_json': 'صيغة الطلب غير صالحة.',
   'err.network_error': 'تعذّر الاتصال بالخادم.',
   'err.internal_error': 'حدث خطأ غير متوقع. حاول مرة أخرى.',
+  /*
+    A THIRD KIND OF FAILURE, WITH ITS OWN WORDS.
+
+    `internal_error` tells the reader the server broke, which is true of a bug and false
+    of a database that is momentarily unreachable — and the remedy is different in each
+    case. Saying "something unexpected went wrong" about a failure the server understood
+    perfectly well sends the reader looking for a fault instead of pressing the button
+    again, which is all that is needed.
+  */
+  'err.service_unavailable': 'الخادم مشغول الآن ولم يكتمل الطلب. لم يتم إنشاء جلسة جديدة — أعد المحاولة بعد لحظات.',
   'err.unknown': 'تعذّر إتمام الطلب.',
   'err.lockedRetry': 'حاول مجددًا بعد {n} ثانية.',
 
@@ -486,6 +496,7 @@ const AR = {
   'errTitle.rateLimited': 'محاولات كثيرة',
   'errTitle.mfa': 'التحقق بخطوتين',
   'errTitle.offline': 'تعذّر الاتصال',
+  'errTitle.unavailable': 'الخادم مشغول مؤقتاً',
 
   '404.title': 'الصفحة غير موجودة',
   '404.body': 'الرابط الذي فتحته غير متاح في بوابة العميل.',
@@ -698,6 +709,7 @@ const ERROR_TITLES: Record<string, MessageKey> = {
   mfa_required: 'errTitle.mfa',
   mfa_invalid: 'errTitle.mfa',
   network_error: 'errTitle.offline',
+  service_unavailable: 'errTitle.unavailable',
 };
 
 /**
@@ -1192,6 +1204,8 @@ const EN: Record<MessageKey, string> = {
   'err.invalid_json': 'The request was not in a valid format.',
   'err.network_error': 'Could not reach the server.',
   'err.internal_error': 'Something unexpected went wrong. Please try again.',
+  'err.service_unavailable':
+    'The server is busy and the request did not complete. No session was created — try again in a moment.',
   'err.unknown': 'The request could not be completed.',
   'err.lockedRetry': 'Try again in {n} seconds.',
 
@@ -1204,6 +1218,7 @@ const EN: Record<MessageKey, string> = {
   'errTitle.rateLimited': 'Too many attempts',
   'errTitle.mfa': 'Two-factor verification',
   'errTitle.offline': 'No connection',
+  'errTitle.unavailable': 'The server is busy',
 
   '404.title': 'Page not found',
   '404.body': 'The link you opened is not available in the client portal.',

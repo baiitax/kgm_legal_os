@@ -142,6 +142,8 @@ function withoutSslParams(connectionString: string): string {
 
 const { Pool } = pg;
 
+import { isTransientConnectionError } from './transient.js';
+
 /**
  * PostgreSQL driver — the production path.
  *
@@ -183,7 +185,13 @@ export class PostgresDb implements Db {
   readonly driver = 'postgres' as const;
   private readonly pool: pg.Pool;
 
-  constructor(connectionString: string, max = 10) {
+  /**
+   * @param pool a pool to use instead of building one. A TEST SEAM, and nothing else:
+   *   the connection discipline this class promises — one statement at a time per
+   *   connection, a bounded connect retry, reads retried and writes not — can only be
+   *   verified against a pool that can be made to fail on purpose.
+   */
+  constructor(connectionString: string, max = 10, pool?: pg.Pool) {
     if (!connectionString) {
       throw new Error(
         'DATABASE_URL is required for the postgres driver. It must be the ' +
@@ -191,9 +199,15 @@ export class PostgresDb implements Db {
           'postgres://portal_api:***@db.<ref>.supabase.co:5432/postgres',
       );
     }
-    this.pool = new Pool({
+    this.pool = pool ?? new Pool({
       connectionString: withoutSslParams(connectionString),
       max,
+      /*
+        A COLD CONNECT IS ALLOWED TO BE SLOW; A REQUEST IS NOT ALLOWED TO WAIT FOREVER.
+        8 s was already here and is kept: longer than a pooler cold start, shorter than
+        the 30 s function budget, and the retry below turns one slow attempt into a
+        second rather than into a 500.
+      */
       connectionTimeoutMillis: 8_000,
       idleTimeoutMillis: 60_000,
       allowExitOnIdle: false,
@@ -339,8 +353,60 @@ export class PostgresDb implements Db {
     return out as T;
   }
 
+  /**
+   * A connection, with a bounded retry while the failure is about connecting.
+   *
+   * Safe for reads AND writes: nothing has been sent when this throws, so the second
+   * attempt cannot apply a statement twice. Three attempts, because the two defects that
+   * produce this failure in production are a pooler at its client limit and an instance
+   * that has just started — both of which clear in milliseconds — and because a request
+   * that waits 8 s three times is already past its function budget.
+   */
+  private async connect(): Promise<pg.PoolClient> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        return await this.pool.connect();
+      } catch (err) {
+        lastError = err;
+        if (!isTransientConnectionError(err)) throw err;
+        console.warn(`[db] connect attempt ${attempt} failed (${(err as Error).message}); retrying`);
+        await new Promise((r) => setTimeout(r, attempt * 75));
+      }
+    }
+    throw lastError;
+  }
+
+  /**
+   * A read, retried once if the CONNECTION died mid-statement.
+   *
+   * Reads are idempotent, so repeating one costs nothing but the milliseconds. A write
+   * deliberately does not get this: the connection can fail after the server has applied
+   * the statement and before the client hears about it, and a retry there is how a
+   * payment is recorded twice.
+   */
+  private async read<T extends pg.QueryResultRow = Row>(
+    sql: string, params: Param[],
+  ): Promise<pg.QueryResult<T>> {
+    const client = await this.connect();
+    try {
+      return await client.query<T>(PostgresDb.toPg(sql), PostgresDb.coerce(params) as never);
+    } catch (err) {
+      if (!isTransientConnectionError(err)) throw err;
+      console.warn(`[db] read failed on a dead connection (${(err as Error).message}); retrying once`);
+      const second = await this.connect();
+      try {
+        return await second.query<T>(PostgresDb.toPg(sql), PostgresDb.coerce(params) as never);
+      } finally {
+        second.release();
+      }
+    } finally {
+      client.release();
+    }
+  }
+
   async all<T = Row>(sql: string, params: Param[] = []): Promise<T[]> {
-    const res = await this.pool.query(PostgresDb.toPg(sql), PostgresDb.coerce(params));
+    const res = await this.read(sql, params);
     return res.rows.map((r) => PostgresDb.mapRow<T>(r as Row));
   }
 
@@ -350,26 +416,66 @@ export class PostgresDb implements Db {
   }
 
   async run(sql: string, params: Param[] = []): Promise<RunResult> {
-    const res = await this.pool.query(PostgresDb.toPg(sql), PostgresDb.coerce(params));
-    return { changes: res.rowCount ?? 0 };
+    const client = await this.connect();
+    try {
+      const res = await client.query(PostgresDb.toPg(sql), PostgresDb.coerce(params) as never);
+      return { changes: res.rowCount ?? 0 };
+    } finally {
+      client.release();
+    }
   }
 
   async acquire(): Promise<Scope> {
-    const client = await this.pool.connect();
+    const client = await this.connect();
     let txDepth = 0;
     let ended = false;
 
+    /*
+      ONE CONNECTION, ONE STATEMENT AT A TIME.
+
+      A scope is one connection held for one request, and it is also the ONLY connection
+      the RLS context (`kgm.*`) and the role (`firm_api`) live on — that is why the request
+      is scoped to it at all. Everything the request reads therefore has to go through it.
+
+      But the repository does not always read one thing at a time. `Promise.all` is used
+      wherever several independent facts are wanted for one screen — the authorization
+      facts are the ones that matter, because a firm sign-in resolves roles, permission
+      codes, departments and practice areas at once — and node-postgres answers a second
+      query on a busy client with a deprecation warning today and undefined behaviour
+      later:
+
+          Calling client.query() when the client is already executing a query is
+          deprecated and will be removed in pg@9.0.
+
+      It is worse than a warning. Two statements interleaved on one connection inside a
+      transaction can land outside the savepoint that was supposed to contain them, and
+      the failure appears at whichever unrelated request happens to be in flight.
+
+      So the scope serializes: every statement — including BEGIN/COMMIT/SAVEPOINT and the
+      RESET ALL in `end()` — is queued behind the one before it and issued alone. The
+      callers keep their `Promise.all`; the order they asked for is the order they get,
+      and nothing overlaps.
+    */
+    let chain: Promise<unknown> = Promise.resolve();
+    const serial = <T>(fn: () => Promise<T>): Promise<T> => {
+      const settled = chain.then(fn, fn);
+      chain = settled.then(() => undefined, () => undefined);
+      return settled;
+    };
+    const query = (sql: string, params: Param[] = []) =>
+      serial(() => client.query(PostgresDb.toPg(sql), PostgresDb.coerce(params) as never));
+
     const q: Queryable = {
       all: async <T = Row>(sql: string, params: Param[] = []) => {
-        const res = await client.query(PostgresDb.toPg(sql), PostgresDb.coerce(params));
+        const res = await query(sql, params);
         return res.rows.map((r) => PostgresDb.mapRow<T>(r as Row));
       },
       get: async <T = Row>(sql: string, params: Param[] = []) => {
-        const res = await client.query(PostgresDb.toPg(sql), PostgresDb.coerce(params));
+        const res = await query(sql, params);
         return res.rows.length ? PostgresDb.mapRow<T>(res.rows[0] as Row) : undefined;
       },
       run: async (sql: string, params: Param[] = []) => {
-        const res = await client.query(PostgresDb.toPg(sql), PostgresDb.coerce(params));
+        const res = await query(sql, params);
         return { changes: res.rowCount ?? 0 };
       },
     };
@@ -380,14 +486,14 @@ export class PostgresDb implements Db {
       async setContext(ctx: RequestContext) {
         // set_config with is_local=false scopes to this dedicated connection.
         // The values are bound as parameters, never interpolated.
-        await client.query("select set_config('kgm.phase', $1, false)", [ctx.phase]);
-        await client.query("select set_config('kgm.tenant_id', $1, false)", [ctx.tenantId ?? '']);
-        await client.query("select set_config('kgm.user_id', $1, false)", [ctx.userId ?? '']);
-        await client.query("select set_config('kgm.client_ids', $1, false)", [ctx.clientIds.join(',')]);
+        await query("select set_config('kgm.phase', $1, false)", [ctx.phase]);
+        await query("select set_config('kgm.tenant_id', $1, false)", [ctx.tenantId ?? '']);
+        await query("select set_config('kgm.user_id', $1, false)", [ctx.userId ?? '']);
+        await query("select set_config('kgm.client_ids', $1, false)", [ctx.clientIds.join(',')]);
         // Firm OS scope (migration 0006). Empty string for a client request,
         // which makes kgm_membership() return null and closes every firm_*
         // table by RLS.
-        await client.query("select set_config('kgm.membership_id', $1, false)", [ctx.membershipId ?? '']);
+        await query("select set_config('kgm.membership_id', $1, false)", [ctx.membershipId ?? '']);
 
         /*
           ROLE MATCHES AUDIENCE (§57, migration 0008).
@@ -409,23 +515,23 @@ export class PostgresDb implements Db {
           firm_api and inherits nothing from it.
         */
         if (ctx.phase === 'firm') {
-          await client.query(`set role ${FIRM_ROLE}`);
+          await query(`set role ${FIRM_ROLE}`);
         } else {
-          await client.query('reset role');
+          await query('reset role');
         }
       },
 
       async tx<T>(fn: () => Promise<T>): Promise<T> {
         if (txDepth === 0) {
-          await client.query('BEGIN');
+          await query('BEGIN');
           txDepth = 1;
           try {
             const result = await fn();
-            await client.query('COMMIT');
+            await query('COMMIT');
             return result;
           } catch (err) {
             try {
-              await client.query('ROLLBACK');
+              await query('ROLLBACK');
             } catch {
               /* connection already broken */
             }
@@ -436,13 +542,13 @@ export class PostgresDb implements Db {
         }
         const sp = `sp_${txDepth}_${Date.now().toString(36)}`;
         txDepth++;
-        await client.query(`SAVEPOINT ${sp}`);
+        await query(`SAVEPOINT ${sp}`);
         try {
           const result = await fn();
-          await client.query(`RELEASE SAVEPOINT ${sp}`);
+          await query(`RELEASE SAVEPOINT ${sp}`);
           return result;
         } catch (err) {
-          await client.query(`ROLLBACK TO SAVEPOINT ${sp}`);
+          await query(`ROLLBACK TO SAVEPOINT ${sp}`);
           throw err;
         } finally {
           txDepth--;
@@ -453,7 +559,7 @@ export class PostgresDb implements Db {
         if (ended) return;
         ended = true;
         try {
-          if (txDepth > 0) await client.query('ROLLBACK');
+          if (txDepth > 0) await query('ROLLBACK');
           /*
             RESET ROLE FIRST, and it is not optional.
 
@@ -465,10 +571,10 @@ export class PostgresDb implements Db {
             pool instead of through grants. RESET ROLE runs first so that even if
             RESET ALL throws, the privilege drop has already happened.
           */
-          await client.query('RESET ROLE');
+          await query('RESET ROLE');
           // Wipe every GUC so the connection cannot leak identity back to the
           // pool.
-          await client.query('RESET ALL');
+          await query('RESET ALL');
         } catch {
           /* the client is broken; release() will destroy it */
         } finally {

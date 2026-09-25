@@ -7,6 +7,7 @@
  */
 import crypto from 'node:crypto';
 import path from 'node:path';
+import { defaultPoolMax } from './db/transient.js';
 import { fileURLToPath } from 'node:url';
 
 export type Env = 'development' | 'test' | 'production';
@@ -72,7 +73,15 @@ export const config = {
       : path.resolve(SERVER_ROOT, 'data/kgm-portal.sqlite'),
     /** Postgres connection for the restricted portal_api role. */
     pgUrl: raw.DATABASE_URL || '',
-    pgPoolMax: int(raw.PG_POOL_MAX, 10),
+    /*
+      THE POOL SIZE IS A BUDGET SHARED WITH EVERY OTHER LIVE PROCESS, and on a serverless
+      runtime the number of processes is not knowable. See db/transient.ts for the whole
+      argument; the short version is that `SET ROLE` and session `set_config` (which the
+      RLS model depends on) rule out the transaction pooler, so a session is a connection,
+      and an elastic fleet of instances each holding ten of them exhausts the pooler.
+      `PG_POOL_MAX` still wins when the operator sets it.
+    */
+    pgPoolMax: defaultPoolMax(raw),
   },
 
   /**

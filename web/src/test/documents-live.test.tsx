@@ -28,7 +28,7 @@
  *   does not run in that environment. It reports the skip with the reason.
  */
 import { describe, expect, it, beforeAll, vi } from 'vitest';
-import { render, screen, waitFor, cleanup } from '@testing-library/react';
+import { render, waitFor, cleanup } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { I18nProvider } from '../i18n';
 

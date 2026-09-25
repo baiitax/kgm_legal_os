@@ -135,22 +135,56 @@ export default function Login() {
     resetFeedback();
   };
 
+  /**
+   * ONE RETRY, FOR THE FAILURES THAT ARE WORTH RETRYING.
+   *
+   * A serverless instance that cannot reach the database at that instant answers 503
+   * `service_unavailable` and says, in the body, that the request is safe to send again.
+   * Nothing happened: no session, no attempt counted against the lockout, no audit event
+   * that a person did something they did not do. Retrying once is therefore not a guess —
+   * it is the remedy the response named.
+   *
+   * Deliberately NOT a general retry: an invalid password, a locked account and a refusal
+   * are final, and retrying them would turn a clear answer into a slower one. The retry is
+   * also bounded — once — because a server that is genuinely down must fail visibly rather
+   * than leave the reader watching a spinner.
+   */
+  const isWorthRetrying = (err: unknown): boolean => {
+    const api = err instanceof ApiError ? err : null;
+    if (!api) return false;
+    return api.code === 'service_unavailable' || api.code === 'network_error';
+  };
+
   const onCredentials = async (event: FormEvent) => {
     event.preventDefault();
     setBusy(true);
     resetFeedback();
+    let lastError: unknown = null;
     try {
-      if (isFirm) {
-        const res = await firmSignIn(email.trim(), password, remember);
-        if (res.mfaRequired) {
-          setFirmChallenge({ maskedDestination: res.maskedDestination, expiresInMinutes: res.expiresInMinutes });
-        } else {
-          enterFirmApp(firmNext);
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          if (isFirm) {
+            const res = await firmSignIn(email.trim(), password, remember);
+            if (res.mfaRequired) {
+              setFirmChallenge({ maskedDestination: res.maskedDestination, expiresInMinutes: res.expiresInMinutes });
+            } else {
+              enterFirmApp(firmNext);
+            }
+          } else {
+            const res = await signIn(email.trim(), password, remember);
+            if (res.step === 'authenticated') navigate(from, { replace: true });
+          }
+          lastError = null;
+          break;
+        } catch (err) {
+          lastError = err;
+          if (attempt === 2 || !isWorthRetrying(err)) break;
+          /* A beat, so the second attempt is not the first one repeated in the same
+             millisecond against the same congested connection. */
+          await new Promise((r) => setTimeout(r, 400));
         }
-      } else {
-        const res = await signIn(email.trim(), password, remember);
-        if (res.step === 'authenticated') navigate(from, { replace: true });
       }
+      if (lastError) throw lastError;
       setPassword('');
     } catch (err) {
       const api = err instanceof ApiError ? err : null;
@@ -296,7 +330,12 @@ export default function Login() {
                 )}
               </div>
 
-              {error && !notice ? <ErrorAlert error={error} /> : null}
+              {error && !notice ? (
+                <ErrorAlert
+                  error={error}
+                  onRetry={isWorthRetrying(error) ? () => { void onCredentials({ preventDefault: () => {} } as FormEvent); } : undefined}
+                />
+              ) : null}
               {notice && (
                 <div className="alert alert--warn" role="alert">
                   <Icon name="alert" size={18} />
