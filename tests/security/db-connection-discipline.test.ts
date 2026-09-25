@@ -357,6 +357,34 @@ describe('what a transient failure looks like to the person at the desk', () => 
     vi.resetModules();
   });
 
+  it('waits for the request scope that closes after the response is already flushed', async () => {
+    /*
+      THE MILLIMETRE BETWEEN TWO CORRECT PIECES OF CODE, WHICH IS WHERE THIS BUG LIVED.
+
+      The auth middleware releases its scope from `res.once('finish')` — deliberately, so
+      that a response is never held up by two RESET round trips. The drain therefore runs
+      while the scope is still open, and a drain that believed the pool's counts at that
+      moment would skip itself, every single time, on every container: exactly the fifteen
+      idle sessions that were measured holding the whole fleet's budget. So the driver
+      counts the scopes it has handed out and waits for them, which is what this pins.
+    */
+    const { PostgresDb: Driver, built } = await withMockedPg();
+    const db = new Driver('postgres://portal_api@example.invalid:5432/postgres', 1);
+
+    const scope = await db.acquire();
+    setTimeout(() => {
+      void scope.end();                       // the `res.on('finish')` handler, a tick later
+    }, 50);
+
+    await db.drain();
+
+    expect(built[0].ended).toBe(true);
+    expect(built).toHaveLength(1);
+
+    vi.doUnmock('pg');
+    vi.resetModules();
+  });
+
   it('does not close a pool that another request on this instance is still using', async () => {
     /*
       One container can answer more than one request at a time. A drain that closed the

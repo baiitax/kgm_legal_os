@@ -221,6 +221,47 @@ export class PostgresDb implements Db {
   private draining: Promise<void> | undefined;
 
   /**
+   * HOW MANY REQUEST SCOPES THIS INSTANCE HAS HANDED OUT AND NOT GOT BACK.
+   *
+   * The response is finished long before the last thing a request does with its
+   * connection. The auth middleware releases its scope from a `res.once('finish')`
+   * handler — deliberately, so that a response is never held up by two RESET round
+   * trips — which means that at the moment the handler above is told the response is
+   * done, the scope is still open and `client.release()` has not run yet.
+   *
+   * The first version of `drain()` looked at the pool's counts at exactly that instant,
+   * saw a client checked out, and (correctly, for its own rules) skipped the drain. The
+   * session then stayed open until the container froze, which is the outage again with
+   * better manners. So the driver counts its own scopes and waits for them.
+   */
+  private outstanding = 0;
+  private idleWaiters: (() => void)[] = [];
+
+  private releaseScope(): void {
+    this.outstanding = Math.max(0, this.outstanding - 1);
+    if (this.outstanding === 0) {
+      const waiters = this.idleWaiters;
+      this.idleWaiters = [];
+      for (const wake of waiters) wake();
+    }
+  }
+
+  /** Resolves as soon as no scope is open, or when `ms` elapses. */
+  private async awaitScopes(ms: number): Promise<boolean> {
+    if (this.outstanding === 0) return true;
+    let waited: Promise<boolean>;
+    const idle = new Promise<true>((resolve) => {
+      this.idleWaiters.push(() => resolve(true));
+    });
+    waited = Promise.race([
+      idle,
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), ms)),
+    ]);
+    const free = await waited;
+    return free;
+  }
+
+  /**
    * @param pool a pool to use instead of building one. A TEST SEAM, and nothing else:
    *   the connection discipline this class promises — one statement at a time per
    *   connection, a bounded connect retry, reads retried and writes not — can only be
@@ -307,18 +348,37 @@ export class PostgresDb implements Db {
     if (this.draining) return this.draining;
     const pool = this.currentPool;
     if (!pool) return;
+    this.draining = this.closeIfIdle(pool).finally(() => {
+      this.draining = undefined;
+    });
+    return this.draining;
+  }
+
+  /** The body of a drain, once one is in flight. */
+  private async closeIfIdle(pool: pg.Pool): Promise<void> {
     /*
       ONLY WHEN NOTHING IS CHECKED OUT. One container can be answering more than one
       request at a time, and a pool that is closed under a running request would fail it
       for no reason. If somebody else is mid-request, the drain is simply skipped: that
       request will drain when it finishes, and the last one out closes the door.
     */
+    /*
+      THE SCOPE IS STILL CLOSING AT THIS POINT. `res.once('finish')` is where the auth
+      middleware releases it, and that fires on the same tick the response is flushed —
+      so wait for the count to reach zero before asking the pool anything. It is
+      microseconds in practice; the ceiling is here so a leaked scope cannot pin a
+      function open.
+    */
+    if (!(await this.awaitScopes(2_000))) {
+      console.warn(`[db] drain skipped: ${this.outstanding} request scope(s) still open after 2s`);
+      return;
+    }
+    if (this.currentPool !== pool) return;
     if (pool.idleCount !== pool.totalCount || pool.waitingCount > 0) return;
     this.currentPool = undefined;
     /* `end()` waits for a checked-out client to come back. Everything should have been
        released by now; the ceiling is here so that a leak cannot pin a function open. */
     const ended = pool.end().then(() => true);
-    this.draining = ended.then(() => undefined, () => undefined);
     const closed = await Promise.race([
       ended,
       new Promise<false>((r) => setTimeout(() => r(false), 2_000)),
@@ -563,6 +623,9 @@ export class PostgresDb implements Db {
 
   async acquire(): Promise<Scope> {
     const client = await this.connect();
+    this.outstanding += 1;
+    /* Captured because `scope.end()` below is a method on a different object. */
+    const scopeClosed = () => this.releaseScope();
     let txDepth = 0;
     let ended = false;
 
@@ -715,6 +778,7 @@ export class PostgresDb implements Db {
           /* the client is broken; release() will destroy it */
         } finally {
           client.release();
+          scopeClosed();
         }
       },
     };
