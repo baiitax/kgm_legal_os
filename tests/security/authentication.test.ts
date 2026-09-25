@@ -3,8 +3,8 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import crypto from 'node:crypto';
-import { bootStack, loginAs, readOutbox, type Stack } from '../helpers.js';
-import { IDS } from '../../server/src/db/demo-data.js';
+import { bootStack, firmLoginAs, loginAs, readOutbox, FIRM, type Stack } from '../helpers.js';
+import { IDS, DEMO_FIRM_PASSWORD } from '../../server/src/db/demo-data.js';
 
 let s: Stack;
 beforeEach(async () => { s = await bootStack(); });
@@ -545,5 +545,67 @@ describe('security headers (§47)', () => {
     for (const banned of ['at Object.', 'SQLITE', 'select ', 'PostgREST', '42P17', 'better_sqlite', 'stack']) {
       expect(text.toLowerCase()).not.toContain(banned.toLowerCase());
     }
+  });
+});
+
+/**
+ * §43 · THE TWO DOORS MUST NOT BE COMPARABLE.
+ *
+ * Both products are served from one origin and separated by an AUDIENCE check
+ * rather than by a different login form, so the refusal shapes are the only thing
+ * standing between a caller and a map of who has an account where.
+ *
+ * This was broken in both directions, at different times, by different
+ * mechanisms — and neither was caught here, because no test had ever presented
+ * valid credentials for an account that belongs at the other door:
+ *
+ *   firm OS     client credentials -> 500 internal_error   (a login-attempt
+ *               vocabulary the CHECK rejected; migration 0025)
+ *   client      firm credentials   -> 403 forbidden        (an explicit
+ *               "no active portal access" thrown after the password verified)
+ *
+ * against 401 invalid_credentials for an unknown account. A 403 or a 500 where a
+ * 401 belongs tells the caller that the address exists AND the password is right.
+ *
+ * The assertion is therefore EQUALITY, not "a refusal": the response to a valid
+ * credential from the wrong audience must be byte-identical to the response to a
+ * password that is simply wrong.
+ */
+describe('§43 · the audience boundary does not disclose account existence', () => {
+  const shape = (res: { status: number; body: any }) => ({
+    status: res.status,
+    code: res.body?.error?.code,
+    message: res.body?.error?.message,
+  });
+
+  it('the firm OS answers a client credential exactly as it answers a bad password', async () => {
+    const unknown = shape(await firmLoginAs(s.agent, 'nobody@example.test', 'wrong-password'));
+    const wrong = shape(await firmLoginAs(s.agent, FIRM.managingPartner, 'wrong-password'));
+    const clientHere = shape(await firmLoginAs(s.agent, AHMED, PW));
+
+    expect(unknown.status).toBe(401);
+    expect(wrong).toEqual(unknown);
+    // A client's real password must be indistinguishable from a wrong one.
+    expect(clientHere).toEqual(unknown);
+  });
+
+  it('the client portal answers a firm credential exactly as it answers a bad password', async () => {
+    const unknown = shape(await loginAs(s.agent, 'nobody@example.test', 'wrong-password'));
+    const wrong = shape(await loginAs(s.agent, AHMED, 'wrong-password'));
+    const firmHere = shape(await loginAs(s.agent, FIRM.managingPartner, DEMO_FIRM_PASSWORD));
+
+    expect(unknown.status).toBe(401);
+    expect(wrong).toEqual(unknown);
+    // A firm member's real password must be indistinguishable from a wrong one.
+    expect(firmHere).toEqual(unknown);
+  });
+
+  it('records the real reason in the audit trail, where the caller cannot see it', async () => {
+    await loginAs(s.agent, FIRM.managingPartner, DEMO_FIRM_PASSWORD);
+    const denied = await s.db.all<{ reason_code: string }>(
+      `select reason_code from audit_events where action = 'AUTHZ_DENIED'`,
+    );
+    // The information is not lost — it is moved to where only the firm can read it.
+    expect(denied.some((r) => r.reason_code === 'no_active_client_relationship')).toBe(true);
   });
 });

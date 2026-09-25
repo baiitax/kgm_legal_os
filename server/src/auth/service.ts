@@ -35,7 +35,7 @@ import {
   generateTotpSecret, hashToken, newId, otpUri, randomToken, verifyPassword, verifyTotp,
   hashPassword, needsRehash,
 } from '../lib/crypto.js';
-import { PortalError, badRequest, conflict, forbidden, notFoundOrForbidden, unauthorized } from '../lib/errors.js';
+import { PortalError, badRequest, conflict, notFoundOrForbidden, unauthorized } from '../lib/errors.js';
 import {
   counters, evaluateLockout, keys, limit, nextLockoutTimestamp, progressiveDelayMs,
   resetLimit, sleep,
@@ -158,8 +158,29 @@ export class AuthService {
       await this.audit.tryWrite(
         { action: 'AUTHZ_DENIED', actor: { kind: 'client_user', userId },
           outcome: 'denied', reasonCode: 'no_active_client_relationship' }, ctx);
-      // The password was correct, so this reveals nothing about existence.
-      throw forbidden('forbidden', 'this account has no active portal access');
+      /*
+        THE SAME ANSWER AS A WRONG PASSWORD.
+
+        This was `forbidden(403, 'this account has no active portal access')`,
+        justified by the comment "the password was correct, so this reveals
+        nothing about existence". That reasoning is the defect: the password
+        being correct is PRECISELY what the response disclosed. Measured on the
+        live deployment, the client portal answered:
+
+          unknown account                  -> 401 invalid_credentials
+          real client, wrong password       -> 401 invalid_credentials
+          firm member, correct password     -> 403 forbidden
+
+        So a 403 confirmed a valid credential pair for an account that is not a
+        client — an enumeration oracle, and the mirror of the defect fixed at the
+        firm door in migration 0025 (which returned 500 for the same reason).
+
+        Only the audit row knows the difference; the response does not. The
+        `AUTHZ_DENIED` event above still records `no_active_client_relationship`,
+        so the security review keeps the information the caller must not have.
+      */
+      await sleep(progressiveDelayMs(0));
+      throw unauthorized('invalid_credentials', 'invalid email or password');
     }
 
     const primary =
@@ -302,7 +323,14 @@ export class AuthService {
     res.clearCookie('kgm_mfa_challenge', { path: '/api/auth' });
 
     const links = (await this.repo.getClientUsersForUser(userId)).filter((l) => l.status === 'active');
-    if (!links.length) throw forbidden('forbidden', 'no active portal access');
+    // Same rule as the password stage: a caller who cannot be given a session is
+    // told nothing that distinguishes them from a bad password.
+    if (!links.length) {
+      await this.audit.tryWrite(
+        { action: 'AUTHZ_DENIED', actor: { kind: 'client_user', userId },
+          outcome: 'denied', reasonCode: 'no_active_client_relationship_after_mfa' }, ctx);
+      throw unauthorized('invalid_credentials', 'invalid email or password');
+    }
     const primary = links.find((l) => l.portal_role === 'client_primary') ?? links[0];
     const binding = { tenantId: String(primary.tenant_id), clientId: String(primary.client_id) };
 
