@@ -141,7 +141,36 @@ export type AuditAction =
   | 'BENEFICIAL_OWNER_RECORDED' | 'BENEFICIAL_OWNER_VERIFIED'
   | 'SCREENING_RUN' | 'SCREENING_MATCH_FOUND' | 'SCREENING_MATCH_DISPOSITIONED'
   | 'SCREENING_FAILED' | 'RISK_ASSESSED' | 'RISK_COUNTRY_RECORDED'
-  | 'STR_PREPARED' | 'STR_REVIEWED' | 'STR_FILED' | 'STR_RESPONSE_RECORDED';
+  | 'STR_PREPARED' | 'STR_REVIEWED' | 'STR_FILED' | 'STR_RESPONSE_RECORDED'
+  /*
+    P0.4 · JUDGMENTS, SERVICE AND ENFORCEMENT.
+
+    THE FOUR MEMBERS OF THIS FAMILY THAT MATTER MOST.
+
+    `JUDGMENT_SERVICE_RECORDED` is written for a service that did NOT take effect as well as
+    for one that did, with the domain's refusal as the reason code — because the interesting
+    question about a file is not how many notices were sent but how many were sent that do
+    not count. A trail that recorded only the successful ones would make a defectively served
+    judgment look like an unserved one.
+
+    `APPEAL_PERIOD_COMPUTED` CARRIES THE ARITHMETIC: the article, the number of days, the
+    date it started, the last day, and — when the last day moved off a weekend — the date it
+    moved FROM and the weekday that pushed it. The period is a legal position the firm took,
+    and three months later the only way to defend it is to be able to show what was computed,
+    from what, on what authority.
+
+    `EXECUTION_GATE_DENIED` is the refusal, and it is the sibling of `CDD_GATE_DENIED`: the
+    firm cannot demonstrate it is considering enforcement properly if its trail never shows
+    a matter being stopped.
+
+    `APPEAL_FILED` records lateness as a fact (`filedLate`) rather than refusing the filing.
+    Whether a late challenge is accepted is the court's decision; what this system owes the
+    file is what the period was and by how much it was missed.
+  */
+  | 'JUDGMENT_RECORDED' | 'JUDGMENT_AMENDED' | 'JUDGMENT_SERVICE_RECORDED'
+  | 'APPEAL_PERIOD_COMPUTED' | 'APPEAL_FILED' | 'EXECUTION_GATE_DENIED'
+  | 'EXECUTION_STAYED' | 'EXECUTION_STAY_LIFTED'
+  | 'COURT_CALENDAR_RECORDED' | 'COURT_CALENDAR_REMOVED';
 
 export interface AuditActor {
   /**

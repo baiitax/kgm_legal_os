@@ -134,6 +134,18 @@ function strOrNull(value: unknown): string | null {
   return value === null || value === undefined ? null : String(value);
 }
 
+/**
+ * A boolean column, from either engine.
+ *
+ * Postgres hands back `true`/`false` and SQLite hands back 1/0, and `toBool` already knows
+ * both — but it is not applied in a few of the joins below, so it is stated here once for
+ * the P0.4 rows rather than repeated. A gate that read `'0'` as truthy would refuse every
+ * enforcement on a judgment with no stay in force.
+ */
+function boolColumn(value: unknown): boolean {
+  return toBool(value) === true;
+}
+
 /** A JSON array column, tolerating both a string (SQLite) and a parsed array (Postgres). */
 function jsonArrayColumn(value: unknown): string[] {
   if (Array.isArray(value)) return value.map(String);
@@ -4149,6 +4161,500 @@ export class FirmRepo {
     };
   }
 
+
+  /**
+   * THE FIRM'S SIDE OF THE CLIENT TIMELINE.
+   *
+   * `matter_timeline` is a PORTAL table — the portal repository reads it, the client sees it
+   * — and P0.4 is the first phase in which the firm writes to it. The reason it has to is
+   * that the portal's timeline is the client's view of their own case, and "a judgment was
+   * pronounced" is the single most consequential event a client can be shown. Leaving it out
+   * would mean the client learns about the decision from the firm's WhatsApp message while
+   * their portal still says the matter is in court.
+   *
+   * WHAT IS DELIBERATELY NOT WRITTEN HERE. Not the appeal period, not the enforcement posture,
+   * not the service attempts. Those are the firm's legal assessment of the client's position,
+   * and the classification projection does not expose them — see
+   * `server/src/domain/classification.ts`. The timeline entry says the court decided; what the
+   * firm intends to do about it is said by a person.
+   */
+  async addTimelineEntry(entry: {
+    tenantId: string; matterId: string; clientId: string;
+    eventType: string; occurredAt: string;
+    title: string; titleAr: string;
+    description?: string | null; descriptionAr?: string | null;
+    status?: string; clientVisible?: boolean; createdByStaff?: string | null;
+  }): Promise<string> {
+    const id = newId();
+    await this.q().run(
+      `insert into matter_timeline
+         (id, matter_id, tenant_id, occurred_at, event_type, title, title_ar, description,
+          description_ar, status, client_visible, created_by_staff, created_at)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, entry.matterId, entry.tenantId, entry.occurredAt, entry.eventType,
+        entry.title, entry.titleAr, entry.description ?? null, entry.descriptionAr ?? null,
+        entry.status ?? 'complete', entry.clientVisible !== false,
+        entry.createdByStaff ?? null, new Date().toISOString()],
+    );
+    return id;
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // P0.4 · THE COURT CALENDAR
+  //
+  // The days the courts do not sit. Every period the domain computes is extended past the
+  // weekend and past these days, so this table decides whether a deadline the register shows
+  // is the deadline a court would apply. It is the one table in the phase the firm may
+  // DELETE from: a recess entered twice is corrected, not retained.
+  // ══════════════════════════════════════════════════════════════════════════
+
+  async listCourtCalendar(tenantId: string, from: string, to: string) {
+    const rows = await this.q().all<Row>(
+      `select * from court_calendar
+        where tenant_id = ? and calendar_date between ? and ?
+        order by calendar_date`,
+      [tenantId, from, to],
+    );
+    return (rows ?? []).map(calendarFromRow);
+  }
+
+  /**
+   * The holiday dates the clock arithmetic needs, as `YYYY-MM-DD`.
+   *
+   * Deliberately a separate method from the register list: the arithmetic wants strings and
+   * nothing else, and giving it rows would invite a caller to start reading columns out of a
+   * lookup. The weekend is NOT included — `isWorkingDay` already knows it — so a caller that
+   * forgot to merge them would still be right about Fridays.
+   */
+  async courtHolidays(tenantId: string, from: string, to: string): Promise<string[]> {
+    const rows = await this.q().all<Row>(
+      `select calendar_date from court_calendar
+        where tenant_id = ? and calendar_date between ? and ?
+        order by calendar_date`,
+      [tenantId, from, to],
+    );
+    return (rows ?? []).map((r) => String(r.calendar_date).slice(0, 10));
+  }
+
+  /**
+   * Records a non-working day, or corrects the one already there.
+   *
+   * An upsert rather than an insert, because the same date arriving twice is the ordinary
+   * case — a holiday is announced, then amended — and a unique violation would make the
+   * second announcement an error the operator has to work around by hand.
+   */
+  async upsertCourtCalendarDay(input: CourtCalendarInput): Promise<string> {
+    const now = new Date().toISOString();
+    const existing = await this.q().get<Row>(
+      `select id from court_calendar where tenant_id = ? and calendar_date = ?`,
+      [input.tenantId, input.calendarDate],
+    );
+    const id = existing ? String(existing.id) : newId();
+    if (existing) {
+      await this.q().run(
+        `update court_calendar
+            set hijri_date = ?, kind = ?, name = ?, name_ar = ?, note = ?, updated_at = ?
+          where id = ? and tenant_id = ?`,
+        [input.hijriDate ?? null, input.kind, input.name, input.nameAr, input.note ?? null,
+          now, id, input.tenantId],
+      );
+      return id;
+    }
+    await this.q().run(
+      `insert into court_calendar
+         (id, tenant_id, calendar_date, hijri_date, kind, name, name_ar, note,
+          created_by_membership_id, created_at, updated_at)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, input.tenantId, input.calendarDate, input.hijriDate ?? null, input.kind,
+        input.name, input.nameAr, input.note ?? null, input.membershipId, now, now],
+    );
+    return id;
+  }
+
+  async deleteCourtCalendarDay(tenantId: string, id: string): Promise<boolean> {
+    const res = await this.q().run(
+      `delete from court_calendar where id = ? and tenant_id = ?`, [id, tenantId]);
+    return res.changes > 0;
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // P0.4 · THE JUDGMENT REGISTER
+  // ══════════════════════════════════════════════════════════════════════════
+
+  async createJudgment(input: JudgmentInput): Promise<string> {
+    const now = new Date().toISOString();
+    const id = newId();
+    await this.q().run(
+      `insert into judgments
+         (id, tenant_id, client_id, matter_id, deed_number, case_number, court, court_ar,
+          circuit, circuit_ar, judge_name, judgment_kind, presence, urgent, pronounced_at,
+          relief_kind, amount_sar, currency, verdict_for, summary, summary_ar, document_id,
+          appealable, enforcement_status, created_by_membership_id, created_at, updated_at)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, input.tenantId, input.clientId, input.matterId, input.deedNumber,
+        input.caseNumber ?? null, input.court, input.courtAr, input.circuit ?? null,
+        input.circuitAr ?? null, input.judgeName ?? null, input.judgmentKind, input.presence,
+        /* BOOLEANS, NOT 1/0. `urgent` and `appealable` are `boolean` in Postgres and SQLite
+           stores 0/1 because it has no boolean type — and the SQLite driver's `coerce` is
+           what bridges the two. Writing the integer here is defect (c) of the twenty-two:
+           SQLite accepts it, Postgres refuses with `column "urgent" is of type boolean but
+           expression is of type integer`, and the whole suite stays green because it runs on
+           the engine that says yes. */
+        input.urgent, input.pronouncedAt, input.reliefKind, input.amountSar ?? null,
+        input.currency ?? 'SAR', input.verdictFor ?? null, input.summary ?? null,
+        input.summaryAr ?? null, input.documentId ?? null, input.appealable,
+        /* Derived at birth, so a judgment is never momentarily in a state the gate would
+           have to reason about: what it orders, and nothing else, decides whether it can
+           ever be enforced. */
+        input.reliefKind === 'none' ? 'not_enforceable' : 'awaiting_finality',
+        input.membershipId, now, now],
+    );
+    return id;
+  }
+
+  /**
+   * One judgment, with its matter and client joined on.
+   *
+   * THE CODES ARE JOINED RATHER THAN LOOKED UP SEPARATELY, and the reason is the register:
+   * a screen that shows a صك number with no case title beside it makes the reader open the
+   * matter to find out which file they are looking at, which is how a judgment gets recorded
+   * against the wrong deed.
+   */
+  async getJudgment(tenantId: string, id: string) {
+    const row = await this.q().get<Row>(
+      `select j.*, m.matter_number, m.title as matter_title, c.name as client_name
+         from judgments j
+         join matters m on m.id = j.matter_id
+         join clients c on c.id = j.client_id
+        where j.tenant_id = ? and j.id = ?`,
+      [tenantId, id],
+    );
+    return row ? judgmentFromRow(row) : null;
+  }
+
+  /** Every judgment on a matter, newest first — the order `operativeJudgment` expects. */
+  async listJudgments(tenantId: string, matterId: string) {
+    const rows = await this.q().all<Row>(
+      `select j.*, m.matter_number, m.title as matter_title, c.name as client_name
+         from judgments j
+         join matters m on m.id = j.matter_id
+         join clients c on c.id = j.client_id
+        where j.tenant_id = ? and j.matter_id = ?
+        order by j.pronounced_at desc, j.created_at desc`,
+      [tenantId, matterId],
+    );
+    return (rows ?? []).map(judgmentFromRow);
+  }
+
+  /**
+   * The register: every judgment the caller may see, with the facts the gate needs.
+   *
+   * THE APPEALS AND THE SERVICES COME WITH IT, in two more queries rather than two per row.
+   * The gate's answer about a judgment depends on whether something is filed and undecided
+   * and on whether a service took effect; a list that fetched those per judgment would make
+   * the register's cost proportional to its length, and a register that is slow is a
+   * register nobody opens on the morning a period closes.
+   */
+  async enforcementRegister(tenantId: string, opts: {
+    matterId?: string | null;
+    clientId?: string | null;
+  } = {}) {
+    const where: string[] = ['j.tenant_id = ?'];
+    const params: Param[] = [tenantId];
+    if (opts.matterId) { where.push('j.matter_id = ?'); params.push(opts.matterId); }
+    if (opts.clientId) { where.push('j.client_id = ?'); params.push(opts.clientId); }
+
+    const rows = await this.q().all<Row>(
+      `select j.*, m.matter_number, m.title as matter_title, c.name as client_name
+         from judgments j
+         join matters m on m.id = j.matter_id
+         join clients c on c.id = j.client_id
+        where ${where.join(' and ')}
+        order by j.pronounced_at desc, j.created_at desc`,
+      params,
+    );
+    const judgments = (rows ?? []).map(judgmentFromRow);
+    if (!judgments.length) return [];
+
+    const ids = judgments.map((j) => j.id);
+    const placeholders = ids.map(() => '?').join(',');
+
+    const appealRows = await this.q().all<Row>(
+      `select * from judgment_appeals
+        where tenant_id = ? and judgment_id in (${placeholders})
+        order by filed_at desc`,
+      [tenantId, ...ids],
+    );
+    const appealsByJudgment = new Map<string, ReturnType<typeof appealFromRow>[]>();
+    for (const r of appealRows ?? []) {
+      const a = appealFromRow(r);
+      (appealsByJudgment.get(a.judgmentId) ?? appealsByJudgment.set(a.judgmentId, []).get(a.judgmentId)!)
+        .push(a);
+    }
+
+    const serviceRows = await this.q().all<Row>(
+      `select * from service_events
+        where tenant_id = ? and judgment_id in (${placeholders})
+        order by served_at desc`,
+      [tenantId, ...ids],
+    );
+    const servicesByJudgment = new Map<string, ReturnType<typeof serviceEventFromRow>[]>();
+    for (const r of serviceRows ?? []) {
+      const s = serviceEventFromRow(r);
+      if (!s.judgmentId) continue;
+      (servicesByJudgment.get(s.judgmentId) ?? servicesByJudgment.set(s.judgmentId, []).get(s.judgmentId)!)
+        .push(s);
+    }
+
+    return judgments.map((j) => ({
+      ...j,
+      appeals: (appealsByJudgment.get(j.id) ?? []).map((a) => ({
+        id: a.id, kind: a.appealKind, status: a.status, filedAt: a.filedAt,
+        deadlineAt: a.filingDeadlineAt, outcome: a.outcome,
+      })),
+      /* The flag the gate distinguishes `service_defective` from `judgment_not_served` with:
+         an attempt exists and none of them took effect. Not a count of services — a service
+         that DID take effect sets `serviceEffectiveAt`, and this is about the other case. */
+      serviceAttemptedWithoutEffect:
+        (servicesByJudgment.get(j.id) ?? []).length > 0 && j.serviceEffectiveAt === null,
+    }));
+  }
+
+  /**
+   * Amends a judgment. An unknown key is an ERROR, never a dropped field.
+   *
+   * The column list is `JUDGMENT_COLUMNS`, translated by `translateColumns`, and the
+   * repository throws on a key it does not own — the discipline P0.3's fifth defect earned
+   * when a form stored nothing and answered 200.
+   */
+  async updateJudgment(
+    tenantId: string, id: string, patch: Record<string, unknown>,
+  ): Promise<number> {
+    const pairs = translateColumns(patch, JUDGMENT_COLUMNS, 'FirmRepo.updateJudgment');
+    if (!pairs.length) return 0;
+    const now = new Date().toISOString();
+    const sets = pairs.map(([column]) => `${column} = ?`).join(', ');
+    const values = pairs.map(([, value]) => normalizeDdValue(value));
+    const res = await this.q().run(
+      `update judgments set ${sets}, updated_at = ? where id = ? and tenant_id = ?`,
+      [...values, now, id, tenantId],
+    );
+    return res.changes;
+  }
+
+  /**
+   * Records a service AND the judgment columns it decides, in ONE transaction.
+   *
+   * THE THREE COLUMNS ARE WRITTEN HERE, NOT BY A TRIGGER. `served_at` and
+   * `service_effective_at` are the answer `serviceEffect` gave, and
+   * `appeal_deadline_at` / `appeal_rule_cited` / `appeal_rule_days` are the answer
+   * `appealDeadlineAt` gave — both computed by the caller, in the domain, before this method
+   * was reached. A trigger that recomputed them would be the second implementation of the
+   * only rule in this system that a client's remedies depend on.
+   *
+   * It is one transaction because the alternative is a service row that exists while the
+   * judgment says it was not served, and a gate reading that state would refuse enforcement
+   * with the wrong reason.
+   */
+  async recordService(input: ServiceInput): Promise<{ serviceId: string; deadlineId: string | null }> {
+    const now = new Date().toISOString();
+    const serviceId = newId();
+    await this.tx(async () => {
+      await this.q().run(
+        `insert into service_events
+           (id, tenant_id, client_id, matter_id, judgment_id, notice_kind, method, outcome,
+            served_on_kind, served_on_name, served_on_party_id, attempted_at, served_at,
+            publication_days, effective_at, proof_document_id, proof_reference, note,
+            recorded_by_membership_id, created_at, updated_at)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [serviceId, input.tenantId, input.clientId, input.matterId, input.judgmentId,
+          input.noticeKind, input.method, input.outcome, input.servedOnKind,
+          input.servedOnName ?? null, input.servedOnPartyId ?? null,
+          input.attemptedAt ?? null, input.servedAt ?? null,
+          input.publicationDays ?? null, input.effectiveAt,
+          input.proofDocumentId ?? null, input.proofReference ?? null, input.note ?? null,
+          input.membershipId, now, now],
+      );
+    });
+    return { serviceId, deadlineId: null };
+  }
+
+  /**
+   * Writes the clock onto the judgment, once, from the domain's answer.
+   *
+   * Separate from `recordService` because they are different facts: the service is what
+   * happened, the clock is what follows from it. A caller that records a court notice (which
+   * starts no period) uses the first; a caller that records the delivery of the صك uses
+   * both, and the route does so inside one transaction.
+   */
+  async applyServiceClock(args: {
+    tenantId: string; judgmentId: string; servedAt: string; effectiveAt: string;
+    deadlineAt: string; ruleCited: string; ruleDays: number;
+  }): Promise<number> {
+    const res = await this.q().run(
+      `update judgments
+          set served_at = ?, service_effective_at = ?, appeal_deadline_at = ?,
+              appeal_rule_cited = ?, appeal_rule_days = ?, updated_at = ?
+        where id = ? and tenant_id = ?`,
+      [args.servedAt, args.effectiveAt, args.deadlineAt, args.ruleCited, args.ruleDays,
+        new Date().toISOString(), args.judgmentId, args.tenantId],
+    );
+    return res.changes;
+  }
+
+  /** Attaches the deadline a service created to the service row, so the pair is linked. */
+  async linkServiceDeadline(tenantId: string, serviceId: string, deadlineId: string): Promise<number> {
+    const res = await this.q().run(
+      `update service_events set deadline_id = ?, updated_at = ?
+        where id = ? and tenant_id = ?`,
+      [deadlineId, new Date().toISOString(), serviceId, tenantId],
+    );
+    return res.changes;
+  }
+
+  async listServiceEvents(tenantId: string, opts: { matterId?: string; judgmentId?: string }) {
+    const where: string[] = ['tenant_id = ?'];
+    const params: Param[] = [tenantId];
+    if (opts.matterId) { where.push('matter_id = ?'); params.push(opts.matterId); }
+    if (opts.judgmentId) { where.push('judgment_id = ?'); params.push(opts.judgmentId); }
+    const rows = await this.q().all<Row>(
+      `select * from service_events where ${where.join(' and ')}
+        order by coalesce(served_at, attempted_at) desc nulls last`,
+      params,
+    );
+    return (rows ?? []).map(serviceEventFromRow);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // P0.4 · THE CHALLENGES
+  // ══════════════════════════════════════════════════════════════════════════
+
+  async createAppeal(input: AppealInput): Promise<string> {
+    const now = new Date().toISOString();
+    const id = newId();
+    await this.q().run(
+      `insert into judgment_appeals
+         (id, tenant_id, client_id, matter_id, judgment_id, appeal_kind, filed_at,
+          filing_deadline_at, rule_cited, rule_days, filed_late, court, court_ar, reference,
+          status, stay_requested, grounds, grounds_ar, created_by_membership_id,
+          created_at, updated_at)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, input.tenantId, input.clientId, input.matterId, input.judgmentId,
+        input.appealKind, input.filedAt, input.filingDeadlineAt ?? null,
+        input.ruleCited ?? null, input.ruleDays ?? null, input.filedLate,
+        input.court ?? null, input.courtAr ?? null, input.reference ?? null,
+        input.status ?? 'filed', input.stayRequested,
+        input.grounds ?? null, input.groundsAr ?? null, input.membershipId, now, now],
+    );
+    return id;
+  }
+
+  async getAppeal(tenantId: string, id: string) {
+    const row = await this.q().get<Row>(
+      `select * from judgment_appeals where tenant_id = ? and id = ?`, [tenantId, id]);
+    return row ? appealFromRow(row) : null;
+  }
+
+  async listAppeals(tenantId: string, judgmentId: string) {
+    const rows = await this.q().all<Row>(
+      `select * from judgment_appeals where tenant_id = ? and judgment_id = ?
+        order by filed_at desc`,
+      [tenantId, judgmentId],
+    );
+    return (rows ?? []).map(appealFromRow);
+  }
+
+  async updateAppeal(
+    tenantId: string, id: string, patch: Record<string, unknown>,
+  ): Promise<number> {
+    const pairs = translateColumns(patch, APPEAL_COLUMNS, 'FirmRepo.updateAppeal');
+    if (!pairs.length) return 0;
+    const now = new Date().toISOString();
+    const sets = pairs.map(([column]) => `${column} = ?`).join(', ');
+    const values = pairs.map(([, value]) => normalizeDdValue(value));
+    const res = await this.q().run(
+      `update judgment_appeals set ${sets}, updated_at = ? where id = ? and tenant_id = ?`,
+      [...values, now, id, tenantId],
+    );
+    return res.changes;
+  }
+
+  /**
+   * THE DEADLINE A SERVICE CREATES.
+   *
+   * P0.4 is the first time `firm_api` writes this table at all — until now the firm held a
+   * SELECT policy and no write privilege — so the insert names every column 0045 granted,
+   * including the four that carry the provenance: `rule_code`, `rule_cited`, `rule_days` and
+   * the `source_kind`/`source_id` pair that points back at the service event.
+   *
+   * The lane columns are fixed rather than parameters: a procedural deadline is the firm's
+   * own obligation, it is never client-visible, and it is always assigned to the member who
+   * accepted it. A caller cannot make this insert say otherwise, which is the same rule the
+   * database's restated lane guard enforces for a caller who is not this application.
+   */
+  async createProceduralDeadline(args: {
+    tenantId: string; matterId: string; clientId: string;
+    kind: 'appeal' | 'cassation' | 'reconsideration' | 'limitation';
+    title: string; titleAr: string; description?: string | null; descriptionAr?: string | null;
+    dueAt: string; priority: string;
+    ruleCode: string; ruleCited: string; ruleDays: number;
+    triggerEvent: string; sourceKind: string; sourceId: string;
+    /*
+      A STAFF ID, NOT A MEMBERSHIP ID. `deadlines.assigned_staff_id` references `staff`, and
+      passing the membership id into it is a foreign key violation that PostgreSQL raises as a
+      500 and SQLite does not raise at all — foreign keys are not enforced by default in the
+      demo engine, so the write succeeded locally and failed in production. The column is
+      named for what it holds; the parameter now is too.
+    */
+    assignedStaffId: string | null;
+  }): Promise<string> {
+    const now = new Date().toISOString();
+    const id = newId();
+    await this.q().run(
+      `insert into deadlines
+         (id, matter_id, tenant_id, client_id, kind, title, title_ar, description,
+          description_ar, due_at, priority, internal_status, client_status, client_visible,
+          rule_code, rule_cited, rule_days, trigger_event, source_kind, source_id,
+          assigned_staff_id, created_at, updated_at)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 'open', false,
+               ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, args.matterId, args.tenantId, args.clientId, args.kind, args.title, args.titleAr,
+        args.description ?? null, args.descriptionAr ?? null, args.dueAt, args.priority,
+        args.ruleCode, args.ruleCited, args.ruleDays, args.triggerEvent, args.sourceKind,
+        args.sourceId, args.assignedStaffId, now, now],
+    );
+    return id;
+  }
+
+  /** Closes the diarised period when a challenge is filed against it. */
+  async closeProceduralDeadline(tenantId: string, deadlineId: string): Promise<number> {
+    const res = await this.q().run(
+      `update deadlines
+          set internal_status = 'done', updated_at = ?
+        where id = ? and tenant_id = ?
+          and kind in ('appeal','cassation','reconsideration','limitation')`,
+      [new Date().toISOString(), deadlineId, tenantId],
+    );
+    return res.changes;
+  }
+
+  /**
+   * The clock a judgment's service created, read back for the register and the screens.
+   * Returned as the deadline row itself so a screen can show the period beside the judgment
+   * it belongs to without a second request.
+   */
+  async deadlineForService(tenantId: string, serviceEventId: string) {
+    const row = await this.q().get<Row>(
+      `select d.* from deadlines d
+         join service_events s on s.deadline_id = d.id
+        where s.tenant_id = ? and s.id = ?`,
+      [tenantId, serviceEventId],
+    );
+    return row ? { id: String(row.id), kind: String(row.kind), dueAt: String(row.due_at),
+      ruleCited: strOrNull(row.rule_cited), ruleDays: row.rule_days === null ? null : Number(row.rule_days),
+      internalStatus: String(row.internal_status), title: String(row.title) } : null;
+  }
+
 }
 
 // ============================================================================
@@ -4473,6 +4979,279 @@ export interface TimeEntryInput {
   billable: boolean;
   hourlyRateSar: number;
   approvedByUserId?: string | null;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// P0.4 · THE JUDGMENT REGISTER, THE SERVICE REGISTER AND THE COURT CALENDAR
+//
+// WHERE THE ARITHMETIC LIVES. Not here. Every period in this section was computed by
+// `server/src/domain/judgments.ts` before a statement was issued, and this file stores the
+// ANSWER: `appeal_deadline_at`, `appeal_rule_cited`, `appeal_rule_days` and, on a service,
+// `effective_at`. That is a deliberate inversion of how a repository usually works, and the
+// reason is the defect P0.3 found: the 25% ownership rule existed in the domain, in this
+// file's SQLite mirror and in a Postgres trigger, only one copy was right, and the live gate
+// disagreed with the domain. **A rule with three implementations has no implementation.**
+//
+// So there is one copy of the arithmetic, in the domain, and both engines store its result.
+// The triggers in 0045 and in the SQLite literal READ these columns; they do not re-derive
+// them, and `judgments_clock_guard` refuses a judgment that was served without a computed
+// period — the state in which a system believes it has diarised an appeal and has not.
+//
+// WHY EVERY WRITE IS AN ALLOW-LIST. P0.3's fifth defect was a form that stored nothing and
+// answered 200, because the route passed camelCase keys into a repository that accepts
+// column names. Every writer below therefore names its columns in a table, and a key that is
+// not in the table is an ERROR rather than a silent omission.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/** What the court calendar tools accept, camelCase -> column. An unknown key is an error. */
+export const CALENDAR_COLUMNS: Readonly<Record<string, string>> = {
+  calendarDate: 'calendar_date',
+  hijriDate: 'hijri_date',
+  kind: 'kind',
+  name: 'name',
+  nameAr: 'name_ar',
+  note: 'note',
+};
+
+/** What a judgment may be amended with. Absent keys are untouched; unknown keys are errors. */
+export const JUDGMENT_COLUMNS: Readonly<Record<string, string>> = {
+  deedNumber: 'deed_number',
+  caseNumber: 'case_number',
+  court: 'court',
+  courtAr: 'court_ar',
+  circuit: 'circuit',
+  circuitAr: 'circuit_ar',
+  judgeName: 'judge_name',
+  judgmentKind: 'judgment_kind',
+  presence: 'presence',
+  urgent: 'urgent',
+  pronouncedAt: 'pronounced_at',
+  reliefKind: 'relief_kind',
+  amountSar: 'amount_sar',
+  currency: 'currency',
+  verdictFor: 'verdict_for',
+  summary: 'summary',
+  summaryAr: 'summary_ar',
+  documentId: 'document_id',
+  appealable: 'appealable',
+  finalAt: 'final_at',
+  stayInForce: 'stay_in_force',
+  stayReason: 'stay_reason',
+  stayOrderedAt: 'stay_ordered_at',
+  enforcementStatus: 'enforcement_status',
+  enforcementOpenedAt: 'enforcement_opened_at',
+  enforcementCourt: 'enforcement_court',
+  enforcementReference: 'enforcement_reference',
+  satisfiedAt: 'satisfied_at',
+  recoveredAmountSar: 'recovered_amount_sar',
+};
+
+/** What an appeal may be amended with. */
+export const APPEAL_COLUMNS: Readonly<Record<string, string>> = {
+  filingDeadlineAt: 'filing_deadline_at',
+  ruleCited: 'rule_cited',
+  ruleDays: 'rule_days',
+  filedLate: 'filed_late',
+  court: 'court',
+  courtAr: 'court_ar',
+  reference: 'reference',
+  status: 'status',
+  outcome: 'outcome',
+  decidedAt: 'decided_at',
+  resultJudgmentId: 'result_judgment_id',
+  stayRequested: 'stay_requested',
+  stayGranted: 'stay_granted',
+  grounds: 'grounds',
+  groundsAr: 'grounds_ar',
+};
+
+/**
+ * The camelCase keys a caller may send, translated, with an unknown key REFUSED.
+ *
+ * Shared by every P0.4 writer so that the rule is stated once. The failure it prevents is
+ * the one P0.3 paid for: a body field with no column disappears inside the repository, the
+ * write returns early, and the route reports success about a row that never changed.
+ */
+export function translateColumns(
+  body: Record<string, unknown>,
+  map: Readonly<Record<string, string>>,
+  where: string,
+): Array<[string, unknown]> {
+  const out: Array<[string, unknown]> = [];
+  for (const [key, value] of Object.entries(body)) {
+    const column = map[key];
+    if (!column) {
+      throw new Error(`${where}: "${key}" is not a column this writer owns — refusing rather than dropping it`);
+    }
+    out.push([column, value]);
+  }
+  return out;
+}
+
+export interface CourtCalendarInput {
+  tenantId: string;
+  calendarDate: string;
+  hijriDate?: string | null;
+  kind: string;
+  name: string;
+  nameAr: string;
+  note?: string | null;
+  membershipId: string | null;
+}
+
+export interface JudgmentInput {
+  tenantId: string;
+  clientId: string;
+  matterId: string;
+  deedNumber: string;
+  caseNumber?: string | null;
+  court: string;
+  courtAr: string;
+  circuit?: string | null;
+  circuitAr?: string | null;
+  judgeName?: string | null;
+  judgmentKind: string;
+  presence: string;
+  urgent: boolean;
+  pronouncedAt: string;
+  reliefKind: string;
+  amountSar?: number | null;
+  currency?: string;
+  verdictFor?: string | null;
+  summary?: string | null;
+  summaryAr?: string | null;
+  documentId?: string | null;
+  appealable: boolean;
+  membershipId: string;
+}
+
+export interface ServiceInput {
+  tenantId: string;
+  clientId: string;
+  matterId: string;
+  judgmentId: string | null;
+  noticeKind: string;
+  method: string;
+  outcome: string;
+  servedOnKind: string;
+  servedOnName?: string | null;
+  servedOnPartyId?: string | null;
+  attemptedAt?: string | null;
+  servedAt?: string | null;
+  publicationDays?: number | null;
+  /** COMPUTED BY THE DOMAIN (`serviceEffect`), never by this file. */
+  effectiveAt: string | null;
+  proofDocumentId?: string | null;
+  proofReference?: string | null;
+  note?: string | null;
+  membershipId: string;
+}
+
+export interface AppealInput {
+  tenantId: string;
+  clientId: string;
+  matterId: string;
+  judgmentId: string;
+  appealKind: string;
+  filedAt: string;
+  filingDeadlineAt?: string | null;
+  ruleCited?: string | null;
+  ruleDays?: number | null;
+  filedLate: boolean;
+  court?: string | null;
+  courtAr?: string | null;
+  reference?: string | null;
+  status?: string;
+  stayRequested?: boolean;
+  grounds?: string | null;
+  groundsAr?: string | null;
+  membershipId: string;
+}
+
+/** One row of the judgment register, as the domain's `JudgmentFacts` needs it. */
+function judgmentFromRow(r: Row) {
+  return {
+    id: String(r.id), tenantId: String(r.tenant_id), clientId: String(r.client_id),
+    matterId: String(r.matter_id), deedNumber: String(r.deed_number),
+    caseNumber: strOrNull(r.case_number),
+    court: String(r.court), courtAr: String(r.court_ar),
+    circuit: strOrNull(r.circuit), circuitAr: strOrNull(r.circuit_ar),
+    judgeName: strOrNull(r.judge_name),
+    judgmentKind: String(r.judgment_kind), presence: String(r.presence),
+    urgent: boolColumn(r.urgent),
+    pronouncedAt: String(r.pronounced_at),
+    reliefKind: String(r.relief_kind),
+    amountSar: r.amount_sar === null ? null : toNumber(r.amount_sar),
+    currency: String(r.currency ?? 'SAR'), verdictFor: strOrNull(r.verdict_for),
+    summary: strOrNull(r.summary), summaryAr: strOrNull(r.summary_ar),
+    documentId: strOrNull(r.document_id),
+    appealable: boolColumn(r.appealable),
+    servedAt: strOrNull(r.served_at),
+    serviceEffectiveAt: strOrNull(r.service_effective_at),
+    appealDeadlineAt: strOrNull(r.appeal_deadline_at),
+    appealRuleCited: strOrNull(r.appeal_rule_cited),
+    appealRuleDays: r.appeal_rule_days === null || r.appeal_rule_days === undefined
+      ? null : Number(r.appeal_rule_days),
+    finalAt: strOrNull(r.final_at),
+    stayInForce: boolColumn(r.stay_in_force),
+    stayReason: strOrNull(r.stay_reason), stayOrderedAt: strOrNull(r.stay_ordered_at),
+    enforcementStatus: String(r.enforcement_status),
+    enforcementOpenedAt: strOrNull(r.enforcement_opened_at),
+    enforcementCourt: strOrNull(r.enforcement_court),
+    enforcementReference: strOrNull(r.enforcement_reference),
+    satisfiedAt: strOrNull(r.satisfied_at),
+    recoveredAmountSar: r.recovered_amount_sar === null || r.recovered_amount_sar === undefined
+      ? null : toNumber(r.recovered_amount_sar),
+    /* Joined for the register, not columns on the table. */
+    matterNumber: strOrNull(r.matter_number), clientName: strOrNull(r.client_name),
+    matterTitle: strOrNull(r.matter_title),
+    createdAt: String(r.created_at), updatedAt: String(r.updated_at),
+  };
+}
+
+function serviceEventFromRow(r: Row) {
+  return {
+    id: String(r.id), tenantId: String(r.tenant_id), clientId: String(r.client_id),
+    matterId: String(r.matter_id), judgmentId: strOrNull(r.judgment_id),
+    noticeKind: String(r.notice_kind), method: String(r.method), outcome: String(r.outcome),
+    servedOnKind: String(r.served_on_kind), servedOnName: strOrNull(r.served_on_name),
+    servedOnPartyId: strOrNull(r.served_on_party_id),
+    attemptedAt: strOrNull(r.attempted_at), servedAt: strOrNull(r.served_at),
+    publicationDays: r.publication_days === null || r.publication_days === undefined
+      ? null : Number(r.publication_days),
+    effectiveAt: strOrNull(r.effective_at),
+    proofDocumentId: strOrNull(r.proof_document_id),
+    proofReference: strOrNull(r.proof_reference),
+    acknowledgedAt: strOrNull(r.acknowledged_at), deadlineId: strOrNull(r.deadline_id),
+    note: strOrNull(r.note), createdAt: String(r.created_at), updatedAt: String(r.updated_at),
+  };
+}
+
+function appealFromRow(r: Row) {
+  return {
+    id: String(r.id), tenantId: String(r.tenant_id), clientId: String(r.client_id),
+    matterId: String(r.matter_id), judgmentId: String(r.judgment_id),
+    appealKind: String(r.appeal_kind), filedAt: String(r.filed_at),
+    filingDeadlineAt: strOrNull(r.filing_deadline_at),
+    ruleCited: strOrNull(r.rule_cited),
+    ruleDays: r.rule_days === null || r.rule_days === undefined ? null : Number(r.rule_days),
+    filedLate: boolColumn(r.filed_late),
+    court: strOrNull(r.court), courtAr: strOrNull(r.court_ar), reference: strOrNull(r.reference),
+    status: String(r.status), outcome: strOrNull(r.outcome), decidedAt: strOrNull(r.decided_at),
+    resultJudgmentId: strOrNull(r.result_judgment_id),
+    stayRequested: boolColumn(r.stay_requested), stayGranted: boolColumn(r.stay_granted),
+    grounds: strOrNull(r.grounds), groundsAr: strOrNull(r.grounds_ar),
+    createdAt: String(r.created_at), updatedAt: String(r.updated_at),
+  };
+}
+
+function calendarFromRow(r: Row) {
+  return {
+    id: String(r.id), tenantId: String(r.tenant_id),
+    calendarDate: String(r.calendar_date), hijriDate: strOrNull(r.hijri_date),
+    kind: String(r.kind), name: String(r.name), nameAr: String(r.name_ar),
+    note: strOrNull(r.note), createdAt: String(r.created_at), updatedAt: String(r.updated_at),
+  };
 }
 
 export interface ExpenseInput {

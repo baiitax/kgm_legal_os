@@ -7,7 +7,7 @@ import type {
 } from './types.js';
 import { SQLITE_SCHEMA } from './schema.sqlite.js';
 import { FIRM_RBAC_SCHEMA, FISCAL_TRUST_BILLING_SCHEMA,
-  CLIENT_DUE_DILIGENCE_SCHEMA,
+  CLIENT_DUE_DILIGENCE_SCHEMA, JUDGMENTS_SERVICE_SCHEMA,
 } from './schema.firm.sqlite.js';
 
 /**
@@ -85,7 +85,31 @@ export class SqliteDb implements Db {
       `client_due_diligence`, and the screening gate on `matters` reads all three.
     */
     this.db.exec(CLIENT_DUE_DILIGENCE_SCHEMA);
+    /*
+      COLUMNS FIRST, THEN THE WIDENED RULE, THEN THE PHASE THAT NEEDS BOTH.
+
+      `ensureColumns` used to run last. It now runs before the fifth literal because that
+      literal's triggers read `deadlines.rule_cited` — SQLite validates a trigger body against
+      the columns that exist when it is created, so a trigger referring to a column added a
+      line later does not exist. The order is the dependency, not a preference.
+    */
     this.ensureColumns();
+    /*
+      THE `deadlines.kind` CHECK, WIDENED — a migration, in the method that exists for exactly
+      this. The PORTAL literal creates the table with `kind in ('client_action','internal_task')`
+      and SQLite cannot alter a CHECK constraint, so a fresh database gets the old rule from
+      `create table if not exists` and every P0.4 deadline is refused by the demo engine while
+      Postgres accepts it (0045 widened the same CHECK). That divergence is defect (o) — one
+      rule, two dialects, and only one of them right — so it is closed here rather than by
+      editing the portal literal, which several hundred portal tests were written against.
+    */
+    this.widenDeadlineKinds();
+    /*
+      P0.4 · judgments, service and the enforcement gate. A fifth literal, run last because
+      `judgments` references `matters` and `documents` and the gate reads `deadlines`, which
+      the PORTAL literal owns.
+    */
+    this.db.exec(JUDGMENTS_SERVICE_SCHEMA);
   }
 
   /**
@@ -143,10 +167,108 @@ export class SqliteDb implements Db {
     add('invoice_lines', 'vat_amount', 'real not null default 0');
     add('invoice_lines', 'discount_amount', 'real not null default 0');
     add('clients', 'relationship_ended_on', 'text');
+    /*
+      0045 · THE PROCEDURAL DEADLINE. `deadlines` is created by the PORTAL literal, so a
+      database made before this phase has none of these columns and — because SQLite skips
+      a `create table if not exists` for a table that exists — would never get them. The
+      failure would surface as "no such column: rule_cited" in the middle of recording a
+      service, which is exactly the class of bug this method exists to prevent.
+    */
+    add('deadlines', 'rule_code', 'text');
+    add('deadlines', 'rule_cited', 'text');
+    add('deadlines', 'rule_days', 'integer');
+    add('deadlines', 'trigger_event', 'text');
+    add('deadlines', 'source_kind', 'text');
+    add('deadlines', 'source_id', 'text');
     this.db.exec(
       `update roles set requires_practising_licence = 1
         where code in ('MANAGING_PARTNER','PARTNER','ASSOCIATE','LAWYER')`,
     );
+  }
+
+  /**
+   * Widens `deadlines.kind` to the P0.4 vocabulary, rebuilding the table once.
+   *
+   * WHY A REBUILD. SQLite has no `alter table ... drop constraint`, and a CHECK constraint is
+   * compiled into the table definition — so the only way to widen it is to create the table
+   * again with the new rule, move the rows, and rename. This is the documented SQLite
+   * procedure and it is why the method is a migration rather than a line in a schema file:
+   *
+   *   · it runs ONLY when the old constraint is still in force, read from `sqlite_master`,
+   *     so a database created after this phase is never touched;
+   *   · it runs in a TRANSACTION, so a failure leaves the old table and the old rule;
+   *   · it recreates the index and the portal's own lane guards, which dropping the table
+   *     takes with it — a rebuild that silently removed the `internal_task` guard would make
+   *     an internal deadline client-visible in the demo and nowhere else.
+   *
+   * The columns added by 0045 are part of the new definition. `ensureColumns` has already
+   * added them to the old table, so the copy carries them across.
+   */
+  private widenDeadlineKinds(): void {
+    const def = this.db.prepare(
+      `select sql from sqlite_master where type = 'table' and name = 'deadlines'`,
+    ).get() as { sql?: string } | undefined;
+    if (!def?.sql || def.sql.includes("'appeal'")) return;
+
+    this.db.exec(`
+      begin;
+      create table deadlines_widened (
+        id text primary key,
+        matter_id text not null references matters(id) on delete cascade,
+        tenant_id text not null references tenants(id),
+        client_id text not null references clients(id),
+        kind text not null check (kind in ('client_action','internal_task','appeal',
+                                           'cassation','reconsideration','limitation')),
+        title text not null,
+        title_ar text not null,
+        description text,
+        description_ar text,
+        due_at text not null,
+        priority text not null default 'normal',
+        internal_status text not null default 'open',
+        client_status text not null default 'open',
+        /* THE FOREIGN KEY POSTGRES HAS AND THIS MIRROR DID NOT.
+           deadlines.assigned_staff_id references staff in the deployed schema; the portal
+           literal declares the column bare. The divergence survived three phases and cost a
+           500 in P0.4: the route passed a MEMBERSHIP id into a STAFF column, PostgreSQL raised
+           a foreign key violation, and the demo engine accepted the row without a word — so
+           the suite was green and the deployment was broken. A mirror that does not enforce
+           what the real schema enforces is a mirror that teaches the wrong lesson. */
+        assigned_staff_id text references staff(id) on delete set null,
+        internal_comment text,
+        client_visible integer not null default 0,
+        rule_code text,
+        rule_cited text,
+        rule_days integer,
+        trigger_event text,
+        source_kind text,
+        source_id text,
+        created_at text not null,
+        updated_at text not null
+      );
+      insert into deadlines_widened
+        (id, matter_id, tenant_id, client_id, kind, title, title_ar, description, description_ar,
+         due_at, priority, internal_status, client_status, assigned_staff_id, internal_comment,
+         client_visible, rule_code, rule_cited, rule_days, trigger_event, source_kind, source_id,
+         created_at, updated_at)
+      select id, matter_id, tenant_id, client_id, kind, title, title_ar, description, description_ar,
+             due_at, priority, internal_status, client_status, assigned_staff_id, internal_comment,
+             client_visible, rule_code, rule_cited, rule_days, trigger_event, source_kind, source_id,
+             created_at, updated_at
+        from deadlines;
+      drop table deadlines;
+      alter table deadlines_widened rename to deadlines;
+      create index if not exists deadlines_client_idx on deadlines(client_id, due_at);
+      create trigger if not exists deadline_lane_guard
+        before insert on deadlines
+        when new.kind = 'internal_task' and new.client_visible = 1
+        begin select raise(ABORT, 'internal_task deadlines cannot be client_visible'); end;
+      create trigger if not exists deadline_lane_guard_upd
+        before update on deadlines
+        when new.kind = 'internal_task' and new.client_visible = 1
+        begin select raise(ABORT, 'internal_task deadlines cannot be client_visible'); end;
+      commit;
+    `);
   }
 
   private coerce(params: Param[] = []): (string | number | null | Buffer)[] {

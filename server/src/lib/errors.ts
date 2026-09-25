@@ -75,6 +75,34 @@ export type ErrorCode =
   | 'str_not_draft'
   | 'str_not_reviewed'
   | 'str_not_filed'
+  /*
+    P0.4 · JUDGMENTS, SERVICE AND ENFORCEMENT. The codes are in the ORDER of the gate, and
+    the order is the contract: a person refused `judgment_not_enforceable` learns nothing
+    from also being told the period is open, and the first true reason is the one that
+    tells them what to do next. `appeal_window_open` is the only refusal in this system
+    that carries a date on the wire (`details.unblocksAt`), because for it the date IS the
+    instruction: wait until then, or do something else meanwhile.
+  */
+  | 'judgment_missing'
+  /* No judgment on the matter is the operative one — every judgment is superseded, or the
+     latest one has been set aside. Distinct from `judgment_missing`, which is a matter with
+     no register at all. */
+  | 'judgment_not_operative'
+  | 'judgment_not_enforceable'
+  | 'judgment_not_served'
+  | 'service_defective'
+  | 'execution_stayed'
+  | 'appeal_pending'
+  | 'appeal_window_open'
+  | 'enforcement_transition_invalid'
+  | 'appeal_not_available'
+  /* A judgment was served and no period was computed from it — the state in which a system
+     believes it has diarised an appeal and has not. Refused by the database as well. */
+  | 'appeal_window_uncomputed'
+  | 'judgment_finality_contradiction'
+  | 'judgment_retention'
+  | 'service_retention'
+  | 'procedural_deadline_lane'
   | 'written_consent_required'
   | 'not_a_confirmed_conflict'
   | 'no_affected_party'

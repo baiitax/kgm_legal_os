@@ -1977,3 +1977,371 @@ create trigger if not exists aml_risk_countries_retention
   end;
 
 `;
+
+/**
+ * P0.4 · JUDGMENTS, SERVICE, AND THE PERIOD FOR CHALLENGING ONE.
+ *
+ * Production source of truth: supabase/migrations/0045_judgments_and_service.sql. A fifth
+ * literal, for the reason the fourth exists: keeping one migration per literal makes it
+ * obvious which phase a table came from when one of them fails to apply. It must run AFTER
+ * CLIENT_DUE_DILIGENCE_SCHEMA — `judgments` references `matters` and `documents`, and the
+ * enforcement gate reads `client_due_diligence` for nothing but is written beside it.
+ *
+ * ONE RULE, ONE COPY — EVEN ACROSS DIALECTS. The appeal arithmetic (day after delivery,
+ * thirty days, extend the last day, close at 23:59:59+03:00) is NOT here. It lives in
+ * `server/src/domain/judgments.ts` and its answer is written onto the row, in both engines,
+ * by the same function. This file stores the answer and enforces the consequences. The
+ * 25%-ownership defect in P0.3 was a rule with three implementations and one of them wrong;
+ * this is the phase that stopped doing that.
+ */
+export const JUDGMENTS_SERVICE_SCHEMA = `
+/* ── THE DAYS THE COURTS DO NOT SIT ───────────────────────────────────────────── */
+create table if not exists court_calendar (
+  id                        text primary key,
+  tenant_id                 text not null references tenants(id),
+  calendar_date             text not null,
+  hijri_date                text,
+  kind                      text not null default 'public_holiday'
+                            check (kind in ('weekend','public_holiday','court_recess','emergency_closure')),
+  name                      text not null,
+  name_ar                   text not null,
+  note                      text,
+  created_by_membership_id  text references firm_memberships(id),
+  created_at                text not null,
+  updated_at                text not null,
+  unique (tenant_id, calendar_date)
+);
+create index if not exists court_calendar_tenant_idx on court_calendar(tenant_id, calendar_date);
+
+/* ── THE REGISTER ─────────────────────────────────────────────────────────────── */
+create table if not exists judgments (
+  id                        text primary key,
+  tenant_id                 text not null references tenants(id),
+  client_id                 text not null references clients(id),
+  matter_id                 text not null references matters(id) on delete restrict,
+  deed_number               text not null,
+  case_number               text,
+  court                     text not null,
+  court_ar                  text not null,
+  circuit                   text,
+  circuit_ar                text,
+  judge_name                text,
+  judgment_kind             text not null
+                            check (judgment_kind in ('first_instance','appeal','cassation')),
+  presence                  text not null default 'in_presence'
+                            check (presence in ('in_presence','in_absentia','in_absentia_default')),
+  urgent                    integer not null default 0,
+  pronounced_at             text not null,
+  relief_kind               text not null default 'none'
+                            check (relief_kind in ('monetary','non_monetary','none')),
+  amount_sar                real,
+  currency                  text not null default 'SAR',
+  verdict_for               text check (verdict_for in ('client','opponent','split','procedural')),
+  summary                   text,
+  summary_ar                text,
+  document_id               text references documents(id),
+  appealable                integer not null default 1,
+  served_at                 text,
+  service_effective_at      text,
+  appeal_deadline_at        text,
+  appeal_rule_cited         text,
+  appeal_rule_days          integer,
+  final_at                  text,
+  stay_in_force             integer not null default 0,
+  stay_reason               text,
+  stay_ordered_at           text,
+  enforcement_status        text not null default 'awaiting_finality'
+                            check (enforcement_status in
+                              ('not_enforceable','awaiting_finality','enforceable',
+                               'stayed','under_enforcement','satisfied','closed')),
+  enforcement_opened_at     text,
+  enforcement_court         text,
+  enforcement_reference     text,
+  satisfied_at              text,
+  recovered_amount_sar      real,
+  created_by_membership_id  text not null references firm_memberships(id),
+  created_at                text not null,
+  updated_at                text not null,
+  unique (tenant_id, deed_number),
+  check (relief_kind <> 'monetary' or amount_sar is not null),
+  check (amount_sar is null or amount_sar >= 0),
+  check (stay_in_force = 0 or stay_ordered_at is not null),
+  check (appeal_deadline_at is null or (appeal_rule_cited is not null and appeal_rule_days is not null)),
+  check (enforcement_status <> 'under_enforcement' or enforcement_opened_at is not null)
+);
+create index if not exists judgments_matter_idx on judgments(matter_id, pronounced_at desc);
+create index if not exists judgments_client_idx on judgments(client_id, pronounced_at desc);
+create index if not exists judgments_enforceable_idx
+  on judgments(tenant_id, enforcement_status, appeal_deadline_at);
+
+/* ── THE SERVICE REGISTER ─────────────────────────────────────────────────────── */
+create table if not exists service_events (
+  id                        text primary key,
+  tenant_id                 text not null references tenants(id),
+  client_id                 text not null references clients(id),
+  matter_id                 text not null references matters(id) on delete restrict,
+  judgment_id               text references judgments(id),
+  notice_kind               text not null
+                            check (notice_kind in ('judgment','court_notice','execution_notice',
+                                                   'opponent_notice','client_notice','third_party_notice')),
+  method                    text not null
+                            check (method in ('in_court','personal','agent','registered_mail',
+                                              'electronic','publication','judicial_bailiff')),
+  outcome                   text not null default 'pending'
+                            check (outcome in ('pending','served','refused','unclaimed',
+                                               'untraceable','substituted')),
+  served_on_kind            text not null
+                            check (served_on_kind in ('client','opponent','representative','third_party')),
+  served_on_name            text,
+  served_on_party_id        text references parties(id),
+  attempted_at              text,
+  served_at                 text,
+  publication_days          integer,
+  effective_at              text,
+  proof_document_id         text references documents(id),
+  proof_reference           text,
+  acknowledged_at           text,
+  deadline_id               text references deadlines(id),
+  note                      text,
+  recorded_by_membership_id text not null references firm_memberships(id),
+  created_at                text not null,
+  updated_at                text not null,
+  /* THE LINE, IN ONE CONSTRAINT, IN BOTH DIALECTS. An effective date exists if and only if
+     the outcome is one of the three that take effect. */
+  check ((outcome in ('served','refused','substituted'))
+         = (case when effective_at is null then 0 else 1 end)),
+  check (effective_at is null or served_at is not null),
+  check (outcome <> 'substituted' or publication_days is not null),
+  check (outcome = 'substituted' or publication_days is null)
+);
+create index if not exists service_events_matter_idx on service_events(matter_id, served_at desc);
+create index if not exists service_events_judgment_idx on service_events(judgment_id);
+
+/* ── THE CHALLENGES ───────────────────────────────────────────────────────────── */
+create table if not exists judgment_appeals (
+  id                        text primary key,
+  tenant_id                 text not null references tenants(id),
+  client_id                 text not null references clients(id),
+  matter_id                 text not null references matters(id) on delete restrict,
+  judgment_id               text not null references judgments(id),
+  appeal_kind               text not null check (appeal_kind in ('appeal','cassation','rehearing')),
+  filed_at                  text not null,
+  filing_deadline_at        text,
+  rule_cited                text,
+  rule_days                 integer,
+  filed_late                integer not null default 0,
+  court                     text,
+  court_ar                  text,
+  reference                 text,
+  status                    text not null default 'filed'
+                            check (status in ('filed','registered','decided','withdrawn','rejected')),
+  outcome                   text check (outcome in ('upheld','varied','overturned','remanded','dismissed')),
+  decided_at                text,
+  result_judgment_id        text references judgments(id),
+  stay_requested            integer not null default 0,
+  stay_granted              integer not null default 0,
+  grounds                   text,
+  grounds_ar                text,
+  created_by_membership_id  text not null references firm_memberships(id),
+  created_at                text not null,
+  updated_at                text not null,
+  check (status <> 'decided' or (outcome is not null and decided_at is not null)),
+  check (status not in ('decided','withdrawn','rejected') or decided_at is not null),
+  check (outcome is null or status = 'decided'),
+  check (filed_late = 0 or filing_deadline_at is not null)
+);
+create index if not exists judgment_appeals_judgment_idx on judgment_appeals(judgment_id, filed_at desc);
+
+/* ── THE DEADLINE THE SERVICE CREATES ─────────────────────────────────────────── */
+/*
+  The new columns and the new kinds, in the demo engine too. 'deadlines' lives in the
+  PORTAL schema literal (schema.sqlite.ts) and is therefore owned by a file this one does
+  not edit — which is exactly why the columns are added here, beside the phase that needs
+  them, rather than by reopening a file whose bytes several hundred tests were written
+  against. SQLite cannot widen a CHECK constraint with ALTER, so the constraint in this
+  phase's terms is enforced by the trigger below, in the same voice as the Postgres one.
+*/
+create trigger if not exists deadline_procedural_guard_ins
+  before insert on deadlines
+  for each row when new.kind in ('appeal','cassation','reconsideration','limitation')
+    and (new.client_visible = 1 or new.rule_cited is null or new.rule_days is null)
+  begin
+    select raise(ABORT, 'procedural_deadline_lane: a procedural deadline is the firm''s own obligation — it is never client-visible and it always carries the article it was computed from');
+  end;
+
+create trigger if not exists deadline_procedural_guard_upd
+  before update on deadlines
+  for each row when new.kind in ('appeal','cassation','reconsideration','limitation')
+    and (new.client_visible = 1 or new.rule_cited is null or new.rule_days is null)
+  begin
+    select raise(ABORT, 'procedural_deadline_lane: a procedural deadline is the firm''s own obligation — it is never client-visible and it always carries the article it was computed from');
+  end;
+
+/* ── THE CLOCK FOLLOWS THE SERVICE ────────────────────────────────────────────── */
+create trigger if not exists judgments_clock_guard_upd
+  before update on judgments
+  for each row when new.service_effective_at is not null
+    and (old.service_effective_at is null or old.service_effective_at <> new.service_effective_at)
+    and new.appeal_deadline_at is null
+    and new.appealable = 1
+  begin
+    select raise(ABORT, 'appeal_window_uncomputed: this judgment was served and its period was never computed — a delivery date with no deadline is an appeal nobody diarised');
+  end;
+
+create trigger if not exists judgments_finality_guard_ins
+  before insert on judgments
+  for each row when new.final_at is not null and new.appealable = 1
+    and new.appeal_deadline_at is not null and new.appeal_deadline_at > new.final_at
+  begin
+    select raise(ABORT, 'judgment_finality_contradiction: this judgment is recorded as final before the period for challenging it closed');
+  end;
+
+create trigger if not exists judgments_finality_guard_upd
+  before update on judgments
+  for each row when new.final_at is not null and new.appealable = 1
+    and new.appeal_deadline_at is not null and new.appeal_deadline_at > new.final_at
+  begin
+    select raise(ABORT, 'judgment_finality_contradiction: this judgment is recorded as final before the period for challenging it closed');
+  end;
+
+/* ── THE ENFORCEMENT MATRIX ───────────────────────────────────────────────────── */
+/*
+  The same matrix as 'ENFORCEMENT_TRANSITIONS' in the domain, transcribed — and transcribed
+  as a MATRIX rather than as a chain of conditions, so the two can be diffed against each
+  other. The tempting invalid moves are the interesting entries: 'under_enforcement →
+  enforceable' would be enforcement quietly un-happening, and 'satisfied →
+  under_enforcement' would be the same judgment collected twice.
+*/
+create trigger if not exists judgments_enforcement_guard
+  before update on judgments
+  for each row when new.enforcement_status <> old.enforcement_status
+    and not (
+      (old.enforcement_status = 'not_enforceable'   and new.enforcement_status = 'awaiting_finality')
+      /* awaiting_finality -> under_enforcement is allowed, and the reason is written out at
+         length beside ENFORCEMENT_TRANSITIONS in server/src/domain/judgments.ts: a status
+         column is a record and a record can lag the facts. Only the enforcement gate takes
+         this edge, only after every condition passed, and it records final_at as it goes. */
+   or (old.enforcement_status = 'awaiting_finality' and new.enforcement_status in ('enforceable','stayed','not_enforceable','under_enforcement'))
+   or (old.enforcement_status = 'enforceable'       and new.enforcement_status in ('under_enforcement','stayed','not_enforceable'))
+   or (old.enforcement_status = 'stayed'            and new.enforcement_status in ('enforceable','awaiting_finality','not_enforceable'))
+   or (old.enforcement_status = 'under_enforcement' and new.enforcement_status in ('satisfied','closed','stayed'))
+   or (old.enforcement_status = 'closed'            and new.enforcement_status = 'awaiting_finality')
+    )
+  begin
+    select raise(ABORT, 'enforcement_transition_invalid: a judgment cannot move to that enforcement state from the one it is in');
+  end;
+
+create trigger if not exists judgments_enforcement_satisfied_guard
+  before update on judgments
+  for each row when new.enforcement_status = 'satisfied' and new.satisfied_at is null
+  begin
+    select raise(ABORT, 'enforcement_transition_invalid: a satisfied judgment carries the date it was satisfied');
+  end;
+
+/* ── RETENTION ────────────────────────────────────────────────────────────────── */
+create trigger if not exists judgments_retention
+  before delete on judgments
+  for each row when old.service_effective_at is not null
+    or old.served_at is not null
+    or old.final_at is not null
+    or old.enforcement_status in ('under_enforcement','satisfied','closed')
+    or exists (select 1 from judgment_appeals a where a.judgment_id = old.id)
+    or exists (select 1 from service_events s where s.judgment_id = old.id)
+  begin
+    select raise(ABORT, 'judgment_retention: this judgment has been served, challenged or enforced — it records what the firm did and may not be deleted');
+  end;
+
+create trigger if not exists service_events_retention
+  before delete on service_events
+  for each row when old.effective_at is not null or old.deadline_id is not null
+  begin
+    select raise(ABORT, 'service_retention: this service started a period the firm diarised — deleting it would leave the deadline with no cause');
+  end;
+
+/* ── THE GATE ON ENFORCEMENT ──────────────────────────────────────────────────── */
+/*
+  ONE TRIGGER, AND ITS CHECKS IN A DELIBERATE ORDER.
+
+  The obvious mirror of the Postgres function is one trigger per condition, and it is the
+  wrong mirror for the reason the CDD gate is written this way: SQLite does not define the
+  order in which several triggers on the same event fire, so which refusal a person reads
+  would be the database's choice rather than the rule's. The conditions overlap by
+  construction — a judgment that is unserved and unenforceable fails both — so the messages
+  would differ between two runs of the same test.
+
+  Statements inside ONE trigger body DO run in order, and that gives exactly the precedence
+  the Postgres function states: the existence of a judgment, what it orders, whether it
+  reached the party, whether a court stopped it, whether a challenge is pending, whether the
+  period is still open.
+
+  THE OPERATIVE JUDGMENT IS THE LATEST PRONOUNCED — selected with the same ordering the
+  domain uses, tie broken by 'created_at', so the route and the trigger cannot disagree
+  about which deed number the answer is about.
+*/
+create trigger if not exists matter_execution_gate
+  before update on matters
+  for each row when new.internal_status = 'execution' and old.internal_status <> 'execution'
+  begin
+    /* (1) There is no judgment. */
+    select raise(ABORT, 'judgment_missing: no judgment is registered on this matter — record the صك and its delivery before enforcement is considered')
+     where not exists (select 1 from judgments j where j.matter_id = new.id and j.tenant_id = new.tenant_id);
+
+    /* (2) Nothing to execute. */
+    select raise(ABORT, 'judgment_not_enforceable: the operative judgment orders nothing that can be executed')
+     where exists (select 1 from judgments j where j.matter_id = new.id and j.tenant_id = new.tenant_id
+                     and j.id = (select j2.id from judgments j2 where j2.matter_id = new.id
+                                  order by j2.pronounced_at desc, j2.created_at desc limit 1)
+                     and j.relief_kind = 'none');
+
+    /* (3) Not served. */
+    select raise(ABORT, 'judgment_not_served: the judgment has not been served on the party enforcement is sought against, so no period has started to run')
+     where exists (select 1 from judgments j where j.matter_id = new.id and j.tenant_id = new.tenant_id
+                     and j.id = (select j2.id from judgments j2 where j2.matter_id = new.id
+                                  order by j2.pronounced_at desc, j2.created_at desc limit 1)
+                     and j.service_effective_at is null);
+
+    /* (4) An attempt that did not take effect. */
+    select raise(ABORT, 'service_defective: the only service recorded for this judgment did not take effect — serve again lawfully, or apply for substituted service')
+     where exists (select 1 from judgments j where j.matter_id = new.id and j.tenant_id = new.tenant_id
+                     and j.id = (select j2.id from judgments j2 where j2.matter_id = new.id
+                                  order by j2.pronounced_at desc, j2.created_at desc limit 1)
+                     and j.service_effective_at is null
+                     and exists (select 1 from service_events s where s.judgment_id = j.id));
+
+    /* (5) A court said stop. */
+    select raise(ABORT, 'execution_stayed: a stay of execution is in force against this judgment — enforcement may not begin while it stands')
+     where exists (select 1 from judgments j where j.matter_id = new.id and j.tenant_id = new.tenant_id
+                     and j.id = (select j2.id from judgments j2 where j2.matter_id = new.id
+                                  order by j2.pronounced_at desc, j2.created_at desc limit 1)
+                     and j.stay_in_force = 1);
+
+    /* (6) A challenge is pending. */
+    select raise(ABORT, 'appeal_pending: a challenge is filed and undecided against this judgment — the matter is before a court')
+     where exists (select 1 from judgment_appeals a
+                    where a.status in ('filed','registered')
+                      and a.judgment_id = (select j2.id from judgments j2 where j2.matter_id = new.id
+                                            order by j2.pronounced_at desc, j2.created_at desc limit 1));
+
+    /* (7) The period is still running. */
+    select raise(ABORT, 'appeal_window_open: the period for challenging this judgment is still running')
+     where exists (select 1 from judgments j where j.matter_id = new.id and j.tenant_id = new.tenant_id
+                     and j.id = (select j2.id from judgments j2 where j2.matter_id = new.id
+                                  order by j2.pronounced_at desc, j2.created_at desc limit 1)
+                     and j.appealable = 1 and j.judgment_kind <> 'cassation'
+                     and (j.appeal_deadline_at is null or j.appeal_deadline_at > strftime('%Y-%m-%dT%H:%M:%fZ','now')));
+
+    /* Admitted: the judgment follows the matter, so the register cannot disagree with it. */
+    update judgments
+       set enforcement_status = 'under_enforcement',
+           enforcement_opened_at = coalesce(enforcement_opened_at, strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+           /* The finality the admission declares is written down as it is declared, so the
+              state the matrix skipped is not missing from the file. */
+           final_at = coalesce(final_at, strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+     where matter_id = new.id
+       and id = (select j2.id from judgments j2 where j2.matter_id = new.id
+                  order by j2.pronounced_at desc, j2.created_at desc limit 1)
+       and enforcement_status in ('enforceable','awaiting_finality','stayed');
+  end;
+
+`;

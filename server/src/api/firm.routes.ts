@@ -42,6 +42,28 @@ import {
 } from '../domain/permissions.js';
 import { projectMatter, projectMatterList } from '../domain/classification.js';
 import {
+  SERVICE_TAKING_OUTCOMES,
+  COURT_WEEKEND_DAYS,
+  appealDeadlineAt,
+  appealRulesCatalogue,
+  assessJudgment,
+  addDaysToInstant,
+  canMoveEnforcement,
+  enforcementRegister,
+  executionOutcome,
+  hijriDateOf,
+  operativeJudgment,
+  ruleFor,
+  serviceEffect,
+  type AppealKind,
+  type AppealOutcome,
+  type AppealStatus,
+  type EnforcementStatus,
+  type JudgmentFacts,
+  type JudgmentKind,
+  type ReliefKind,
+} from '../domain/judgments.js';
+import {
   UBO_THRESHOLD_PCT, REVIEW_MONTHS, assessCdd, activationOutcome, containsArabic, deriveRisk,
   isThresholdOwner, ownershipCoverage, requirementsFor, reviewDueAt, screeningState,
   screeningSubjects, strDueAt, strReadiness, STR_INDICATORS,
@@ -1292,6 +1314,31 @@ export function firmRouter(c: Container): Router {
     */
     if (body.internalStatus === 'active' && from !== 'active') {
       await assertCddAdmits(req, p, String(row.client_id), matterId);
+    }
+
+    /*
+      ═══ THE ENFORCEMENT GATE · P0.4 ═══
+
+      THE SECOND DOOR INTO THIS ROUTE, AND IT ASKS A DIFFERENT QUESTION. The CDD gate asks
+      whether the firm may act for this client at all; this one asks whether the firm may
+      now use the state's power to collect. A matter may move into `execution` only when a
+      judgment on it is enforceable, has been served, is not stayed and is not under
+      challenge — and the period for challenging it has closed.
+
+      WHERE THE ORDER COMES FROM is the same place the other gates' does: the domain's
+      `executionOutcome`, which is also what the register on the screen is built from. So
+      the list a person reads and the refusal they receive cannot disagree about which
+      judgments may be enforced — which is the failure that would make this a formality.
+
+      `judgments.manage` IS NOT REQUIRED HERE, AND THAT IS DELIBERATE. This route is the
+      matter lifecycle, and the permission for moving a matter to execution is the one that
+      guards the lifecycle: `matters.status`. Requiring the register's write permission as
+      well would mean two permissions for one decision — and the register's own routes are
+      where `judgments.manage` is checked. The database enforces the same rule for a caller
+      that never passes through this route at all.
+    */
+    if (body.internalStatus === 'execution' && from !== 'execution') {
+      await assertEnforcementAdmits(req, p, matterId);
     }
 
     await c.firm.tx(async () => {
@@ -4036,6 +4083,795 @@ export function firmRouter(c: Container): Router {
       metadata: { countryCode: body.countryCode, listSource: body.listSource, riskLevel: body.riskLevel },
     }, requestInfo(req, c.trustProxy));
     ok(res, { id }, body.id ? 200 : 201);
+  }));
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+     P0.4 · JUDGMENTS, SERVICE AND THE APPEAL PERIOD
+
+     WHERE THE GATE LIVES. The same three places P0.3 established, each answering a
+     different question:
+
+       · the ROUTE refuses with a named code, so the person reading learns which fact is
+         missing and, where the system knows, the date the refusal stops being true;
+       · the DOMAIN (`executionOutcome`, `assessJudgment`) is what the route asks, and it
+         is the same function the register on the screen is built from — so the list and
+         the gate cannot disagree about which judgments may be enforced;
+       · the DATABASE refuses the transition into `execution` whether or not this
+         application asked (0045 and its SQLite mirror). A last line of defence that
+         depends on the application being right is not one.
+
+     WHAT THIS FILE COMPUTES AND WHAT IT STORES. Every period is computed by
+     `server/src/domain/judgments.ts` and the RESULT is written down — the deadline, the
+     article, the number of days. No trigger recomputes it, in either engine. That is the
+     P0.3 lesson applied in advance: a rule with three implementations has none.
+     ═══════════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * A register row as the DOMAIN's facts.
+   *
+   * ONE MAPPER, TWO CALLERS. The gate and the register both ask about the same judgment and
+   * must answer from the same values — a second mapping written for the list view would be
+   * the third implementation of the same rule, which is the shape of defect this phase
+   * exists to stop repeating.
+   */
+  function factsOf(j: Record<string, unknown>): JudgmentFacts {
+    const appeals = (j.appeals ?? []) as Array<Record<string, unknown>>;
+    return {
+      id: String(j.id), matterId: String(j.matterId), clientId: String(j.clientId),
+      kind: String(j.judgmentKind) as JudgmentKind,
+      urgent: Boolean(j.urgent),
+      pronouncedAt: String(j.pronouncedAt),
+      servedAt: (j.servedAt ?? null) as string | null,
+      serviceEffectiveAt: (j.serviceEffectiveAt ?? null) as string | null,
+      serviceAttemptedWithoutEffect: Boolean(j.serviceAttemptedWithoutEffect),
+      appealable: Boolean(j.appealable),
+      finalAt: (j.finalAt ?? null) as string | null,
+      stayInForce: Boolean(j.stayInForce),
+      relief: String(j.reliefKind) as ReliefKind,
+      amountSar: (j.amountSar ?? null) as number | null,
+      enforcementStatus: String(j.enforcementStatus) as EnforcementStatus,
+      appeals: appeals.map((a) => ({
+        id: String(a.id), kind: String(a.kind) as AppealKind,
+        status: String(a.status) as AppealStatus, filedAt: String(a.filedAt),
+        deadlineAt: (a.deadlineAt ?? null) as string | null,
+        outcome: (a.outcome ?? null) as AppealOutcome | null,
+      })),
+      appealDeadlineAt: (j.appealDeadlineAt ?? null) as string | null,
+      appealRuleCited: (j.appealRuleCited ?? null) as string | null,
+      appealRuleDays: (j.appealRuleDays ?? null) as number | null,
+    };
+  }
+
+  /** Everything the execution gate and the register need about one matter's judgments. */
+  async function loadAllJudgments(
+    p: { tenantId: string },
+    clientId: string | null,
+    matterId?: string | null,
+  ) {
+    const rows = await c.firm.enforcementRegister(
+      p.tenantId, { clientId, matterId: matterId ?? null });
+    return rows.map((j) => {
+      const facts = factsOf(j as unknown as Record<string, unknown>);
+      return {
+        facts,
+        assessment: assessJudgment(facts),
+        row: j as unknown as Record<string, unknown>,
+      };
+    });
+  }
+
+  /**
+   * The gate, as a route asks it.
+   *
+   * REFUSES WITH THE DOMAIN'S OWN CODE AND MESSAGE, and carries the date the refusal
+   * stops being true when there is one. `appeal_window_open` without its date is a wall;
+   * with it, it is an instruction — and the register sorts by that date, which is the
+   * whole reason it is on the wire.
+   */
+  async function assertEnforcementAdmits(
+    req: import('express').Request,
+    p: { tenantId: string; userId: string },
+    matterId: string,
+  ): Promise<void> {
+    const loaded = await loadAllJudgments(p, null, matterId);
+    const outcome = executionOutcome({ judgments: loaded.map((r) => r.facts) });
+    if (outcome.allowed) return;
+
+    await c.audit.write({
+      action: 'EXECUTION_GATE_DENIED',
+      actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+      outcome: 'denied',
+      reasonCode: outcome.code,
+      resourceType: 'matter',
+      resourceId: matterId,
+      /*
+        THE METADATA KEY IS `refusal`, NOT `code`.
+        P0.3 shipped `code` and the audit writer's denylist dropped the whole event, so the
+        refusal happened and nothing recorded that it had. The key is named for the thing it
+        carries and checked against `AUDIT_METADATA_DENYLIST_*` before use.
+      */
+      metadata: {
+        refusal: outcome.code,
+        unblocksAt: outcome.unblocksAt,
+        matterId,
+      },
+    }, requestInfo(req, c.trustProxy));
+
+    throw forbidden(outcome.code, outcome.message, outcome.code);
+  }
+
+  // ── the court calendar ────────────────────────────────────────────────────
+
+  r.get('/court-calendar', ah(async (req, res) => {
+    const p = principal(req);
+    c.permissions.assertCan(p, 'court_calendar.read', { type: 'court_calendar' });
+    const from = String(req.query.from ?? `${new Date().getUTCFullYear()}-01-01`).slice(0, 10);
+    const to = String(req.query.to ?? `${new Date().getUTCFullYear()}-12-31`).slice(0, 10);
+    const days = await c.firm.listCourtCalendar(p.tenantId, from, to);
+    ok(res, { from, to, days, weekend: COURT_WEEKEND_DAYS });
+  }));
+
+  r.post('/court-calendar', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    c.permissions.assertCan(p, 'court_calendar.manage', { type: 'court_calendar' });
+    const body = strictBody(z.object({
+      calendarDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      /* Optional: the server derives it from the Gregorian date when the caller does not
+         supply one, so an operator entering a holiday does not have to convert a calendar
+         by hand — and the two cannot disagree because one of them is computed here. */
+      hijriDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+      kind: z.enum(['weekend', 'public_holiday', 'court_recess', 'emergency_closure']),
+      name: z.string().trim().min(2).max(120),
+      nameAr: z.string().trim().min(2).max(120),
+      note: z.string().trim().max(500).optional(),
+    }).strict(), req, c, '/api/firm/court-calendar');
+
+    const id = await c.firm.upsertCourtCalendarDay({
+      tenantId: p.tenantId,
+      calendarDate: body.calendarDate,
+      hijriDate: body.hijriDate ?? hijriDateOf(body.calendarDate),
+      kind: body.kind, name: body.name, nameAr: body.nameAr, note: body.note ?? null,
+      membershipId: p.membershipId,
+    });
+    await c.audit.write({
+      action: 'COURT_CALENDAR_RECORDED',
+      actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+      outcome: 'success', resourceType: 'court_calendar', resourceId: id,
+      metadata: {
+        calendarDate: body.calendarDate, kind: body.kind,
+        hijriDate: body.hijriDate ?? hijriDateOf(body.calendarDate),
+      },
+    }, requestInfo(req, c.trustProxy));
+    ok(res, { id, hijriDate: body.hijriDate ?? hijriDateOf(body.calendarDate) }, 201);
+  }));
+
+  r.delete('/court-calendar/:id', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const id = String(req.params.id);
+    c.permissions.assertCan(p, 'court_calendar.manage', { type: 'court_calendar', id });
+    /* The row is looked up first: a delete that reports success for an id that was never
+       there cannot be distinguished from one that worked, and this table decides statutory
+       dates. 404 where 404 belongs, not a cheerful 200. */
+    const days = await c.firm.listCourtCalendar(p.tenantId, '0001-01-01', '9999-12-31');
+    const row = days.find((d) => d.id === id);
+    if (!row) throw notFoundOrForbidden('not_found', 'no such calendar day');
+    const removed = await c.firm.deleteCourtCalendarDay(p.tenantId, id);
+    await c.audit.write({
+      action: 'COURT_CALENDAR_REMOVED',
+      actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+      outcome: removed ? 'success' : 'denied', resourceType: 'court_calendar', resourceId: id,
+      metadata: { calendarDate: row.calendarDate, removed },
+    }, requestInfo(req, c.trustProxy));
+    ok(res, { id, removed });
+  }));
+
+  // ── the register ──────────────────────────────────────────────────────────
+
+  r.get('/judgments', ah(async (req, res) => {
+    const p = principal(req);
+    c.permissions.assertCan(p, 'judgments.read', { type: 'judgment' });
+    const matterId = req.query.matterId ? String(req.query.matterId) : null;
+    const clientId = req.query.clientId ? String(req.query.clientId) : null;
+    const scoped = await loadAllJudgments(p, clientId, matterId);
+    const entries = enforcementRegister(
+      scoped.map(({ facts, assessment }) => ({ facts, assessment })),
+    );
+    const byId = new Map(scoped.map((s) => [s.facts.id, s]));
+    ok(res, {
+      /*
+        THE REGISTER IS THE DOMAIN'S ANSWER, not the repository's ordering. The rows come
+        back in the order the register computes — decided first, then whatever unblocks
+        soonest — because a list sorted by the matter puts the judgment whose period closes
+        on Thursday below the one that cannot move at all, which is the wrong list for the
+        person who opens it on Thursday morning.
+      */
+      register: entries.map((e) => {
+        const loaded = byId.get(e.judgmentId)!;
+        return {
+          ...judgmentView(loaded.facts, loaded.row),
+          enforcementStatus: e.enforcementStatus,
+          nextStep: e.nextStep,
+          allowed: e.outcome.allowed,
+          refusal: e.outcome.allowed ? null : e.outcome.code,
+          refusalMessage: e.outcome.allowed ? null : e.outcome.message,
+          unblocksAt: e.unblocksAt,
+          assessment: {
+            final: loaded.assessment.final,
+            enforceable: loaded.assessment.enforceable,
+            appealPending: loaded.assessment.appealPending,
+            windowOpen: loaded.assessment.windowOpen,
+          },
+        };
+      }),
+      rules: appealRulesCatalogue(),
+      weekend: COURT_WEEKEND_DAYS,
+    });
+  }));
+
+  /**
+   * The wire shape of a judgment: the domain's facts, plus what a screen labels them with.
+   *
+   * THE ROW IS PASSED IN, because the facts are the domain's vocabulary and the row is the
+   * register's — a screen wants the circuit, the deed number and the client's name, and the
+   * domain has no business carrying any of them. Mapping here rather than at the call site
+   * is what keeps the two from being confused for each other, which is the defect P0.3 paid
+   * for when a projection returned `vat_number` and the route read `vatNumber`.
+   */
+  function judgmentView(
+    f: JudgmentFacts,
+    row?: Record<string, unknown> | null,
+  ) {
+    return {
+      id: f.id, matterId: f.matterId, clientId: f.clientId,
+      deedNumber: row?.deedNumber ?? null,
+      caseNumber: row?.caseNumber ?? null,
+      court: row?.court ?? null, courtAr: row?.courtAr ?? null,
+      currency: row?.currency ?? 'SAR',
+      circuit: row?.circuit ?? null, circuitAr: row?.circuitAr ?? null,
+      judgmentKind: f.kind, presence: row?.presence ?? null, urgent: f.urgent,
+      pronouncedAt: f.pronouncedAt,
+      reliefKind: f.relief, amountSar: f.amountSar,
+      verdictFor: row?.verdictFor ?? null,
+      summary: row?.summary ?? null, summaryAr: row?.summaryAr ?? null,
+      documentId: row?.documentId ?? null,
+      appealable: f.appealable, finalAt: f.finalAt,
+      servedAt: f.servedAt, serviceEffectiveAt: f.serviceEffectiveAt,
+      appealDeadlineAt: f.appealDeadlineAt, appealRuleCited: f.appealRuleCited,
+      appealRuleDays: f.appealRuleDays,
+      stayInForce: f.stayInForce, stayReason: row?.stayReason ?? null,
+      enforcementStatus: f.enforcementStatus,
+      matterNumber: row?.matterNumber ?? null, matterTitle: row?.matterTitle ?? null,
+      clientName: row?.clientName ?? null,
+    };
+  }
+
+  r.get('/matters/:id/judgments', ah(async (req, res) => {
+    const p = principal(req);
+    const matterId = String(req.params.id);
+    c.permissions.assertCan(p, 'judgments.read', { type: 'matter', id: matterId });
+    const matter = await c.firm.getMatterRow(p.tenantId, matterId);
+    if (!matter) throw notFoundOrForbidden('not_found', 'no such matter');
+
+    const loaded = await loadAllJudgments(p, null, matterId);
+    const operative = operativeJudgment(loaded.map((l) => l.facts));
+    ok(res, {
+      matterId,
+      judgments: loaded.map((l) => ({
+        ...judgmentView({ ...l.facts }),
+        assessment: l.assessment,
+        operative: operative?.id === l.facts.id,
+        execution: executionOutcome({ judgments: l.facts ? [l.facts] : [] }),
+      })),
+      /* The gate about the MATTER, which is what the enforcement button asks. */
+      matterExecution: executionOutcome({ judgments: loaded.map((l) => l.facts) }),
+      services: (await c.firm.listServiceEvents(p.tenantId, { matterId })).map((s) => ({
+        id: s.id, judgmentId: s.judgmentId, noticeKind: s.noticeKind, method: s.method,
+        outcome: s.outcome, servedOnKind: s.servedOnKind, servedOnName: s.servedOnName,
+        attemptedAt: s.attemptedAt, servedAt: s.servedAt, effectiveAt: s.effectiveAt,
+        publicationDays: s.publicationDays, proofReference: s.proofReference,
+        proofDocumentId: s.proofDocumentId, deadlineId: s.deadlineId,
+        /* The proof question is answered here rather than left to the reader: a service
+           that happened and cannot be evidenced is a finding, and the register says so. */
+        evidenced: Boolean(s.proofDocumentId || s.proofReference),
+      })),
+      rules: appealRulesCatalogue(),
+    });
+  }));
+
+  r.post('/matters/:id/judgments', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const matterId = String(req.params.id);
+    c.permissions.assertCan(p, 'judgments.record', { type: 'matter', id: matterId });
+    const matter = await c.firm.getMatterRow(p.tenantId, matterId);
+    if (!matter) throw notFoundOrForbidden('not_found', 'no such matter');
+
+    const body = strictBody(z.object({
+      deedNumber: z.string().trim().min(1).max(60),
+      caseNumber: z.string().trim().max(60).nullable().optional(),
+      court: z.string().trim().min(2).max(200),
+      courtAr: z.string().trim().min(2).max(200),
+      circuit: z.string().trim().max(100).nullable().optional(),
+      circuitAr: z.string().trim().max(100).nullable().optional(),
+      judgeName: z.string().trim().max(200).nullable().optional(),
+      judgmentKind: z.enum(['first_instance', 'appeal', 'cassation']),
+      presence: z.enum(['in_presence', 'in_absentia', 'in_absentia_default']).default('in_presence'),
+      urgent: z.boolean().default(false),
+      pronouncedAt: z.string().datetime(),
+      reliefKind: z.enum(['monetary', 'non_monetary', 'none']).default('none'),
+      amountSar: z.number().min(0).nullable().optional(),
+      currency: z.string().trim().length(3).default('SAR'),
+      verdictFor: z.enum(['client', 'opponent', 'split', 'procedural']).nullable().optional(),
+      summary: z.string().trim().max(4000).nullable().optional(),
+      summaryAr: z.string().trim().max(4000).nullable().optional(),
+      documentId: z.string().uuid().nullable().optional(),
+      appealable: z.boolean().default(true),
+    }).strict(), req, c, `/api/firm/matters/${matterId}/judgments`);
+
+    /*
+      A MONETARY JUDGMENT WITH NO AMOUNT IS REFUSED HERE, not by a CHECK constraint that
+      would surface as a 500. The database has the same rule; this is the version the person
+      reads, and it names the field.
+    */
+    if (body.reliefKind === 'monetary' && (body.amountSar ?? null) === null) {
+      throw badRequest('validation_failed', 'a monetary judgment must carry the amount it awards', {
+        fields: ['amountSar'],
+      });
+    }
+
+    const clientId = String(matter.client_id ?? matter.clientId);
+    const id = await c.firm.createJudgment({
+      tenantId: p.tenantId, clientId, matterId,
+      deedNumber: body.deedNumber, caseNumber: body.caseNumber ?? null,
+      court: body.court, courtAr: body.courtAr, circuit: body.circuit ?? null,
+      circuitAr: body.circuitAr ?? null, judgeName: body.judgeName ?? null,
+      judgmentKind: body.judgmentKind, presence: body.presence, urgent: body.urgent,
+      pronouncedAt: body.pronouncedAt, reliefKind: body.reliefKind,
+      amountSar: body.amountSar ?? null, currency: body.currency,
+      verdictFor: body.verdictFor ?? null, summary: body.summary ?? null,
+      summaryAr: body.summaryAr ?? null, documentId: body.documentId ?? null,
+      appealable: body.appealable, membershipId: p.membershipId,
+    });
+
+    /* The timeline gets the event the portal is allowed to see — a judgment was pronounced.
+       The register is the firm's; the timeline is the projection, and it says what the
+       client may know: that a decision was issued, not the firm's plan for it. */
+    await c.firm.addTimelineEntry({
+      tenantId: p.tenantId, matterId, clientId,
+      eventType: 'judgment', occurredAt: body.pronouncedAt,
+      title: `Judgment recorded: ${body.deedNumber}`,
+      titleAr: `تسجيل صك الحكم: ${body.deedNumber}`,
+      description: null, descriptionAr: null,
+      status: 'complete', clientVisible: true, createdByStaff: p.staffId ?? null,
+    }).catch(() => {
+      /* A timeline row is a projection; failing to write one must not fail the record. */
+    });
+
+    await c.audit.write({
+      action: 'JUDGMENT_RECORDED',
+      actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+      outcome: 'success', resourceType: 'judgment', resourceId: id,
+      metadata: {
+        deedNumber: body.deedNumber, judgmentKind: body.judgmentKind,
+        reliefKind: body.reliefKind, amountSar: body.amountSar ?? null,
+        pronouncedAt: body.pronouncedAt, appealable: body.appealable,
+      },
+    }, requestInfo(req, c.trustProxy));
+    ok(res, { id, deedNumber: body.deedNumber }, 201);
+  }));
+
+  r.patch('/judgments/:id', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const id = String(req.params.id);
+    c.permissions.assertCan(p, 'judgments.manage', { type: 'judgment', id });
+    const before = await c.firm.getJudgment(p.tenantId, id);
+    if (!before) throw notFoundOrForbidden('not_found', 'no such judgment');
+
+    const body = strictBody(z.object({
+      deedNumber: z.string().trim().min(1).max(60).optional(),
+      caseNumber: z.string().trim().max(60).nullable().optional(),
+      court: z.string().trim().min(2).max(200).optional(),
+      courtAr: z.string().trim().min(2).max(200).optional(),
+      circuit: z.string().trim().max(100).nullable().optional(),
+      circuitAr: z.string().trim().max(100).nullable().optional(),
+      judgeName: z.string().trim().max(200).nullable().optional(),
+      judgmentKind: z.enum(['first_instance', 'appeal', 'cassation']).optional(),
+      presence: z.enum(['in_presence', 'in_absentia', 'in_absentia_default']).optional(),
+      urgent: z.boolean().optional(),
+      pronouncedAt: z.string().datetime().optional(),
+      reliefKind: z.enum(['monetary', 'non_monetary', 'none']).optional(),
+      amountSar: z.number().min(0).nullable().optional(),
+      verdictFor: z.enum(['client', 'opponent', 'split', 'procedural']).nullable().optional(),
+      summary: z.string().trim().max(4000).nullable().optional(),
+      summaryAr: z.string().trim().max(4000).nullable().optional(),
+      documentId: z.string().uuid().nullable().optional(),
+      /*
+        THE THREE THAT DECIDE ENFORCEMENT, and each is a statement rather than a form field:
+        `appealable` says the law provides no route to challenge it; `finalAt` says a court
+        has closed it; the stay says a court has stopped it. All three are `judgments.manage`.
+      */
+      appealable: z.boolean().optional(),
+      finalAt: z.string().datetime().nullable().optional(),
+      stayInForce: z.boolean().optional(),
+      stayReason: z.string().trim().max(500).nullable().optional(),
+      stayOrderedAt: z.string().datetime().nullable().optional(),
+      enforcementStatus: z.enum(['not_enforceable', 'awaiting_finality', 'enforceable',
+        'stayed', 'under_enforcement', 'satisfied', 'closed']).optional(),
+      enforcementCourt: z.string().trim().max(200).nullable().optional(),
+      enforcementReference: z.string().trim().max(100).nullable().optional(),
+      satisfiedAt: z.string().datetime().nullable().optional(),
+      recoveredAmountSar: z.number().min(0).nullable().optional(),
+    }).strict(), req, c, `/api/firm/judgments/${id}`);
+
+    /*
+      A STAY WITHOUT ITS ORDER IS REFUSED, because the database refuses it too — and the
+      version the person reads should be this one. The same shape of check the CDD route
+      makes before the record is written: say it here, in the domain's words, rather than let
+      a constraint surface as a 500.
+    */
+    if (body.stayInForce === true && !(body.stayOrderedAt ?? before.stayOrderedAt)) {
+      throw badRequest('validation_failed',
+        'a stay of execution must carry the order it comes from: record when it was ordered',
+        { fields: ['stayOrderedAt'] });
+    }
+    if (body.reliefKind === 'monetary' && (body.amountSar ?? before.amountSar ?? null) === null) {
+      throw badRequest('validation_failed', 'a monetary judgment must carry the amount it awards',
+        { fields: ['amountSar'] });
+    }
+
+    const changes = await c.firm.updateJudgment(p.tenantId, id, body);
+    await c.audit.write({
+      action: 'JUDGMENT_AMENDED',
+      actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+      outcome: changes ? 'success' : 'denied', resourceType: 'judgment', resourceId: id,
+      metadata: {
+        fields: Object.keys(body).slice(0, 20),
+        changed: changes,
+        /* What the enforcement posture was and is — the pair is the answer to "who decided
+           this may be collected", which is the question asked after the fact. */
+        enforcementStatusBefore: before.enforcementStatus,
+        enforcementStatusAfter: body.enforcementStatus ?? before.enforcementStatus,
+      },
+    }, requestInfo(req, c.trustProxy));
+
+    const after = await c.firm.getJudgment(p.tenantId, id);
+    ok(res, {
+      id, changed: changes,
+      judgment: after
+        /* The row is what a screen reads; the facts are what the gate reads. Rebuilding the
+           facts here and handing them to the view is how a projection ends up missing the
+           column the view names — the defect P0.3 paid for — so both are passed. */
+        ? { ...judgmentView(factsOf(after), after as unknown as Record<string, unknown>),
+            enforcementStatus: after.enforcementStatus }
+        : null,
+    });
+  }));
+
+  // ── service: the fact the whole phase is about ────────────────────────────
+
+  r.post('/judgments/:id/service', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const id = String(req.params.id);
+    /*
+      `judgments.serve`, NOT `judgments.record`. Recording a صك is reading a court document
+      back into the file; recording its DELIVERY is the fact that starts a thirty-day period
+      running. The second is the one that has to be right, so it is its own permission.
+    */
+    c.permissions.assertCan(p, 'judgments.serve', { type: 'judgment', id });
+    const judgment = await c.firm.getJudgment(p.tenantId, id);
+    if (!judgment) throw notFoundOrForbidden('not_found', 'no such judgment');
+
+    const body = strictBody(z.object({
+      noticeKind: z.enum(['judgment', 'court_notice', 'execution_notice', 'opponent_notice',
+        'client_notice', 'third_party_notice']).default('judgment'),
+      method: z.enum(['in_court', 'personal', 'agent', 'registered_mail', 'electronic',
+        'publication', 'judicial_bailiff']),
+      outcome: z.enum(['pending', 'served', 'refused', 'unclaimed', 'untraceable', 'substituted']),
+      servedOnKind: z.enum(['client', 'opponent', 'representative', 'third_party']),
+      servedOnName: z.string().trim().max(200).nullable().optional(),
+      servedOnPartyId: z.string().uuid().nullable().optional(),
+      attemptedAt: z.string().datetime().nullable().optional(),
+      servedAt: z.string().datetime().nullable().optional(),
+      publicationDays: z.number().int().min(1).max(180).nullable().optional(),
+      proofDocumentId: z.string().uuid().nullable().optional(),
+      proofReference: z.string().trim().max(200).nullable().optional(),
+      note: z.string().trim().max(1000).nullable().optional(),
+    }).strict(), req, c, `/api/firm/judgments/${id}/service`);
+
+    /*
+      THE DOMAIN DECIDES WHETHER THIS WAS SERVICE, and the route does not second-guess it.
+      An uncollected letter and an address nobody could find are attempts; a documented
+      refusal is service. The answer is stored on the row, and the database's own constraint
+      holds the same line for a caller who is not this application.
+    */
+    const effect = serviceEffect({
+      noticeKind: body.noticeKind, method: body.method, outcome: body.outcome,
+      servedOnKind: body.servedOnKind, servedAt: body.servedAt ?? null,
+      attemptedAt: body.attemptedAt ?? null,
+      publicationDays: body.publicationDays ?? null,
+      proofDocumentId: body.proofDocumentId ?? null, proofReference: body.proofReference ?? null,
+    });
+
+    /* Substituted service without the period the court ordered is refused rather than
+       defaulted: the default is the firm's practice parameter, and a statutory period may
+       not rest on a constant the caller cannot see. */
+    if (body.outcome === 'substituted' && (body.publicationDays ?? null) === null) {
+      throw badRequest('validation_failed',
+        'substituted service must record the publication period the court ordered',
+        { fields: ['publicationDays'] });
+    }
+    if ((body.outcome === 'served' || body.outcome === 'refused' || body.outcome === 'substituted')
+      && !body.servedAt) {
+      throw badRequest('validation_failed',
+        'this outcome is a service: record the date it happened', { fields: ['servedAt'] });
+    }
+
+    /* The clock, computed once, in the domain — and only when the notice is the judgment
+       itself. A court notice served on the other side does not start an appeal period. */
+    let clock: ReturnType<typeof appealDeadlineAt> | null = null;
+    let rule: ReturnType<typeof ruleFor> = null;
+    if (effect.effective && body.noticeKind === 'judgment') {
+      rule = ruleFor({
+        judgmentKind: judgment.judgmentKind as JudgmentKind,
+        appealKind: 'appeal',
+        urgent: judgment.urgent,
+      });
+      if (rule && judgment.appealable) {
+        const holidays = await c.firm.courtHolidays(
+          p.tenantId, effect.effectiveAt!.slice(0, 10), addDaysToInstant(effect.effectiveAt!, 90));
+        clock = appealDeadlineAt({
+          effectiveAt: effect.effectiveAt!, rule, holidays,
+        });
+      }
+    }
+
+    const written = await c.firm.tx(async () => {
+      const { serviceId } = await c.firm.recordService({
+        tenantId: p.tenantId, clientId: judgment.clientId, matterId: judgment.matterId,
+        judgmentId: id, noticeKind: body.noticeKind, method: body.method, outcome: body.outcome,
+        servedOnKind: body.servedOnKind, servedOnName: body.servedOnName ?? null,
+        servedOnPartyId: body.servedOnPartyId ?? null,
+        attemptedAt: body.attemptedAt ?? null, servedAt: body.servedAt ?? null,
+        publicationDays: body.publicationDays ?? null, effectiveAt: effect.effectiveAt,
+        proofDocumentId: body.proofDocumentId ?? null,
+        proofReference: body.proofReference ?? null, note: body.note ?? null,
+        membershipId: p.membershipId,
+      });
+
+      let deadlineId: string | null = null;
+      if (clock && body.servedAt) {
+        await c.firm.applyServiceClock({
+          tenantId: p.tenantId, judgmentId: id, servedAt: body.servedAt,
+          /* `effect.effectiveAt`, NOT `clock.startsAt`: the judgment's `service_effective_at`
+             is the moment the party was told, and the period starts the day after it. Storing
+             the start of the period as the effective date would make the register report a
+             service a day late — and, on a substituted service, fifteen days late. */
+          effectiveAt: effect.effectiveAt!,
+          deadlineAt: clock.dueAt,
+          ruleCited: clock.rule.cited, ruleDays: clock.days,
+        });
+        deadlineId = await c.firm.createProceduralDeadline({
+          tenantId: p.tenantId, matterId: judgment.matterId, clientId: judgment.clientId,
+          kind: 'appeal',
+          title: `Appeal period — deed ${judgment.deedNumber} (closes ${clock.dueDate})`,
+          titleAr: `مدة الاعتراض — الصك ${judgment.deedNumber} (تنتهي ${clock.dueDate})`,
+          description: `Computed from delivery on the day after it, ${clock.days} days, closing at `
+            + `the end of ${clock.dueDate} in the Kingdom.`,
+          descriptionAr: `محسوبة من اليوم التالي للتبليغ، ${clock.days} يوماً، وتنتهي بنهاية يوم ${clock.dueDate}.`,
+          dueAt: clock.dueAt, priority: 'critical',
+          ruleCode: clock.rule.code, ruleCited: clock.rule.cited, ruleDays: clock.days,
+          triggerEvent: 'judgment_served', sourceKind: 'service_event', sourceId: serviceId,
+          /* The deadline is the responsibility of the member who accepted the service, and it
+             is held by their STAFF row — which is what the column references. */
+          assignedStaffId: p.staffId ?? null,
+        });
+        await c.firm.linkServiceDeadline(p.tenantId, serviceId, deadlineId);
+      }
+      return { serviceId, deadlineId };
+    });
+
+    await c.audit.write({
+      action: 'JUDGMENT_SERVICE_RECORDED',
+      actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+      outcome: effect.effective ? 'success' : 'denied',
+      /* The reason code is the refusal the DOMAIN named, so a reviewer counting "how often
+         did the firm attempt a service that does not count" reads the same vocabulary the
+         person at the desk was shown. */
+      /* `?? undefined` rather than null: AuditEvent's reason code is `string | undefined`,
+         and the domain's refusal is `string | null` when the service DID take effect. */
+      reasonCode: (effect.effective ? null : effect.code) ?? undefined,
+      resourceType: 'judgment', resourceId: id,
+      metadata: {
+        noticeKind: body.noticeKind, method: body.method, outcome: body.outcome,
+        servedOnKind: body.servedOnKind,
+        effective: effect.effective,
+        effectiveAt: effect.effectiveAt,
+        deadlineAt: clock?.dueAt ?? null,
+        ruleCited: clock?.rule.cited ?? null,
+        days: clock?.days ?? null,
+        evidenced: Boolean(body.proofDocumentId || body.proofReference),
+      },
+    }, requestInfo(req, c.trustProxy));
+
+    if (clock) {
+      await c.audit.write({
+        action: 'APPEAL_PERIOD_COMPUTED',
+        actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+        outcome: 'success', resourceType: 'judgment', resourceId: id,
+        metadata: {
+          ruleCode: clock.rule.code, ruleCited: clock.rule.cited, days: clock.days,
+          startsAt: clock.startsAt, dueDate: clock.dueDate, dueAt: clock.dueAt,
+          extendedFrom: clock.extendedFrom,
+          /* Whether the last day moved, and off which weekday — because "the period ended on
+             a Sunday" is a question somebody will ask about a date that changed. */
+          extendedBecause: clock.extendedBecause,
+          serviceId: written.serviceId,
+        },
+      }, requestInfo(req, c.trustProxy));
+    }
+
+    ok(res, {
+      serviceId: written.serviceId,
+      effective: effect.effective,
+      effectiveAt: effect.effectiveAt,
+      /* When a service does not count, the response says so AND says what to do instead. */
+      refusal: effect.effective ? null : effect.code,
+      reason: effect.reason,
+      /* AND THE PROOF GAP IS REPORTED RATHER THAN SWALLOWED: a service that happened and
+         cannot be evidenced is a finding for the file, not a detail of the write. */
+      proofMissing: !body.proofDocumentId && !body.proofReference
+        && SERVICE_TAKING_OUTCOMES.includes(body.outcome),
+      clock: clock ? {
+        startsAt: clock.startsAt, dueDate: clock.dueDate, dueAt: clock.dueAt,
+        days: clock.days, ruleCited: clock.rule.cited, ruleCode: clock.rule.code,
+        extendedFrom: clock.extendedFrom, extendedBecause: clock.extendedBecause,
+      } : null,
+      deadlineId: written.deadlineId,
+      judgment: {
+        servedAt: body.servedAt ?? null,
+        serviceEffectiveAt: effect.effectiveAt,
+        appealDeadlineAt: clock?.dueAt ?? judgment.appealDeadlineAt,
+      },
+    }, 201);
+  }));
+
+  // ── the challenges ────────────────────────────────────────────────────────
+
+  r.post('/judgments/:id/appeals', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const id = String(req.params.id);
+    c.permissions.assertCan(p, 'judgments.manage', { type: 'judgment', id });
+    const judgment = await c.firm.getJudgment(p.tenantId, id);
+    if (!judgment) throw notFoundOrForbidden('not_found', 'no such judgment');
+
+    const body = strictBody(z.object({
+      appealKind: z.enum(['appeal', 'cassation', 'rehearing']),
+      filedAt: z.string().datetime(),
+      court: z.string().trim().max(200).nullable().optional(),
+      courtAr: z.string().trim().max(200).nullable().optional(),
+      reference: z.string().trim().max(100).nullable().optional(),
+      stayRequested: z.boolean().default(false),
+      grounds: z.string().trim().max(4000).nullable().optional(),
+      groundsAr: z.string().trim().max(4000).nullable().optional(),
+    }).strict(), req, c, `/api/firm/judgments/${id}/appeals`);
+
+    /*
+      THE ROUTE REFUSES A PROCEEDING THE LAW DOES NOT PROVIDE, with a named code rather than
+      a generic validation error: a judgment of the Supreme Court is not appealed, and a
+      first-instance judgment is not taken to cassation directly. Accepting the filing would
+      put a challenge on the register that cannot exist, and the register is what the
+      enforcement gate reads.
+    */
+    const rule = ruleFor({
+      judgmentKind: judgment.judgmentKind as JudgmentKind,
+      appealKind: body.appealKind,
+      urgent: judgment.urgent,
+    });
+    if (!rule) {
+      throw badRequest('appeal_not_available',
+        body.appealKind === 'appeal'
+          ? `a ${judgment.judgmentKind.replace('_', ' ')} judgment is not appealed: no such proceeding`
+          : `cassation is not available against a ${judgment.judgmentKind.replace('_', ' ')} judgment`,
+        { judgmentKind: judgment.judgmentKind, appealKind: body.appealKind });
+    }
+
+    /*
+      FILED LATE IS RECORDED, NOT REFUSED — and the difference matters. Whether a late filing
+      is accepted is the court's decision, not this system's. What this system owes the file
+      is the fact: the period had closed, by how much, and on what authority. So the filing is
+      recorded with `filed_late` set and the deadline it was measured against.
+    */
+    const filingDeadlineAt = judgment.appealDeadlineAt
+      ?? (judgment.serviceEffectiveAt
+        ? appealDeadlineAt({
+          effectiveAt: judgment.serviceEffectiveAt, rule,
+          holidays: await c.firm.courtHolidays(
+            p.tenantId, judgment.serviceEffectiveAt.slice(0, 10),
+            addDaysToInstant(judgment.serviceEffectiveAt, 90)),
+        }).dueAt
+        : null);
+    const filedLate = filingDeadlineAt !== null
+      && new Date(body.filedAt).getTime() > new Date(filingDeadlineAt).getTime();
+
+    const appealId = await c.firm.tx(async () => c.firm.createAppeal({
+      tenantId: p.tenantId, clientId: judgment.clientId, matterId: judgment.matterId,
+      judgmentId: id, appealKind: body.appealKind, filedAt: body.filedAt,
+      filingDeadlineAt, ruleCited: rule.cited, ruleDays: rule.days, filedLate,
+      court: body.court ?? null, courtAr: body.courtAr ?? null,
+      reference: body.reference ?? null, status: 'filed',
+      stayRequested: body.stayRequested,
+      grounds: body.grounds ?? null, groundsAr: body.groundsAr ?? null,
+      membershipId: p.membershipId,
+    }));
+
+    /* Filing closes the diarised period: the obligation was met, and a register that still
+       shows it as open is a register that will be chased by somebody for no reason. */
+    const services = await c.firm.listServiceEvents(p.tenantId, { judgmentId: id });
+    const linked = services.find((s) => s.deadlineId)?.deadlineId ?? null;
+    if (linked) await c.firm.closeProceduralDeadline(p.tenantId, linked);
+
+    await c.audit.write({
+      action: 'APPEAL_FILED',
+      actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+      outcome: 'success', resourceType: 'judgment_appeal', resourceId: appealId,
+      metadata: {
+        judgmentId: id, appealKind: body.appealKind, filedAt: body.filedAt,
+        filingDeadlineAt, filedLate, ruleCited: rule.cited, days: rule.days,
+        stayRequested: body.stayRequested, closedDeadlineId: linked,
+      },
+    }, requestInfo(req, c.trustProxy));
+    ok(res, { id: appealId, filedLate, filingDeadlineAt, ruleCited: rule.cited }, 201);
+  }));
+
+  r.post('/judgments/:id/stays', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const id = String(req.params.id);
+    c.permissions.assertCan(p, 'judgments.manage', { type: 'judgment', id });
+    const judgment = await c.firm.getJudgment(p.tenantId, id);
+    if (!judgment) throw notFoundOrForbidden('not_found', 'no such judgment');
+
+    const body = strictBody(z.object({
+      inForce: z.boolean(),
+      reason: z.string().trim().max(500).nullable().optional(),
+      orderedAt: z.string().datetime().nullable().optional(),
+    }).strict(), req, c, `/api/firm/judgments/${id}/stays`);
+
+    if (body.inForce && !body.orderedAt) {
+      throw badRequest('validation_failed',
+        'a stay of execution must carry the order it comes from: record when it was ordered',
+        { fields: ['orderedAt'] });
+    }
+
+    /*
+      A STAY MOVES THE JUDGMENT'S ENFORCEMENT POSTURE, and the move is checked against the
+      domain's own matrix before it is written — so a refused transition is a 409 with a
+      named code rather than a database error. The register's promise is that a stay outranks
+      everything but a terminal state; that promise is only kept if raising one changes the
+      state the gate reads.
+    */
+    const next = body.inForce ? 'stayed' : (judgment.reliefKind === 'none' ? 'not_enforceable' : 'awaiting_finality');
+    if (!canMoveEnforcement(judgment.enforcementStatus as EnforcementStatus, next)
+      && judgment.enforcementStatus !== next) {
+      throw conflict('enforcement_transition_invalid',
+        `a judgment in "${judgment.enforcementStatus}" cannot move to "${next}"`);
+    }
+
+    await c.firm.updateJudgment(p.tenantId, id, {
+      stayInForce: body.inForce,
+      stayReason: body.inForce ? (body.reason ?? null) : null,
+      stayOrderedAt: body.inForce ? body.orderedAt : judgment.stayOrderedAt,
+      enforcementStatus: next,
+    });
+
+    await c.audit.write({
+      action: body.inForce ? 'EXECUTION_STAYED' : 'EXECUTION_STAY_LIFTED',
+      actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+      outcome: 'success', resourceType: 'judgment', resourceId: id,
+      metadata: {
+        reason: body.reason ?? null, orderedAt: body.orderedAt ?? null,
+        enforcementStatusBefore: judgment.enforcementStatus, enforcementStatusAfter: next,
+      },
+    }, requestInfo(req, c.trustProxy));
+    ok(res, { id, stayInForce: body.inForce, enforcementStatus: next });
   }));
 
   return r;

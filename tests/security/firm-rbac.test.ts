@@ -19,14 +19,19 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { bootStack, firmLoginAs, loginAs, createAgent, FIRM, IDS, type Stack } from '../helpers.js';
-import { parseFirmCatalogueFile } from '../../server/src/domain/parse-firm-catalogue.js';
+import { CATALOGUE_MIGRATIONS, parseFirmCatalogueFiles } from '../../server/src/domain/parse-firm-catalogue.js';
 import { PERMISSIONS, ROLE_TEMPLATES, TEMPLATE_GRANTS } from '../../server/src/domain/firm-catalogue.js';
 import { PermissionEngine, MATTER_READ } from '../../server/src/domain/permissions.js';
 import { FirmRepo } from '../../server/src/db/firm-repo.js';
 import { hashPassword, newId } from '../../server/src/lib/crypto.js';
 import { assertCsrf } from '../../server/src/auth/csrf.js';
 
+/* The RBAC migration itself — used by the RLS-recursion check below, which is about the
+   policies 0006 writes and nothing that came later. */
 const MIGRATION = 'supabase/migrations/0006_firm_rbac.sql';
+/* Every migration that declares catalogue rows, in order — the same list the generator uses,
+   so the drift gate covers the WHOLE catalogue rather than the file it started in. */
+const MIGRATIONS = CATALOGUE_MIGRATIONS.map((m) => m);
 
 let s: Stack;
 beforeEach(async () => { s = await bootStack(); });
@@ -134,7 +139,7 @@ async function addMember(opts: {
 // ============================================================================
 
 describe('§8 · permission catalogue integrity', () => {
-  const sql = parseFirmCatalogueFile(MIGRATION);
+  const sql = parseFirmCatalogueFiles(MIGRATIONS);
 
   it('the generated TypeScript module matches the migration exactly', () => {
     // This is the drift gate. If someone edits the SQL and forgets to run

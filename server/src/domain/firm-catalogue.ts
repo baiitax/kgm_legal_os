@@ -1,7 +1,7 @@
 /**
  * GENERATED FILE — DO NOT EDIT BY HAND.
  *
- * Source of truth: supabase/migrations/0006_firm_rbac.sql
+ * Source of truth: supabase/migrations/0006_firm_rbac.sql (+ 0046_judgment_permissions.sql)
  * Regenerate:      npx tsx server/scripts/gen-firm-catalogue.ts
  *
  * The permission catalogue and the nine system role templates are defined once,
@@ -29,7 +29,7 @@ export interface RoleTemplateDef {
   readonly description: string;
 }
 
-/** 69 permission codes across 7 modules. */
+/** 75 permission codes across 7 modules. */
 export const PERMISSIONS: readonly PermissionDef[] = [
   { code: "clients.read", module: "clients", description: "View client records",
     descriptionAr: "عرض سجلات العملاء", sensitivity: "normal" },
@@ -169,6 +169,18 @@ export const PERMISSIONS: readonly PermissionDef[] = [
     descriptionAr: "تصدير سجل التدقيق", sensitivity: "critical" },
   { code: "analytics.read", module: "admin", description: "View firm analytics and risk centre",
     descriptionAr: "عرض التحليلات ومركز المخاطر", sensitivity: "elevated" },
+  { code: "judgments.read", module: "operations", description: "View the judgment register",
+    descriptionAr: "عرض سجل الأحكام", sensitivity: "normal" },
+  { code: "judgments.record", module: "operations", description: "Record a judgment (الصك)",
+    descriptionAr: "تسجيل صك الحكم", sensitivity: "elevated" },
+  { code: "judgments.serve", module: "operations", description: "Record service of a judgment and accept the period it starts",
+    descriptionAr: "تسجيل تبليغ الصك وقبول المدة المترتبة عليه", sensitivity: "elevated" },
+  { code: "judgments.manage", module: "operations", description: "Amend a judgment, its finality and stays, and open enforcement",
+    descriptionAr: "تعديل بيانات الحكم ونهائيته وأوامر إيقاف التنفيذ وبدء التنفيذ", sensitivity: "critical" },
+  { code: "court_calendar.read", module: "operations", description: "View the court calendar",
+    descriptionAr: "عرض تقويم أيام العمل القضائية", sensitivity: "normal" },
+  { code: "court_calendar.manage", module: "operations", description: "Manage court holidays and recesses",
+    descriptionAr: "إدارة العطل والإجازات القضائية", sensitivity: "normal" },
 ] as const;
 
 /** The 9 system role templates (§7, §9-§16). tenant_id is NULL in SQL; a tenant gets its own copy on first boot. */
@@ -217,7 +229,8 @@ export const TEMPLATE_GRANTS: Readonly<Record<string, readonly string[]>> = {
     "users.update", "users.deactivate", "users.assign_role", "users.assign_matter",
     "users.revoke_session", "roles.read", "roles.manage", "departments.manage",
     "settings.read", "settings.manage", "audit.read", "audit.export",
-    "analytics.read",
+    "analytics.read", "judgments.read", "judgments.record", "judgments.serve",
+    "judgments.manage", "court_calendar.read", "court_calendar.manage",
   ],
   "PARTNER": [
     "clients.read", "clients.create", "clients.update", "clients.read_sensitive",
@@ -232,27 +245,31 @@ export const TEMPLATE_GRANTS: Readonly<Record<string, readonly string[]>> = {
     "time.read", "time.create", "time.adjust", "expenses.read",
     "expenses.create", "expenses.approve", "compliance.read", "compliance.review",
     "users.read", "users.assign_matter", "roles.read", "settings.read",
-    "analytics.read",
+    "analytics.read", "judgments.read", "judgments.record", "judgments.serve",
+    "judgments.manage", "court_calendar.read",
   ],
   "LAWYER": [
     "clients.read", "matters.read", "matters.update", "matters.status",
     "documents.read", "documents.create", "documents.edit", "tasks.read",
     "tasks.manage", "hearings.read", "hearings.manage", "deadlines.read",
     "deadlines.manage", "contracts.read", "poa.read", "time.read",
-    "time.create", "expenses.read", "expenses.create",
+    "time.create", "expenses.read", "expenses.create", "judgments.read",
+    "judgments.record", "judgments.serve", "court_calendar.read",
   ],
   "ASSOCIATE": [
     "clients.read", "matters.read", "matters.update", "documents.read",
     "documents.create", "documents.edit", "tasks.read", "tasks.manage",
     "hearings.read", "deadlines.read", "deadlines.manage", "contracts.read",
     "time.read", "time.create", "expenses.read", "expenses.create",
+    "judgments.read", "court_calendar.read",
   ],
   "PARALEGAL": [
     "clients.read", "clients.create", "matters.read", "matters.update",
     "documents.read", "documents.create", "documents.edit", "tasks.read",
     "tasks.manage", "hearings.read", "hearings.manage", "deadlines.read",
     "deadlines.manage", "poa.read", "time.read", "time.create",
-    "expenses.read", "expenses.create",
+    "expenses.read", "expenses.create", "judgments.read", "court_calendar.read",
+    "court_calendar.manage",
   ],
   "FINANCE": [
     "billing.read", "billing.read_all", "billing.create", "billing.edit",
@@ -264,7 +281,7 @@ export const TEMPLATE_GRANTS: Readonly<Record<string, readonly string[]>> = {
     "clients.read", "clients.read_sensitive", "clients.kyc", "matters.read",
     "compliance.read", "compliance.create", "compliance.review", "compliance.approve",
     "compliance.licences", "compliance.training", "compliance.complaints", "documents.read",
-    "poa.read", "audit.read",
+    "poa.read", "audit.read", "judgments.read", "court_calendar.read",
   ],
   "ADMIN": [
     "users.read", "users.invite", "users.update", "users.deactivate",
@@ -275,7 +292,8 @@ export const TEMPLATE_GRANTS: Readonly<Record<string, readonly string[]>> = {
   "OPERATIONS": [
     "tasks.read", "tasks.manage", "hearings.read", "hearings.manage",
     "deadlines.read", "deadlines.manage", "clients.read", "matters.read",
-    "documents.read", "analytics.read",
+    "documents.read", "analytics.read", "judgments.read", "court_calendar.read",
+    "court_calendar.manage",
   ],
 };
 

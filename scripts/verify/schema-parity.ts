@@ -32,6 +32,8 @@ import pg from '../../node_modules/pg/lib/index.js';
 import { readFileSync } from 'node:fs';
 import { SqliteDb } from '../../server/src/db/sqlite.js';
 
+import { APPEAL_COLUMNS, JUDGMENT_COLUMNS } from '../../server/src/db/firm-repo.js';
+
 const ADMIN = (() => {
   const pw = readFileSync('/home/user/.kgm-ops/pw.txt', 'utf8').trim();
   return `postgresql://postgres.sdpezbxwedvxqelpslfv:${encodeURIComponent(pw)}@` +
@@ -485,6 +487,86 @@ const SERVER_WRITES: Array<{
       'tipping_off_acknowledged_by_membership_id', 'fiu_response', 'fiu_responded_at',
       'narrative_ar', 'narrative_en', 'grounds', 'amount_sar', 'updated_at'],
     readColumns: ['id', 'tenant_id', 'status'],
+  },
+  /* ── P0.4 · judgments, service and the court calendar ───────────────────────
+     Every statement below was written in this phase, and every one of them is the reason
+     this file exists: a grant list can only be wrong relative to a statement. Two of them
+     (deadlines INSERT naming `client_status`, and the timeline append) were found THIS WAY,
+     before the code ever reached Postgres, and cost a migration (0048) instead of an outage.
+  */
+  {
+    table: 'court_calendar', command: 'INSERT', where: 'FirmRepo.upsertCourtCalendarDay (new day)',
+    columns: ['id', 'tenant_id', 'calendar_date', 'hijri_date', 'kind', 'name', 'name_ar',
+      'note', 'created_by_membership_id', 'created_at', 'updated_at'],
+  },
+  {
+    table: 'court_calendar', command: 'UPDATE', where: 'FirmRepo.upsertCourtCalendarDay (a holiday is amended)',
+    columns: ['hijri_date', 'kind', 'name', 'name_ar', 'note', 'updated_at'],
+    readColumns: ['id', 'tenant_id', 'calendar_date'],
+  },
+  {
+    table: 'judgments', command: 'INSERT', where: 'FirmRepo.createJudgment',
+    columns: ['id', 'tenant_id', 'client_id', 'matter_id', 'deed_number', 'case_number',
+      'court', 'court_ar', 'circuit', 'circuit_ar', 'judge_name', 'judgment_kind', 'presence',
+      'urgent', 'pronounced_at', 'relief_kind', 'amount_sar', 'currency', 'verdict_for',
+      'summary', 'summary_ar', 'document_id', 'appealable', 'enforcement_status',
+      'created_by_membership_id', 'created_at', 'updated_at'],
+  },
+  {
+    table: 'judgments', command: 'UPDATE',
+    where: 'FirmRepo.updateJudgment (the allow-list, union of every optional field)',
+    columns: [...Object.values(JUDGMENT_COLUMNS), 'updated_at'],
+    readColumns: ['id', 'tenant_id', 'matter_id', 'relief_kind', 'stay_ordered_at'],
+  },
+  {
+    table: 'judgments', command: 'UPDATE', where: 'FirmRepo.applyServiceClock (the period the server computed)',
+    columns: ['served_at', 'service_effective_at', 'appeal_deadline_at', 'appeal_rule_cited',
+      'appeal_rule_days', 'updated_at'],
+    readColumns: ['id', 'tenant_id'],
+  },
+  {
+    table: 'service_events', command: 'INSERT', where: 'FirmRepo.recordService',
+    columns: ['id', 'tenant_id', 'client_id', 'matter_id', 'judgment_id', 'notice_kind',
+      'method', 'outcome', 'served_on_kind', 'served_on_name', 'served_on_party_id',
+      'attempted_at', 'served_at', 'publication_days', 'effective_at', 'proof_document_id',
+      'proof_reference', 'note', 'recorded_by_membership_id', 'created_at', 'updated_at'],
+  },
+  {
+    table: 'service_events', command: 'UPDATE', where: 'FirmRepo.linkServiceDeadline',
+    columns: ['deadline_id', 'updated_at'],
+    readColumns: ['id', 'tenant_id'],
+  },
+  {
+    table: 'judgment_appeals', command: 'INSERT', where: 'FirmRepo.createAppeal',
+    columns: ['id', 'tenant_id', 'client_id', 'matter_id', 'judgment_id', 'appeal_kind',
+      'filed_at', 'filing_deadline_at', 'rule_cited', 'rule_days', 'filed_late', 'court',
+      'court_ar', 'reference', 'status', 'stay_requested', 'grounds', 'grounds_ar',
+      'created_by_membership_id', 'created_at', 'updated_at'],
+  },
+  {
+    table: 'judgment_appeals', command: 'UPDATE', where: 'FirmRepo.updateAppeal (the allow-list)',
+    columns: [...Object.values(APPEAL_COLUMNS), 'updated_at'],
+    readColumns: ['id', 'tenant_id'],
+  },
+  {
+    table: 'deadlines', command: 'INSERT',
+    where: 'FirmRepo.createProceduralDeadline (the period a service creates)',
+    columns: ['id', 'matter_id', 'tenant_id', 'client_id', 'kind', 'title', 'title_ar',
+      'description', 'description_ar', 'due_at', 'priority', 'internal_status', 'client_status',
+      'client_visible', 'rule_code', 'rule_cited', 'rule_days', 'trigger_event', 'source_kind',
+      'source_id', 'assigned_staff_id', 'created_at', 'updated_at'],
+  },
+  {
+    table: 'deadlines', command: 'UPDATE', where: 'FirmRepo.closeProceduralDeadline (the period was met)',
+    columns: ['internal_status', 'updated_at'],
+    readColumns: ['id', 'tenant_id', 'kind'],
+  },
+  {
+    table: 'matter_timeline', command: 'INSERT',
+    where: 'FirmRepo.addTimelineEntry (the judgment, projected for the client)',
+    columns: ['id', 'matter_id', 'tenant_id', 'occurred_at', 'event_type', 'title', 'title_ar',
+      'description', 'description_ar', 'status', 'client_visible', 'created_by_staff',
+      'created_at'],
   },
   {
     table: 'expenses', command: 'UPDATE', where: 'FirmRepo.decideExpense',
