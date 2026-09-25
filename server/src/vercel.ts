@@ -147,28 +147,12 @@ function answerNotReady(res: ServerResponse, requestId: string | null): void {
  * Without it, fifteen warm instances hold all fifteen sessions while doing nothing and the
  * sixteenth request cannot connect at all.
  */
-/**
- * TEMPORARY (removed in the next commit): what the drain actually decided, reported to a
- * caller that asks with `x-kgm-drain-diag`. Three hypotheses about this failure were
- * wrong; a header saying "skipped: 1 scope open after 2s" settles it in one deploy.
- */
-let lastDrain = 'not run';
-function drainReport(): string {
-  return lastDrain;
-}
-
 async function handBackSessions(): Promise<void> {
   try {
-    const db = getDb() as unknown as { drain?: () => Promise<void>; drainReport?: () => string };
-    if (typeof db?.drain !== 'function') {
-      lastDrain = 'skipped: this driver has no drain';
-      return;
-    }
-    await db.drain();
-    lastDrain = db.drainReport?.() ?? 'drained';
+    const db = getDb() as unknown as { drain?: () => Promise<void> };
+    if (typeof db?.drain === 'function') await db.drain();
   } catch (err) {
     /* Failing to close a connection must not fail a request that already succeeded. */
-    lastDrain = `threw: ${(err as Error).message}`;
     console.error('[db] could not drain the pool:', (err as Error).message);
   }
 }
@@ -198,7 +182,6 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   } finally {
     await flushed(res);
     await handBackSessions();
-    if (req.headers['x-kgm-drain-diag']) res.setHeader('x-kgm-drain-diag', drainReport());
   }
 }
 

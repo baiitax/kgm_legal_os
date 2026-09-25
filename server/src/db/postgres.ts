@@ -344,21 +344,15 @@ export class PostgresDb implements Db {
    * A test-supplied pool is left alone — closing it would break the test, not the bug.
    */
   async drain(): Promise<void> {
-    if (this.injectedPool) { this.lastDrain = 'skipped: injected pool'; return; }
+    if (this.injectedPool) return;
     if (this.draining) return this.draining;
     const pool = this.currentPool;
-    if (!pool) { this.lastDrain = 'skipped: no pool'; return; }
+    if (!pool) return;
     this.draining = this.closeIfIdle(pool).finally(() => {
       this.draining = undefined;
     });
     return this.draining;
   }
-
-  /** TEMPORARY (next commit): what the last drain decided, for the header above. */
-  drainReport(): string {
-    return this.lastDrain;
-  }
-  private lastDrain = 'not run';
 
   /** The body of a drain, once one is in flight. */
   private async closeIfIdle(pool: pg.Pool): Promise<void> {
@@ -375,18 +369,12 @@ export class PostgresDb implements Db {
       microseconds in practice; the ceiling is here so a leaked scope cannot pin a
       function open.
     */
-    const scopesFree = await this.awaitScopes(2_000);
-    if (!scopesFree) {
-      this.lastDrain = `skipped: ${this.outstanding} scope(s) open after 2s`;
+    if (!(await this.awaitScopes(2_000))) {
       console.warn(`[db] drain skipped: ${this.outstanding} request scope(s) still open after 2s`);
       return;
     }
-    if (this.currentPool !== pool) { this.lastDrain = 'skipped: pool already replaced'; return; }
-    if (pool.idleCount !== pool.totalCount || pool.waitingCount > 0) {
-      this.lastDrain = `skipped: ${pool.totalCount - pool.idleCount} checked out, ${pool.waitingCount} waiting`;
-      return;
-    }
-    this.lastDrain = `closed ${pool.totalCount} idle client(s)`;
+    if (this.currentPool !== pool) return;
+    if (pool.idleCount !== pool.totalCount || pool.waitingCount > 0) return;
     this.currentPool = undefined;
     /* `end()` waits for a checked-out client to come back. Everything should have been
        released by now; the ceiling is here so that a leak cannot pin a function open. */
@@ -561,13 +549,13 @@ export class PostgresDb implements Db {
    */
   private async connect(): Promise<pg.PoolClient> {
     /*
-      THE LADDER. Six attempts over roughly six seconds, doubling: a pooler that is at
+      THE LADDER. Seven attempts over roughly ten seconds: a pooler that is at
       its client limit frees slots as other requests finish, so the correct behaviour is
       to wait for one rather than to report a failure the reader can do nothing about. A
       permanent failure (a bad password, a missing database) fails on the first attempt —
       retrying it would only delay the answer.
     */
-    const backoffMs = [150, 400, 800, 1_600, 3_200];
+    const backoffMs = [250, 500, 1_000, 2_000, 3_000, 3_000];
     let lastError: unknown;
     for (let attempt = 1; attempt <= backoffMs.length + 1; attempt++) {
       try {
