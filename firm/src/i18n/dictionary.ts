@@ -135,6 +135,8 @@ const ar = {
   'mobile.moreTitle': 'جميع الوحدات',
   'mobile.close': 'إغلاق',
   'mobile.pullToRefresh': 'اسحب للتحديث',
+  'nav.bottom': 'التنقل السفلي',
+  'nav.badgeCount': '{n} غير مقروء',
 
   // ---- auth (§52) --------------------------------------------------------
   'auth.signInTitle': 'تسجيل دخول الموظفين',
@@ -619,6 +621,8 @@ const en = {
   'mobile.moreTitle': 'All modules',
   'mobile.close': 'Close',
   'mobile.pullToRefresh': 'Pull to refresh',
+  'nav.bottom': 'Bottom navigation',
+  'nav.badgeCount': '{n} unread',
 
   'auth.signInTitle': 'Staff sign in',
   'auth.signInSubtitle': 'Internal workspace — invitation only',

@@ -107,6 +107,51 @@ check('bottom nav truncates a long label rather than growing the bar',
 check('the two previously dead nav destinations now have screens',
   firm.includes('mywork.title') && firm.includes('clients.title'), '');
 
+/*
+  THIS TURN'S TWO DEFECTS, PINNED AGAINST THE SERVED BYTES.
+
+  Both were invisible to every harness the product already had — the unit tests
+  needed an account with documents, and the reachability gap needed a viewport no
+  automated check was measuring. Neither can be caught by "does it build". What
+  CAN be caught, and is caught here, is that the shipped artefacts contain the
+  fix: the stylesheet that gives the documents screen its shape, and a sign-out
+  control that does not live behind a media query that hides it.
+*/
+/*
+  `assetsFor` returns the concatenated bodies the browser would load from a
+  route, stylesheets included, so the CSS is asserted where it is actually
+  served rather than from a file on disk. That matters: a stylesheet the crawl
+  never reaches is a stylesheet the browser never reaches either.
+*/
+check('the documents screen ships its own styling',
+  portal.includes('docrow__tile') && portal.includes('docqueue') && portal.includes('upload-progress'),
+  '');
+
+check('a client can sign out on a phone, not only on a wide screen',
+  /*
+    The defect: `.sidebar` — the only place the portal's sign-out lived — is
+    `display: none` below 1024px. So the served stylesheet is asked the question
+    directly: is there an account surface that is never hidden, and is it outside
+    the sidebar media query?
+  */
+  /\.acct__trigger\{/.test(portal)
+    && /\.acct__panel\{/.test(portal)
+    && !/\.acct\{[^}]*display:none/.test(portal)
+    && !/\.acct__trigger\{[^}]*display:none/.test(portal),
+  '');
+
+check('the account menu opens on the inline edge, so Arabic does not clip it',
+  /\.acct__panel\{[^}]*inset-inline-end/.test(portal) && !/\.acct__panel\{[^}]*[^-\w](left|right):/.test(portal),
+  '');
+
+check('the bottom nav ships its sliding indicator',
+  /kgm-bottomnav__lamp/.test(firm) && /--lamp-start/.test(firm),
+  '');
+
+check('the nav can recede without ever losing the member',
+  /kgm-bottomnav\[data-receded\]/.test(firm) && /prefers-reduced-motion/.test(firm),
+  '');
+
 // ---- behaviour ------------------------------------------------------------
 const csrf = await fetch(`${BASE}/api/firm/auth/csrf`, { headers: { accept: 'application/json' } });
 check('firm door answers a CSRF bootstrap', csrf.status === 200, `HTTP ${csrf.status}`);

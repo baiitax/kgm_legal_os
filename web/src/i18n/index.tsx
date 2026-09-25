@@ -65,6 +65,9 @@ const AR = {
   'nav.security': 'مركز الأمان',
   'nav.privacy': 'مركز الخصوصية',
   'nav.signOut': 'تسجيل الخروج',
+  'nav.signOutConfirm': 'سيتم إنهاء جلستك على هذا الجهاز.',
+  'nav.account': 'الحساب',
+  'a11y.accountMenu': 'قائمة الحساب',
 
   'auth.signIn': 'تسجيل الدخول',
   'auth.signInSub': 'ادخل إلى بوابة العميل باستخدام البريد الإلكتروني وكلمة المرور.',
@@ -575,6 +578,16 @@ const AR = {
   'matter.teamNote': 'الأسماء والأدوار التي اختار المكتب مشاركتها معك فقط. بيانات التواصل الداخلية للفريق غير معروضة.',
 
   'doc.notReady': 'غير متاح بعد',
+  'doc.notReadyWhy': 'قيد الفحص الأمني',
+  'doc.sort': 'الترتيب',
+  'doc.sort.newest': 'الأحدث أولًا',
+  'doc.sort.oldest': 'الأقدم أولًا',
+  'doc.sort.name': 'الاسم',
+  'doc.sort.size': 'الحجم',
+  'doc.clearFilters': 'إزالة عوامل التصفية',
+  'doc.noMatches': 'لا نتائج مطابقة',
+  'doc.emptyFilter': 'لا مستندات في هذا التصنيف',
+  'doc.retryOpen': 'إعادة المحاولة',
   'doc.requestedCount': 'طلب المكتب منك رفع {n} مستند.',
   'doc.uploadNote': 'يتم فحص الملف وحفظه في تخزين خاص بمفتاح يولّده الخادم. لا يمكن اختيار مسار الحفظ من المتصفح.',
 
@@ -770,6 +783,9 @@ const EN: Record<MessageKey, string> = {
   'nav.security': 'Security centre',
   'nav.privacy': 'Privacy centre',
   'nav.signOut': 'Sign out',
+  'nav.signOutConfirm': 'Your session on this device will end.',
+  'nav.account': 'Account',
+  'a11y.accountMenu': 'Account menu',
 
   'auth.signIn': 'Sign in',
   'auth.signInSub': 'Access your client portal with your email and password.',
@@ -1277,6 +1293,16 @@ const EN: Record<MessageKey, string> = {
   'matter.teamNote': 'Only the names and roles the firm chose to share with you. The team’s internal contact details are not shown.',
 
   'doc.notReady': 'Not available yet',
+  'doc.notReadyWhy': 'still being scanned',
+  'doc.sort': 'Sort',
+  'doc.sort.newest': 'Newest first',
+  'doc.sort.oldest': 'Oldest first',
+  'doc.sort.name': 'Name',
+  'doc.sort.size': 'Size',
+  'doc.clearFilters': 'Clear filters',
+  'doc.noMatches': 'No matching documents',
+  'doc.emptyFilter': 'Nothing in this category',
+  'doc.retryOpen': 'Try again',
   'doc.requestedCount': 'The firm has asked you to upload {n} document(s).',
   'doc.uploadNote': 'Files are scanned and written to private storage under a server-generated key. The browser cannot choose the path.',
 

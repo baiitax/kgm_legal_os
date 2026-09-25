@@ -126,6 +126,7 @@ export function Card({
   children,
   footer,
   tight,
+  className,
   as = 'section',
 }: {
   title?: ReactNode;
@@ -134,11 +135,14 @@ export function Card({
   children: ReactNode;
   footer?: ReactNode;
   tight?: boolean;
+  /** Styling hook for a caller that needs the card to look like something more
+   *  specific than a card — a request queue, an alert-shaped panel. */
+  className?: string;
   as?: 'section' | 'div' | 'aside';
 }) {
   const Tag = as;
   return (
-    <Tag className="card">
+    <Tag className={className ? `card ${className}` : 'card'}>
       {(title || actions) && (
         <header className="card__head">
           {title && <h2>{title}</h2>}

@@ -320,6 +320,11 @@ export function Topbar({ onNavigate, onSignOut }: TopbarProps) {
             onClick={() => setProfileOpen(true)}
             aria-haspopup="dialog"
             aria-expanded={profileOpen}
+            /* Below 900px `.kgm-topbar__who` is display:none and the avatar is
+               aria-hidden, so without this the control a phone user must press
+               to reach sign-out has NO accessible name at all. A labelled
+               control is also the only thing a screen reader can announce. */
+            aria-label={`${t('profile.title')} — ${shownName}`}
           >
             <span className="kgm-topbar__avatar" aria-hidden="true">{initials}</span>
             <span className="kgm-topbar__who">

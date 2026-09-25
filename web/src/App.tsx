@@ -6,7 +6,7 @@
  * the request anyway if they navigate there directly. Nothing in this file is
  * load-bearing for security.
  */
-import { Suspense, lazy, useEffect, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   BrowserRouter,
@@ -180,6 +180,165 @@ function Sidebar() {
   );
 }
 
+/**
+ * Initials for the avatar. Two letters at most: this is a label, and Arabic
+ * given names are long enough that three initials turn the circle into a smudge.
+ */
+function initialsOf(displayName: string | undefined, email: string | undefined, lang: string): string {
+  const source = displayName?.trim();
+  if (source) {
+    const parts = source.split(/\s+/).filter(Boolean);
+    return (parts.length > 1 ? parts[0][0] + parts[1][0] : source.slice(0, 2)).toUpperCase();
+  }
+  // No name on the session: fall back to the local part of the address rather
+  // than rendering an empty circle.
+  return (email?.split('@')[0]?.slice(0, 2) ?? '').toUpperCase() || (lang === 'ar' ? 'م' : 'A');
+}
+
+/**
+ * THE ACCOUNT MENU
+ *
+ * The portal used to have exactly one way to sign out, and it lived in the
+ * sidebar — which is `display: none` below 1024 px. The tab bar that replaces
+ * the sidebar there was never given a sign-out, so on a phone or a tablet there
+ * was no way to end a session at all. On a shared device, in a product whose
+ * whole premise is that sessions expire and are audited, that is not a cosmetic
+ * gap: the only way out was to clear the browser's cookies.
+ *
+ * So this is a real popover rather than a sixth tab. It is anchored to the top
+ * bar, which exists at EVERY width, and it carries the identity of the person
+ * signed in — which the mobile layout had also lost, because it too lived in the
+ * sidebar. One surface answers both questions a person actually asks: who am I
+ * signed in as, and how do I get out.
+ *
+ * Behaviour it owes a keyboard user, because it is a menu: Escape closes and
+ * returns focus to the button, a click outside closes, and opening it moves
+ * focus inside. Without those, a menu is a trap.
+ */
+function AccountMenu() {
+  const { t, lang, fmt } = useI18n();
+  const { session, signOut } = useAuth();
+  const navigate = useNavigate();
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+
+  const close = useCallback((returnFocus = false) => {
+    setOpen(false);
+    if (returnFocus) triggerRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointer = (e: MouseEvent) => {
+      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        close(true);
+      }
+    };
+    document.addEventListener('mousedown', onPointer);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onPointer);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open, close]);
+
+  // Focus the first control on open, so Tab continues from inside the menu.
+  useEffect(() => {
+    if (open) panelRef.current?.querySelector<HTMLElement>('button, a')?.focus();
+  }, [open]);
+
+  // Navigating away closes it: a menu left open over a new page is a bug the
+  // reader has to clean up themselves.
+  const go = (to: string) => {
+    close();
+    navigate(to);
+  };
+
+  const user = session.user;
+  const name = (lang === 'ar' ? (user?.displayNameAr ?? user?.displayName) : user?.displayName) ?? '';
+  const initials = initialsOf(name || undefined, user?.email, lang);
+
+  const end = async () => {
+    setBusy(true);
+    try {
+      await signOut();
+    } finally {
+      // Whether the server call succeeded or not, the local session is gone and
+      // the reader must not be left on an authenticated-looking page. The
+      // redirect is the point; a failed sign-out that leaves the portal on
+      // screen is the one outcome that is not acceptable.
+      setBusy(false);
+      close();
+      navigate('/login');
+    }
+  };
+
+  return (
+    <div className="acct" ref={wrapRef}>
+      <button
+        ref={triggerRef}
+        type="button"
+        className="acct__trigger"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={t('a11y.accountMenu')}
+        onClick={() => (open ? close() : setOpen(true))}
+      >
+        <span className="acct__avatar" aria-hidden="true">{initials}</span>
+      </button>
+
+      {open && (
+        <div className="acct__panel" role="menu" ref={panelRef} aria-label={t('a11y.accountMenu')}>
+          <div className="acct__who">
+            <span className="acct__avatar acct__avatar--lg" aria-hidden="true">{initials}</span>
+            <div>
+              <b>{name}</b>
+              <span className="ltr">{user?.email}</span>
+              {session.security?.sessionExpiresAt && (
+                <span className="acct__meta">
+                  {t('auth.sessionEnding')} {fmt.relative(session.security.sessionExpiresAt)}
+                </span>
+              )}
+            </div>
+          </div>
+
+          <div className="acct__row"><LanguageToggle /></div>
+
+          <button type="button" role="menuitem" className="acct__item" onClick={() => go('/portal/profile')}>
+            <Icon name="user" size={16} />{t('nav.profile')}
+          </button>
+          <button type="button" role="menuitem" className="acct__item" onClick={() => go('/portal/security')}>
+            <Icon name="shield" size={16} />{t('nav.security')}
+          </button>
+          <button type="button" role="menuitem" className="acct__item" onClick={() => go('/portal/privacy')}>
+            <Icon name="lock" size={16} />{t('nav.privacy')}
+          </button>
+
+          <div className="acct__sep" />
+
+          <button
+            type="button"
+            role="menuitem"
+            className="acct__item acct__item--danger"
+            onClick={end}
+            disabled={busy}
+          >
+            <Icon name="logout" size={16} />{t('nav.signOut')}
+          </button>
+          <p className="acct__hint">{t('nav.signOutConfirm')}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function TopBar({ unread }: { unread: number }) {
   const { t, lang } = useI18n();
   const { session } = useAuth();
@@ -203,6 +362,7 @@ function TopBar({ unread }: { unread: number }) {
         <Icon name="bell" size={18} />
         {unread > 0 && <span className="tabbar__dot" />}
       </Link>
+      <AccountMenu />
     </header>
   );
 }
@@ -252,7 +412,13 @@ function useUnread(signedIn: boolean): number {
   return unread;
 }
 
-function Shell({ children }: { children: ReactNode }) {
+/**
+ * The authenticated chrome. Exported so a test can render the shell alone with
+ * a stub body: several of this app's worst defects have been in the SHELL rather
+ * than in any page (a sign-out that existed at only one width, a tab bar that
+ * collapsed to zero width), and the shell cannot be reached through a page test.
+ */
+export function Shell({ children }: { children: ReactNode }) {
   const { signedIn } = useAuth();
   const location = useLocation();
   const unread = useUnread(signedIn);

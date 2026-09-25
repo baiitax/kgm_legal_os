@@ -162,6 +162,69 @@ record('POST document upload', upload.status === 201, failed(upload));
 const docs = (await req('/api/client/documents')).json?.data?.documents ?? [];
 record('GET documents returns rows', docs.length > 0, `${docs.length} document(s)`);
 
+/*
+  THE DOCUMENTS SCREEN'S TWO PROMISES, VERIFIED AGAINST THE REAL DATABASE.
+
+  The page crashed on every render for any account that HAD documents, and no
+  harness caught it because every harness signed in to an account with none. A
+  stubbed unit test is now the regression guard; these two checks are the reason
+  the unit test is trustworthy, because they prove the live rows carry the fields
+  the page reads and that the grant it offers actually resolves.
+
+  `mimeType` and `sizeBytes` are not decoration: the row's file tile is derived
+  from the MIME type and its size label from the byte count, so a server that
+  stopped sending them would leave the page rendering blanks that no type-check
+  would notice.
+*/
+const firstDoc = docs[0];
+record('document rows carry what the page renders',
+  !!firstDoc && typeof firstDoc.mimeType === 'string' && firstDoc.mimeType.length > 0
+    && Number.isFinite(firstDoc.sizeBytes) && typeof firstDoc.available === 'boolean',
+  firstDoc ? `mime=${firstDoc.mimeType} bytes=${firstDoc.sizeBytes} available=${firstDoc.available}` : 'no rows');
+
+/*
+  The grant path, followed all the way to bytes.
+
+  A signed URL that returns 200 from the grant endpoint but 403 from the file
+  itself is the failure mode this catches, and it is invisible to any check that
+  stops at the JSON. The TTL is asserted as WELL as the fetch: a long-lived URL
+  is the thing the short-lived-grant design exists to prevent.
+*/
+const grant = await req(`/api/client/documents/${firstDoc?.id}/access-url`, {
+  method: 'POST',
+  body: { disposition: 'attachment' },
+});
+const grantBody = grant.json?.data;
+record('a grant returns a short-lived signed URL',
+  grant.status === 200 && typeof grantBody?.url === 'string'
+    && Number.isFinite(grantBody?.ttlSeconds) && grantBody.ttlSeconds > 0 && grantBody.ttlSeconds <= 900,
+  `${grant.status} ttl=${grantBody?.ttlSeconds ?? '—'}`);
+
+if (grantBody?.url) {
+  /*
+    The session cookie is sent, because that is what the browser does: both
+    `openDocument` paths are navigations — `location.assign` for a download,
+    `window.open` for a preview — and a navigation carries the cookie jar.
+
+    The route deliberately requires the signature AND the session, so that a URL
+    copied out of the address bar and pasted elsewhere resolves to nothing. That
+    is why this fetch without credentials returns 401 while the page works: the
+    URL is not a bearer token, and the check would be wrong to treat it as one.
+  */
+  const file = await fetch(new URL(grantBody.url, BASE), {
+    headers: { cookie: [...jar].map(([k, v]) => `${k}=${v}`).join('; ') },
+    redirect: 'manual',
+  });
+  // A grant that resolves to an error page would still be `ok` for a fetch, so
+  // the body is checked rather than only the status.
+  const bytes = await file.arrayBuffer();
+  record('the signed URL serves the file itself',
+    file.status === 200 && bytes.byteLength > 0,
+    `${file.status} ${bytes.byteLength}B ${file.headers.get('content-type') ?? ''}`);
+} else {
+  record('the signed URL serves the file itself', false, 'no url from the grant');
+}
+
 console.log(`\n  KGM LEGAL OS · client portal · ${BASE}\n`);
 for (const r of results) console.log(`  ${r.ok ? 'PASS' : 'FAIL'}  ${r.label.padEnd(34)} ${r.detail}`);
 const passed = results.filter((r) => r.ok).length;

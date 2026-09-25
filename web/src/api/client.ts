@@ -183,18 +183,45 @@ export const del = <T>(path: string, signal?: AbortSignal) =>
  * Multipart upload. The field names are the ONLY thing the browser chooses;
  * tenant, client, storage key and visibility are all decided server-side.
  */
+/**
+ * Uploads a file, optionally reporting progress.
+ *
+ * WHY THIS ONE CALL DOES NOT GO THROUGH `call()`
+ *   `fetch` cannot report upload progress — there is no request-progress event,
+ *   by design. A percentage therefore needs XMLHttpRequest, and it would be easy
+ *   to reach for a bare XHR here and quietly lose everything `call()` does for
+ *   every other request in this file. So the XHR path below reproduces those
+ *   behaviours deliberately rather than by accident:
+ *
+ *     · `credentials: 'same-origin'` — the session cookie is the only thing
+ *       authenticating the request;
+ *     · the double-submit CSRF token from the same cookie `call()` reads, sent
+ *       in the same header, because the server's guard is on the route;
+ *     · the server's error envelope parsed into the same `ApiError`, so a
+ *       refused upload renders through the same `ErrorAlert` as everything else;
+ *     · ONE retry on `csrf_failed`, matching `call()`, because a stale token is
+ *       bookkeeping rather than a user error and a failed 20 MB upload that
+ *       needed only a fresh token is a bad trade.
+ *
+ *   Progress is reported as a FRACTION of the bytes sent, not a percentage, so
+ *   the caller decides how to display it. The final `1` is emitted on load
+ *   rather than on the last progress event: the last event often arrives at 99%
+ *   and the remaining percent can take seconds while the server writes the file
+ *   and scans it, which is exactly when a stalled-looking bar is most alarming.
+ */
 export function upload(
   path: string,
   file: File,
   fields: Record<string, string | null | undefined>,
-  signal?: AbortSignal,
+  opts: { signal?: AbortSignal; onProgress?: (fraction: number) => void } = {},
 ) {
   const form = new FormData();
   for (const [k, v] of Object.entries(fields)) {
     if (v !== undefined && v !== null && v !== '') form.append(k, v);
   }
   form.append('file', file, file.name);
-  return call<{
+
+  type Uploaded = {
     id: string;
     title: string;
     fileName: string;
@@ -202,7 +229,90 @@ export function upload(
     sizeBytes: number;
     status: string;
     createdAt: string;
-  }>(path, { method: 'POST', body: form, signal });
+  };
+
+  // No progress asked for: the shared `call()` path, with its retry and its
+  // error handling already proven by every other request in the app.
+  if (!opts.onProgress) {
+    return call<Uploaded>(path, { method: 'POST', body: form, signal: opts.signal });
+  }
+
+  return uploadWithProgress<Uploaded>(path, form, opts.onProgress, opts.signal, false);
+}
+
+function uploadWithProgress<T>(
+  path: string,
+  form: FormData,
+  onProgress: (fraction: number) => void,
+  signal: AbortSignal | undefined,
+  isRetry: boolean,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', path, true);
+    xhr.withCredentials = true;             // same-origin, but explicit
+    xhr.responseType = 'text';
+    xhr.setRequestHeader('accept', 'application/json');
+    const token = readCookie(CSRF_COOKIE);
+    if (token) xhr.setRequestHeader('x-csrf-token', token);
+
+    xhr.upload.addEventListener('progress', (e) => {
+      if (e.lengthComputable && e.total > 0) onProgress(Math.min(1, e.loaded / e.total));
+    });
+
+    const abort = () => xhr.abort();
+    signal?.addEventListener('abort', abort, { once: true });
+
+    xhr.addEventListener('abort', () => {
+      signal?.removeEventListener('abort', abort);
+      reject(new DOMException('aborted', 'AbortError'));
+    });
+
+    xhr.addEventListener('error', () => {
+      signal?.removeEventListener('abort', abort);
+      reject(new ApiError(0, 'network_error', 'network', undefined));
+    });
+
+    xhr.addEventListener('load', () => {
+      signal?.removeEventListener('abort', abort);
+      const text = xhr.responseText ?? '';
+      let json: unknown = null;
+      if (text) {
+        try { json = JSON.parse(text); } catch { json = null; }
+      }
+      const envelope = json as ErrorEnvelope | null;
+
+      // A stale CSRF token is a bookkeeping problem, not a user error. The
+      // server's refusal already carries a fresh cookie, so retry once — the
+      // same rule `call()` applies to every other mutating request.
+      if (
+        xhr.status === 403 &&
+        envelope?.error?.code === 'csrf_failed' &&
+        !isRetry
+      ) {
+        uploadWithProgress<T>(path, form, onProgress, signal, true).then(resolve, reject);
+        return;
+      }
+
+      if (xhr.status < 200 || xhr.status >= 300) {
+        const err = envelope?.error;
+        reject(new ApiError(
+          xhr.status,
+          err?.code ?? 'internal_error',
+          err?.message ?? 'upload failed',
+          err?.details,
+          xhr.getResponseHeader('x-request-id') ?? undefined,
+        ));
+        return;
+      }
+
+      // Reached the server and accepted: the bar is full.
+      onProgress(1);
+      resolve((envelope as { data?: T } | null)?.data as T);
+    });
+
+    xhr.send(form);
+  });
 }
 
 /**
