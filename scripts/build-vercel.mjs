@@ -79,7 +79,18 @@ function assertEntry(dir, label) {
 step('KGM LEGAL OS — building the single deployment');
 
 step('1/4  client portal  (web)');
-run('npm', ['run', 'build', '--workspace', 'web']);
+/*
+  `build:demo` on BOTH apps, so the demo credentials reach the shipped bundle.
+
+  This is not cosmetic. `SHOW_DEMO_ACCOUNTS` is a build-time constant, so with
+  it off the whole credential list is dead code and the bundler removes it —
+  including the password strings and the account list. The sign-in screen then
+  renders a plain form, which is correct for a real deployment and useless for
+  the demo this build exists to serve. The firm app was already using
+  `build:demo`; the portal was not, so the central sign-in shipped without the
+  credentials it was built to show.
+*/
+run('npm', ['run', 'build:demo', '--workspace', 'web']);
 
 step('2/4  firm OS  (firm, base=/firm/)');
 /*

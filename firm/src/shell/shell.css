@@ -471,7 +471,20 @@
 .kgm-bottomnav {
   position: fixed;
   inset-block-end: calc(var(--sp-3) + env(safe-area-inset-bottom));
-  inset-inline: 50%;
+  /*
+    CENTRED WITH `inset-inline-start`, NOT `inset-inline`.
+
+    `inset-inline: 50%` sets BOTH ends to 50%, and for a fixed-position box with
+    `width: auto` that resolves the used width to `100% - 50% - 50%` = 0. The
+    pill then drew a zero-width background while its five children — each with a
+    56px minimum — overflowed out of it, so the bar looked like it was shrinking
+    and sliding off-centre at the same time. `translate: -50%` did not correct
+    it either: it offsets by half the box's own width, which was zero.
+
+    One end plus a transform is the standard centring, and here it also lets the
+    box take its natural content width.
+  */
+  inset-inline-start: 50%;
   translate: -50% 0;
   z-index: var(--z-nav);
   display: none;
@@ -484,11 +497,47 @@
   backdrop-filter: blur(var(--blur-nav));
   -webkit-backdrop-filter: blur(var(--blur-nav));
   box-shadow: var(--shadow-nav);
-  /* Cap the width so the pill does not stretch edge-to-edge on a tablet. */
-  max-inline-size: calc(100vw - var(--sp-6));
+  box-sizing: border-box;
+
+  /*
+    THE WIDTH BUDGET
+
+    Five items at a 56px floor need 280px, plus 8px of gap and 12px of pill
+    padding — 300px before a single label is considered. A 320px phone leaves 314
+    usable, so the bar must be allowed to use nearly all of it. The old cap,
+    `100vw - var(--sp-6)`, allowed 272px on that screen: 28px short. The items
+    could not shrink (hard `min-inline-size: 56px`) and could not fit (the pill
+    was capped), so they spilled out of the rounded background.
+
+    Margins are therefore pegged to the same scale as the bottom offset rather
+    than to a spacing token sized for desktop.
+  */
+  max-inline-size: calc(100vw - 12px);
 }
 
 @media (max-width: 899px) { .kgm-bottomnav { display: flex; } }
+
+/*
+  VERY SHORT VIEWPORTS — a phone on its side.
+  The floating pill competes with the content area for height there, and the
+  safe-area inset on the bottom edge eats further into it. It stops floating and
+  becomes a docked strip instead, which is the shape the platform expects.
+*/
+@media (max-width: 899px) and (max-height: 480px) {
+  .kgm-bottomnav {
+    inset-block-end: 0;
+    inset-inline: 0;
+    translate: none;
+    max-inline-size: 100%;
+    border-radius: 0;
+    border: 0;
+    border-block-start: var(--nav-edge);
+    padding-block-start: 4px;
+    padding-block-end: calc(4px + env(safe-area-inset-bottom));
+    padding-inline-start: calc(6px + env(safe-area-inset-left));
+    padding-inline-end: calc(6px + env(safe-area-inset-right));
+  }
+}
 
 .kgm-bottomnav__item {
   position: relative;
@@ -497,12 +546,17 @@
   align-items: center;
   justify-content: center;
   gap: 3px;
+  /*
+    Grow to share the pill evenly, but be ALLOWED to shrink.
+    `min-inline-size: 56px` used to pin these, which is what forced the overflow
+    on a narrow screen; the floor is lifted again below, where there is room.
+  */
   flex: 1 1 0;
-  min-inline-size: 56px;
+  min-inline-size: 0;
   /* 48px of tap target inside a 60px pill. §18's 44px minimum is comfortably
      cleared, and the visual footprint stays small because the pill is padded. */
   min-block-size: 48px;
-  padding: var(--sp-1) var(--sp-2);
+  padding: var(--sp-1) 4px;
   border: 0;
   border-radius: var(--radius-pill);
   background: transparent;
@@ -516,6 +570,24 @@
   transition: color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out);
 }
 
+/*
+  The label is a single line that truncates rather than wrapping or spilling.
+  A wrapped label would change the bar's height between modules, so the pill
+  would visibly jump as the member moved around the app.
+*/
+.kgm-bottomnav__label {
+  display: block;
+  max-inline-size: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* With room for the full label, the comfortable floor goes back. */
+@media (min-width: 420px) {
+  .kgm-bottomnav__item { min-inline-size: 56px; }
+}
+
 .kgm-bottomnav__item:hover { color: var(--text-hi); }
 .kgm-bottomnav__item:focus-visible { outline: 2px solid var(--focus-ring-color); outline-offset: -2px; }
 
@@ -523,12 +595,15 @@
 
 .kgm-bottomnav__icon { display: inline-grid; place-items: center; }
 
-/* The badge sits at the icon's outer corner. Positioned on the icon wrapper
-   rather than the item so it stays put when the label wraps. */
+/*
+  The badge sits at the icon's outer corner. Anchored to the item's midpoint in
+  percentages so it tracks the item as the bar narrows, instead of drifting off
+  the edge — the old `calc(50% - 20px)` assumed a fixed item width.
+*/
 .kgm-bottomnav__item .kgm-badge--count {
   position: absolute;
-  inset-block-start: 2px;
-  inset-inline-end: calc(50% - 20px);
+  inset-block-start: 1px;
+  inset-inline-start: calc(50% + 6px);
   pointer-events: none;
 }
 
@@ -1639,3 +1714,129 @@
 }
 
 .kgm-sessions__actions { display: flex; flex-direction: column; gap: var(--sp-2); }
+
+/* --------------------------------------------------------------------------
+   CLIENTS · the derived client list
+
+   A grid rather than a table, because the unit is a client with a handful of
+   matters, not a row of columns. The grid collapses to one column on a phone
+   with no media query: `auto-fill` with a minimum wider than half the viewport
+   can only fit one card, which is the same result with less to maintain.
+   -------------------------------------------------------------------------- */
+
+.firm-clientgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: var(--sp-3);
+  margin-block-start: var(--sp-4);
+}
+
+.firm-clientcard__head { display: flex; align-items: flex-start; gap: var(--sp-2); }
+
+.firm-clientcard__icon {
+  display: grid; place-items: center; flex: 0 0 auto;
+  inline-size: 34px; block-size: 34px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--kgm-green-300);
+}
+
+.firm-clientcard__id { min-inline-size: 0; }
+
+.firm-clientcard__name {
+  margin: 0; font-size: var(--fs-body); font-weight: var(--fw-semibold); color: var(--text-hi);
+  overflow-wrap: anywhere;
+}
+
+.firm-clientcard__namear {
+  margin: 2px 0 0; font-size: var(--fs-caption); color: var(--text-dim);
+}
+
+.firm-clientcard__count {
+  margin: var(--sp-2) 0 0; font-size: var(--fs-body-sm); color: var(--text-dim);
+}
+
+.firm-clientcard__flag {
+  display: flex; align-items: center; gap: 5px;
+  margin: 4px 0 0; font-size: var(--fs-caption); color: var(--gold-300);
+}
+
+.firm-clientcard__matters {
+  display: flex; flex-direction: column; gap: 2px;
+  margin: var(--sp-2) 0 0; padding: 0; list-style: none;
+  border-block-start: 1px solid var(--line-soft);
+  padding-block-start: var(--sp-2);
+}
+
+.firm-clientcard__matter {
+  display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: var(--sp-2);
+  inline-size: 100%; padding: 6px 8px;
+  border: 0; border-radius: var(--radius-sm);
+  background: transparent; color: inherit; font: inherit; font-size: var(--fs-body-sm);
+  text-align: start; cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.firm-clientcard__matter:hover { background: var(--surface-2); }
+.firm-clientcard__matter:focus-visible { outline: 2px solid var(--focus-ring-color); outline-offset: -2px; }
+
+.firm-clientcard__title {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-inline-size: 0;
+}
+
+/* --------------------------------------------------------------------------
+   MY WORK · grouped by what the member may do
+   -------------------------------------------------------------------------- */
+
+.firm-workgroup { margin-block-start: var(--sp-4); }
+
+.firm-workgroup__head { display: flex; align-items: center; gap: var(--sp-2); }
+
+.firm-workgroup__title {
+  margin: 0; font-size: var(--fs-body); font-weight: var(--fw-semibold); color: var(--text-hi);
+}
+
+.firm-workgroup__count {
+  margin-inline-start: auto;
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-caption); color: var(--text-dim);
+}
+
+.firm-workgroup__body {
+  margin: 4px 0 0; font-size: var(--fs-caption); color: var(--text-dim); line-height: var(--lh-relaxed);
+}
+
+.firm-workgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: var(--sp-2);
+  margin-block-start: var(--sp-3);
+}
+
+/* The whole card is the target: a member scanning a worklist is going to open
+   the matter, not select its text. */
+.firm-workcard__btn {
+  display: grid; gap: 4px; inline-size: 100%;
+  padding: 0; border: 0; background: transparent; color: inherit;
+  font: inherit; text-align: start; cursor: pointer;
+}
+
+.firm-workcard__btn:focus-visible { outline: 2px solid var(--focus-ring-color); outline-offset: 3px; border-radius: var(--radius-sm); }
+
+.firm-workcard__num {
+  font-family: var(--font-mono); font-size: var(--fs-caption); color: var(--text-dim);
+  letter-spacing: 0.02em;
+}
+
+.firm-workcard__title {
+  font-size: var(--fs-body-sm); font-weight: var(--fw-semibold); color: var(--text-hi);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.firm-workcard__client {
+  font-size: var(--fs-caption); color: var(--text-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.firm-workcard__tags { display: flex; flex-wrap: wrap; gap: 4px; margin-block-start: 2px; }
+.firm-workcard__tags > * { display: inline-flex; align-items: center; gap: 4px; }

@@ -465,26 +465,45 @@ def cover(canvas, doc):
 
 
 def page_signin():
-    flow = section('How to sign in', 'كيفية تسجيل الدخول', 'both portals')
+    flow = section('How to sign in', 'كيفية تسجيل الدخول', 'ONE SCREEN, TWO AUDIENCES')
     flow.append(Paragraph(
         'The portal and the firm OS are one deployment, one origin and one database, '
         'separated by an audience check. A given account works at exactly one door: the server '
         'answers a valid credential presented at the wrong door exactly as it answers a wrong '
         'password, so nothing about the refusal tells you which accounts exist.', S['body']))
+    flow.append(Spacer(1, 6))
+    flow.append(Paragraph(
+        f"There is now a single sign-in screen at {DATA['base']}/login. Choose "
+        '<b>Client</b> or <b>Firm staff</b> on that screen, then sign in — the same accounts are '
+        'listed on it, filtered to the audience you pick, so you can fill the form with one click '
+        'instead of retyping an address from this document. The audience is something you '
+        'declare, never something the product works out from a failed attempt.', S['body']))
     flow.append(Spacer(1, 8))
 
     rows = [
-        ['Client portal', '/  (root) then Sign in', 'Demo!Portal2026', 'Client users'],
-        ['Internal firm OS', '/firm', 'Demo!Firm2026', 'Firm members'],
+        ['Client', f"{DATA['base']}/login", 'Demo!Portal2026', '3 client accounts'],
+        ['Firm staff', f"{DATA['base']}/login  →  Firm staff", 'Demo!Firm2026', '5 member accounts'],
     ]
-    flow.append(data_table(['Door', 'Path', 'Password', 'Who signs in here'],
-                           rows, [(PAGE_W - 2 * MARGIN) * w for w in (0.20, 0.24, 0.24, 0.32)]))
+    flow.append(data_table(['Sign in as', 'Where', 'Password', 'Accounts'],
+                           rows, [(PAGE_W - 2 * MARGIN) * w for w in (0.16, 0.44, 0.20, 0.20)]))
+    flow.append(Spacer(1, 6))
+    flow.append(Paragraph(
+        f"Typing {DATA['base']}/firm while signed out forwards to the same screen with the firm "
+        'audience already selected, so an old bookmark still works.', S['body-sm']))
     flow.append(Spacer(1, 8))
     flow.append(callout(
-        'Sign-in is at the same origin for both products: '
-        f'{DATA["base"]}/ for the client portal and {DATA["base"]}/firm for the firm OS. '
-        'Opening the API paths directly returns 401 by design — the session cookie is httpOnly and '
-        'the interface is not the authorization boundary.'))
+        'Everything is at one origin. The client portal is served at '
+        f'{DATA["base"]}/ and the firm OS at {DATA["base"]}/firm, and both are signed into from '
+        f'{DATA["base"]}/login. Opening the API paths directly returns 401 by design — the session '
+        'cookie is httpOnly and the interface is not the authorization boundary.'))
+    flow.append(Spacer(1, 8))
+    flow.append(callout(
+        'A credential belongs to one door only — this is the most common way to be refused. A firm '
+        'member\'s email entered at the client portal will not work however it is typed, and the '
+        'refusal is deliberately worded exactly like a wrong password, so nothing about the answer '
+        'reveals which accounts exist or where. If a sign-in fails, check the door named on that '
+        'account\'s page before checking the password. Each sign-in screen carries a link to the '
+        'other product.', 'alert'))
     flow.append(Spacer(1, 8))
 
     flow.append(Paragraph('Before the first sign-in', S['h3']))

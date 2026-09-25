@@ -104,7 +104,7 @@ export function BottomNav({ path, onNavigate, onOpenMore, badges }: BottomNavPro
         <span className="kgm-bottomnav__icon" aria-hidden="true">
           <HomeGlyph />
         </span>
-        {t('mobile.home')}
+        <span className="kgm-bottomnav__label">{t('mobile.home')}</span>
       </button>
 
       {slots.map((slot) => {
@@ -130,7 +130,7 @@ export function BottomNav({ path, onNavigate, onOpenMore, badges }: BottomNavPro
                 </span>
               )}
             </span>
-            {t(slot.labelKey)}
+            <span className="kgm-bottomnav__label">{t(slot.labelKey)}</span>
             {!!count && count > 0 && (
               <span className="u-sr-only">{t('common.selected', { n: count })}</span>
             )}
@@ -150,7 +150,7 @@ export function BottomNav({ path, onNavigate, onOpenMore, badges }: BottomNavPro
         <span className="kgm-bottomnav__icon" aria-hidden="true">
           <MoreGlyph />
         </span>
-        {t('mobile.more')}
+        <span className="kgm-bottomnav__label">{t('mobile.more')}</span>
       </button>
     </nav>
   );

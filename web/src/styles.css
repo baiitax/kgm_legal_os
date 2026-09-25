@@ -1412,6 +1412,17 @@ html[dir='dark'] .btn--primary,
   text-align: center;
 }
 
+/* The footer carries two lines: the invitation route, and the other door. */
+.auth__foot p {
+  margin: 0;
+}
+
+.auth__foot p + p {
+  margin-block-start: 6px;
+  padding-block-start: 6px;
+  border-block-start: 1px solid var(--line);
+}
+
 .brand-mark {
   inline-size: 56px;
   block-size: 56px;
@@ -1806,6 +1817,206 @@ html[dir='dark'] .btn--primary,
 .auth__demo {
   margin-block-start: 6px !important;
   color: var(--gold);
+}
+
+/* ------------------------------------------------------------------ audience --
+   The switch between the two doors on the central sign-in.
+
+   A two-segment control, drawn with radios underneath so it behaves like one
+   control to a screen reader and needs no JavaScript to move between the
+   options. The selected segment is carried by `data-active`, so the styling
+   follows the checked radio rather than a second piece of state that could
+   disagree with it.
+   ------------------------------------------------------------------------------ */
+
+.audience {
+  margin: 0 0 16px;
+  padding: 0;
+  border: 0;
+}
+
+.audience__legend {
+  display: block;
+  margin-block-end: 6px;
+  padding: 0;
+  font-size: var(--step--1);
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.audience__track {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--card-alt);
+}
+
+.audience__opt {
+  display: grid;
+  place-items: center;
+  /* 44px: the minimum comfortable target, and it keeps the two segments the
+     same height as the inputs underneath them. */
+  min-block-size: 44px;
+  padding-inline: 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  color: var(--muted);
+  font-weight: 600;
+  font-size: var(--step--1);
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.audience__opt[data-active] {
+  background: var(--brand);
+  color: #fff;
+  box-shadow: var(--shadow-sm, 0 1px 2px rgba(0, 0, 0, 0.08));
+}
+
+/* The radio itself is hidden, so the focus ring has to be drawn on the label. */
+.audience__opt:focus-within {
+  outline: 2px solid var(--focus-ring-color, var(--brand));
+  outline-offset: 2px;
+}
+
+.audience__hint {
+  margin: 8px 0 0;
+  font-size: var(--step--1);
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+/* ------------------------------------------------------- demo credentials --
+   A list of synthetic accounts, shown only when the build asks for it. Each row
+   is one button — the whole row is the target, because the thing a reader wants
+   is to try that account, not to copy its address.
+   --------------------------------------------------------------------------- */
+
+.auth__demo {
+  padding: var(--space-4) var(--space-5);
+  border-block-start: 1px solid var(--line);
+  background: var(--card-alt);
+}
+
+.auth__demohead {
+  margin: 0 0 10px;
+  font-size: var(--step--1);
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.auth__demohead code {
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: var(--brand-soft);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  /* The demo password is one string shared by the audience; break it out of the
+     sentence rather than letting it wrap mid-token. */
+  white-space: nowrap;
+}
+
+.auth__demolist {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.auth__demobtn {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 4px 10px;
+  inline-size: 100%;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--card);
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--step--1);
+  text-align: start;
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+
+.auth__demobtn:hover {
+  border-color: var(--line-strong);
+  background: var(--brand-soft);
+}
+
+.auth__demobtn:focus-visible {
+  outline: 2px solid var(--focus-ring-color, var(--brand));
+  outline-offset: 2px;
+}
+
+.auth__demorole {
+  font-weight: 600;
+  color: var(--brand);
+  white-space: nowrap;
+}
+
+.auth__demoemail {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--muted);
+  /* Long addresses must not widen the card. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-inline-size: 0;
+}
+
+/* The scope line goes under the role, spanning the address column. It is the
+   part that makes the list useful — which account sees what — so it gets its own
+   row rather than being cut off in a narrow column. */
+.auth__demoscope {
+  grid-column: 2 / 3;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+
+.auth__demouse {
+  grid-row: 1 / span 2;
+  align-self: center;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--gold-soft);
+  color: var(--gold-deep, #8a6d2f);
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.auth__demonote {
+  margin: 10px 0 0;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+/* On a narrow phone the role and the address cannot share a line. */
+@media (max-width: 480px) {
+  .auth__demobtn {
+    grid-template-columns: 1fr auto;
+  }
+
+  .auth__demoemail,
+  .auth__demoscope {
+    grid-column: 1 / 2;
+  }
+
+  .auth__demouse {
+    grid-row: 1 / span 3;
+  }
 }
 
 .auth__link {

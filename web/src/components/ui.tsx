@@ -287,15 +287,18 @@ export function Alert({
  * change in wording server-side cannot leak internals into the UI.
  */
 export function ErrorAlert({ error, onRetry }: { error: unknown; onRetry?: () => void }) {
-  const { t, errorText } = useI18n();
+  const { t, errorText, errorTitle } = useI18n();
   if (!error) return null;
 
   const api = error instanceof ApiError ? error : null;
   const code = api?.code ?? 'network_error';
   const details = api?.details as { retryAfterSeconds?: number; failures?: string[] } | undefined;
 
+  // The heading comes from the code too: a refused sign-in is headed
+  // "Sign-in failed", not "The request could not be completed", which would
+  // describe a fault where there is none.
   return (
-    <Alert tone="error" title={t('common.errorTitle')}>
+    <Alert tone="error" title={errorTitle(code)}>
       <div>{errorText(code)}</div>
       {typeof details?.retryAfterSeconds === 'number' && (
         <div className="small">{t('err.lockedRetry', { n: details.retryAfterSeconds })}</div>

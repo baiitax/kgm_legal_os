@@ -39,7 +39,9 @@ import { Denied, navigate, useGuard, useRoute } from './app/routes.js';
 import { FIRM_I18N } from './i18n/dictionary.js';
 import { SignIn } from './pages/SignIn.js';
 import { Dashboard } from './pages/Dashboard.js';
+import { Clients } from './pages/Clients.js';
 import { Matters } from './pages/Matters.js';
+import { MyWork } from './pages/MyWork.js';
 import { MatterWorkspace } from './pages/MatterWorkspace.js';
 import './shell/shell.css';
 
@@ -163,7 +165,7 @@ function Shell() {
 /**
  * The route table.
  *
- * A switch rather than a router library: there are seven real screens, and a
+ * A switch rather than a router library: there are a handful of real screens, and a
  * declarative route table would be more code than the routes it describes. If the
  * module count grows past a dozen this is the piece to replace — and it is the
  * only piece, because the guard and the nav are already separate from it.
@@ -177,6 +179,10 @@ function Routed({ basePath, onNavigate }: { basePath: string; onNavigate: (to: s
   switch (basePath) {
     case '/':
       return <Dashboard onNavigate={onNavigate} />;
+    case '/my-work':
+      return <MyWork onNavigate={onNavigate} />;
+    case '/clients':
+      return <Clients onNavigate={onNavigate} />;
     case '/matters':
       return <Matters onNavigate={onNavigate} />;
     case '/admin/users':

@@ -474,6 +474,16 @@ const AR = {
   'err.unknown': 'تعذّر إتمام الطلب.',
   'err.lockedRetry': 'حاول مجددًا بعد {n} ثانية.',
 
+  // Titles for failures that are NOT server faults. A refusal on the sign-in
+  // form must not be headed "تعذّر إتمام الطلب" — that reads as a broken
+  // service, and sends the reader looking for a bug instead of checking the
+  // door. These are paired with the `err.*` bodies above.
+  'errTitle.signInFailed': 'تعذّر تسجيل الدخول',
+  'errTitle.locked': 'الحساب مقفل مؤقتًا',
+  'errTitle.rateLimited': 'محاولات كثيرة',
+  'errTitle.mfa': 'التحقق بخطوتين',
+  'errTitle.offline': 'تعذّر الاتصال',
+
   '404.title': 'الصفحة غير موجودة',
   '404.body': 'الرابط الذي فتحته غير متاح في بوابة العميل.',
   '404.home': 'العودة إلى الرئيسية',
@@ -484,6 +494,32 @@ const AR = {
   'a11y.notifications': 'الإشعارات، {n} غير مقروء',
 
   'auth.title': 'تسجيل الدخول',
+
+  // ---- the central sign-in: one screen, two audiences -----------------------
+  // The audience is DECLARED by the reader, never inferred from an answer the
+  // server gives. Guessing it — "this credential was refused here, so it must
+  // belong there" — would rebuild the account-existence oracle the doors were
+  // fixed to remove.
+  'auth.audience': 'الدخول باسم',
+  'auth.audienceClient': 'عميل',
+  'auth.audienceFirm': 'موظف في المكتب',
+  'auth.audienceClientHint': 'بوابة العملاء: قضاياك ومستنداتك وفواتيرك.',
+  'auth.audienceFirmHint': 'النظام الداخلي: العمل والإدارة والفوترة.',
+  'auth.subtitleFirm': 'النظام الداخلي لمكتب {firm}',
+  'auth.credentials': 'بيانات الدخول التجريبية',
+  'auth.credentialsNote': 'حسابات تجريبية على بيئة عرض. اختر حسابًا لتعبئة النموذج.',
+  'auth.credentialsFor': 'حسابات {audience}',
+  'auth.demoUse': 'استخدام',
+  'auth.demoPortalPrimary': 'عميل — ناظر قانوني',
+  'auth.demoPortalFinance': 'عميل — مدير مالي',
+  'auth.demoPortalOther': 'عميل — شركة أخرى',
+  'auth.demoPartner': 'شريك منتدب',
+  'auth.demoLawyer': 'محامٍ',
+  'auth.demoParalegal': 'مساعد قانوني',
+  'auth.demoCompliance': 'الالتزام',
+  'auth.demoFinance': 'المالية',
+  'auth.enterFirm': 'الدخول إلى النظام الداخلي',
+  'auth.enterPortal': 'الدخول إلى بوابة العملاء',
   'auth.subtitle': 'بوابة العملاء لدى {firm}',
   'auth.verify': 'تحقّق',
   'auth.resend': 'إعادة الإرسال',
@@ -492,6 +528,12 @@ const AR = {
   'auth.backToSignIn': 'العودة إلى تسجيل الدخول',
   'auth.haveInvite': 'لديك دعوة؟',
   'auth.acceptInvite': 'تفعيل الدعوة',
+  // The two products have separate sign-in doors and a credential that belongs
+  // to one is refused at the other. This pointer is unconditional — shown to
+  // everyone, before anything is typed and regardless of what comes back — so
+  // it cannot be used to work out which accounts exist.
+  'auth.firmMember': 'تعمل في المكتب؟',
+  'auth.firmDoor': 'الدخول إلى النظام الداخلي',
   'auth.useRecovery': 'استخدام رمز استرداد',
   'auth.recoveryCode': 'رمز الاسترداد',
   'auth.mfaPrompt': 'أدخل الرمز المكوّن من ستة أرقام من تطبيق المصادقة لديك.',
@@ -619,6 +661,31 @@ const AR = {
 } as const;
 
 export type MessageKey = keyof typeof AR;
+
+/**
+ * Which failures get a title of their own, and which are genuinely faults.
+ *
+ * The sign-in form shows one banner for everything the server can refuse, and
+ * it used to head all of them with the generic "the request could not be
+ * completed". That heading is only true for a fault. A wrong password is not a
+ * fault — it is the system working — and heading it that way sends the reader
+ * hunting for a bug in the deployment instead of checking what they typed or
+ * which door they are at.
+ *
+ * The codes that are a normal refusal, not a defect, are listed here. Anything
+ * absent falls back to the generic heading, which stays correct for the
+ * internal errors, unreachable services and odd statuses nobody anticipated.
+ */
+const ERROR_TITLES: Record<string, MessageKey> = {
+  invalid_credentials: 'errTitle.signInFailed',
+  account_disabled: 'errTitle.signInFailed',
+  email_not_verified: 'errTitle.signInFailed',
+  account_locked: 'errTitle.locked',
+  rate_limited: 'errTitle.rateLimited',
+  mfa_required: 'errTitle.mfa',
+  mfa_invalid: 'errTitle.mfa',
+  network_error: 'errTitle.offline',
+};
 
 /**
  * True when the dictionary actually translates `key`. Screens use this to decide
@@ -1112,6 +1179,16 @@ const EN: Record<MessageKey, string> = {
   'err.unknown': 'The request could not be completed.',
   'err.lockedRetry': 'Try again in {n} seconds.',
 
+  // Titles for failures that are NOT server faults. A refusal on the sign-in
+  // form must not be headed "The request could not be completed" — that reads
+  // as a broken service, and sends the reader looking for a bug instead of
+  // checking the door. These are paired with the `err.*` bodies above.
+  'errTitle.signInFailed': 'Sign-in failed',
+  'errTitle.locked': 'Account locked',
+  'errTitle.rateLimited': 'Too many attempts',
+  'errTitle.mfa': 'Two-factor verification',
+  'errTitle.offline': 'No connection',
+
   '404.title': 'Page not found',
   '404.body': 'The link you opened is not available in the client portal.',
   '404.home': 'Back to home',
@@ -1122,6 +1199,32 @@ const EN: Record<MessageKey, string> = {
   'a11y.notifications': 'Notifications, {n} unread',
 
   'auth.title': 'Sign in',
+
+  // ---- the central sign-in: one screen, two audiences -----------------------
+  // The audience is DECLARED by the reader, never inferred from an answer the
+  // server gives. Guessing it — "this credential was refused here, so it must
+  // belong there" — would rebuild the account-existence oracle the doors were
+  // fixed to remove.
+  'auth.audience': 'Signing in as',
+  'auth.audienceClient': 'Client',
+  'auth.audienceFirm': 'Firm staff',
+  'auth.audienceClientHint': 'Client portal: your matters, documents and invoices.',
+  'auth.audienceFirmHint': 'Internal firm OS: work, administration and billing.',
+  'auth.subtitleFirm': 'Internal firm OS for {firm}',
+  'auth.credentials': 'Demo credentials',
+  'auth.credentialsNote': 'Synthetic accounts on a demo deployment. Pick one to fill the form.',
+  'auth.credentialsFor': '{audience} accounts',
+  'auth.demoUse': 'Use',
+  'auth.demoPortalPrimary': 'Client — General Counsel',
+  'auth.demoPortalFinance': 'Client — Finance Manager',
+  'auth.demoPortalOther': 'Client — another firm',
+  'auth.demoPartner': 'Managing Partner',
+  'auth.demoLawyer': 'Lawyer',
+  'auth.demoParalegal': 'Paralegal',
+  'auth.demoCompliance': 'Compliance',
+  'auth.demoFinance': 'Finance',
+  'auth.enterFirm': 'Enter the internal firm OS',
+  'auth.enterPortal': 'Enter the client portal',
   'auth.subtitle': 'Client portal for {firm}',
   'auth.verify': 'Verify',
   'auth.resend': 'Send again',
@@ -1130,6 +1233,9 @@ const EN: Record<MessageKey, string> = {
   'auth.backToSignIn': 'Back to sign in',
   'auth.haveInvite': 'Have an invitation?',
   'auth.acceptInvite': 'Activate it',
+  // See the Arabic table: unconditional, so it discloses nothing.
+  'auth.firmMember': 'Work at the firm?',
+  'auth.firmDoor': 'Sign in to the internal firm OS',
   'auth.useRecovery': 'Use a recovery code',
   'auth.recoveryCode': 'Recovery code',
   'auth.mfaPrompt': 'Enter the six-digit code from your authenticator app.',
@@ -1266,6 +1372,12 @@ interface I18nValue {
   setCalendar: (calendar: Calendar) => void;
   /** Localized error text for an API error code, falling back to a generic line. */
   errorText: (code: string) => string;
+  /**
+   * Heading for that error. Distinct from `errorText` because a refusal is not
+   * a fault: `invalid_credentials` is headed "Sign-in failed", while a genuine
+   * server error keeps the generic heading.
+   */
+  errorTitle: (code: string) => string;
 }
 
 const I18nContext = createContext<I18nValue | null>(null);
@@ -1318,9 +1430,18 @@ export function I18nProvider({
     [lang],
   );
 
+  const errorTitle = useCallback(
+    (code: string) => {
+      const key = ERROR_TITLES[code] ?? 'common.errorTitle';
+      const table = lang === 'ar' ? AR : EN;
+      return table[key] ?? EN[key] ?? EN['common.errorTitle'];
+    },
+    [lang],
+  );
+
   const value = useMemo<I18nValue>(
-    () => ({ lang, calendar, dir: fmt.dir, t, fmt, setLang, setCalendar, errorText }),
-    [lang, calendar, fmt, t, setLang, setCalendar, errorText],
+    () => ({ lang, calendar, dir: fmt.dir, t, fmt, setLang, setCalendar, errorText, errorTitle }),
+    [lang, calendar, fmt, t, setLang, setCalendar, errorText, errorTitle],
   );
 
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
