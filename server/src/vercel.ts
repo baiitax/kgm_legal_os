@@ -40,6 +40,7 @@ import { createApp } from './app.js';
 import { getDb } from './db/index.js';
 import { PostgresDb } from './db/postgres.js';
 import { isTransientConnectionError } from './db/transient.js';
+import { finished } from 'node:stream/promises';
 
 const db = getDb();
 const container = createContainer({ db });
@@ -137,19 +138,40 @@ function answerNotReady(res: ServerResponse, requestId: string | null): void {
   }));
 }
 
+/**
+ * GIVE THE SESSION BACK BEFORE THIS INSTANCE IS SUSPENDED.
+ *
+ * The pooler this API connects through publishes fifteen sessions for the whole fleet, and
+ * a suspended container does not run timers — so an idle timeout cannot return one. The
+ * only dependable moment is here, inside the invocation, once the response has actually
+ * been flushed: close the pool and let the next request on this container build a new one.
+ * Without it, fifteen warm instances hold all fifteen sessions while doing nothing and the
+ * sixteenth request cannot connect at all.
+ */
+async function handBackSessions(): Promise<void> {
+  try {
+    const db = getDb() as unknown as { drain?: () => Promise<void> };
+    if (typeof db?.drain === 'function') await db.drain();
+  } catch (err) {
+    /* Failing to close a connection must not fail a request that already succeeded. */
+    console.error('[db] could not drain the pool:', (err as Error).message);
+  }
+}
+
 export default async function handler(req: IncomingMessage, res: ServerResponse): Promise<void> {
   normalizeRequestUrl(req, res);
   const requestId = (res.getHeader('x-request-id') as string | undefined) ?? null;
   try {
-    await ensureSafe();
-  } catch (err) {
-    if (isTransientConnectionError(err)) {
-      console.warn('[boot] the role check could not reach the database; answering 503');
-      answerNotReady(res, requestId);
-      return;
+    try {
+      await ensureSafe();
+    } catch (err) {
+      if (isTransientConnectionError(err)) {
+        console.warn('[boot] the role check could not reach the database; answering 503');
+        answerNotReady(res, requestId);
+        return;
+      }
+      throw err;
     }
-    throw err;
-  }
   /*
     `req.url` arrives intact (`/api/client/matters` and friends) because the
     function is mounted at `/api` without a path-rewriting rule, so Express routes
@@ -157,5 +179,17 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     path, every route 404s at once — which is why the deployment is verified with
     `supabase/ops/verify_live_pages.mjs` rather than assumed from a 200 on `/`.
   */
-  (app as unknown as (req: IncomingMessage, res: ServerResponse) => void)(req, res);
+    (app as unknown as (req: IncomingMessage, res: ServerResponse) => void)(req, res);
+  } finally {
+    /* `writableEnded` covers the answered-already cases; `finished` covers a streaming
+       body. A client that hung up early is not an error worth logging here. */
+    if (!res.writableEnded) {
+      try {
+        await finished(res);
+      } catch {
+        /* the client went away */
+      }
+    }
+    await handBackSessions();
+  }
 }

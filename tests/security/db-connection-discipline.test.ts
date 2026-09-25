@@ -27,7 +27,7 @@
  * behaviour under a broken connection cannot be observed any other way: a driver that only
  * works when the network works is a driver nobody has tested.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { PostgresDb } from '../../server/src/db/postgres.js';
 import { isTransientConnectionError, defaultPoolMax } from '../../server/src/db/transient.js';
 import { toPortalError } from '../../server/src/lib/errors.js';
@@ -99,6 +99,81 @@ const typo = () => Object.assign(new Error('column "clientss" does not exist'), 
 
 const build = (pool: FakePool) =>
   new PostgresDb('postgres://portal_api@example.invalid:5432/postgres', 3, pool as never);
+
+/**
+ * `pg` mocked, so the POOL ITSELF is observable: how many were built, which one was
+ * closed, and whether a closed one was ever reused. `connect()` keeps the counts a real
+ * pool keeps — a client is checked out (`idleCount` 0) until it is released — because the
+ * drain guard reads exactly those counts, and a stub with invented ones would agree with
+ * any implementation.
+ */
+async function withMockedPg() {
+  vi.resetModules();
+  const built: {
+    options: Record<string, unknown>;
+    idleCount: number;
+    totalCount: number;
+    waitingCount: number;
+    ended: boolean;
+    busy: boolean;
+  }[] = [];
+
+  class MockPool {
+    options: Record<string, unknown>;
+    idleCount = 0;
+    totalCount = 0;
+    waitingCount = 0;
+    ended = false;
+    private _busy = false;
+
+    /** A second request on this container is mid-query: nothing is on the shelf. */
+    get busy(): boolean {
+      return this._busy;
+    }
+    set busy(value: boolean) {
+      this._busy = value;
+      this.idleCount = value ? 0 : this.totalCount;
+    }
+
+    constructor(options: Record<string, unknown>) {
+      this.options = options;
+      built.push(this);
+    }
+
+    on(): this {
+      return this;
+    }
+
+    async connect(): Promise<FakeClient> {
+      this._busy = true;
+      this.idleCount = 0;
+      this.totalCount = Math.max(this.totalCount, 1);
+      const pool = this;
+      const client = new FakeClient();
+      const released = client.release.bind(client);
+      client.release = () => {
+        released();
+        pool.idleCount = pool.totalCount;
+        pool.busy = false;   // through the accessor: nothing is checked out any more
+      };
+      return client;
+    }
+
+    async query(): Promise<{ rows: never[] }> {
+      return { rows: [] };
+    }
+
+    async end(): Promise<void> {
+      this.ended = true;
+      this.totalCount = 0;
+      this.idleCount = 0;
+    }
+  }
+
+  vi.doMock('pg', () => ({ default: { Pool: MockPool } }));
+  const { PostgresDb: Driver } = await import('../../server/src/db/postgres.js');
+  return { PostgresDb: Driver, built };
+}
 
 describe('the connection discipline the driver promises', () => {
   it('never issues two statements on one connection at once, even under Promise.all', async () => {
@@ -246,6 +321,71 @@ describe('what a transient failure looks like to the person at the desk', () => 
     expect(options.max).toBe(1);
     expect(options.idleTimeoutMillis).toBe(1_000);
     expect(options.allowExitOnIdle).toBe(true);
+  });
+
+  it('hands its sessions back when the response is done, and opens a new one next time', async () => {
+    /*
+      THE OUTAGE, AS A TEST.
+
+      Measured on the deployed system with the idle timeout already down to one second:
+
+          portal_api sessions: 15, state=idle, untouched for 120s
+
+      Fifteen of the pooler's fifteen slots, held by fifteen suspended containers whose
+      event loops were frozen and whose timers therefore never fired. A timeout cannot fix
+      that, so the close is explicit: `drain()` after the response is flushed, and a new
+      pool when the container is asked to do something again.
+
+      `pg` is mocked here for one reason: the identity of the pool is the thing under test.
+      A drain must CLOSE the pool it was holding rather than hand it back, and the next
+      statement must run on a different one.
+    */
+    const { PostgresDb: Driver, built } = await withMockedPg();
+    const db = new Driver('postgres://portal_api@example.invalid:5432/postgres', 1);
+
+    await db.all('select 1');
+    expect(built).toHaveLength(1);
+
+    await db.drain();
+    expect(built[0].ended).toBe(true);
+
+    await db.all('select 1');
+    expect(built).toHaveLength(2);
+    expect(built[1].ended).toBe(false);
+
+    vi.doUnmock('pg');
+    vi.resetModules();
+  });
+
+  it('does not close a pool that another request on this instance is still using', async () => {
+    /*
+      One container can answer more than one request at a time. A drain that closed the
+      pool under a running request would fail that request for no reason — so a drain is
+      skipped while anything is checked out, and the request that finishes last closes the
+      door. This is why the guard is on the pool's own counts rather than a flag of ours.
+    */
+    const { PostgresDb: Driver, built } = await withMockedPg();
+    const db = new Driver('postgres://portal_api@example.invalid:5432/postgres', 1);
+
+    await db.all('select 1');
+    built[0].busy = true;                       // a second request is mid-query
+
+    await db.drain();
+    expect(built[0].ended).toBe(false);
+    expect(built).toHaveLength(1);              // and nothing was rebuilt behind its back
+
+    vi.doUnmock('pg');
+    vi.resetModules();
+  });
+
+  it('never closes a pool a test supplied', async () => {
+    /* The injected pool is a seam for tests, not a resource this class opened. */
+    const pool = new FakePool();
+    const db = build(pool);
+    await db.drain();
+    expect(pool.connects).toBe(0);
+    await db.all('select 1');
+    expect(pool.connects).toBe(1);
   });
 
   it('recognises the failures worth retrying, and none of the ones that are not', () => {

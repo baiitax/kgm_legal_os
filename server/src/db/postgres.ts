@@ -183,7 +183,42 @@ type MutableRoleFacts = Omit<RoleFacts, 'assumedRoles'> & { assumedRoles?: reado
 
 export class PostgresDb implements Db {
   readonly driver = 'postgres' as const;
-  private readonly pool: pg.Pool;
+
+  /**
+   * THE POOL IS REBUILDABLE, NOT READONLY, AND THAT IS THE POINT OF `drain()` BELOW.
+   *
+   * A serverless runtime suspends an instance the moment its response is flushed, and a
+   * suspended instance runs no timers — so an idle-timeout, however short, cannot be the
+   * thing that returns a session pooler connection to the pool. The only reliable moment
+   * to close a session is *inside* the invocation that opened it, before the freeze.
+   * Hence: build lazily, close explicitly, and build a fresh pool when the next request
+   * arrives on the same container.
+   */
+  private currentPool: pg.Pool | undefined;
+  /** A pool handed in by a test. Not ours to close: see `drain()`. */
+  private readonly injectedPool: pg.Pool | undefined;
+  private readonly connectionString: string;
+  private readonly max: number;
+
+  /** The pool in use, built on first use and rebuilt after a `drain()`. */
+  private get pool(): pg.Pool {
+    this.currentPool ??= this.buildPool();
+    return this.currentPool;
+  }
+
+  /**
+   * The pool, once any drain that is in flight has finished.
+   *
+   * A drain and the next request can overlap for a few milliseconds, and both are
+   * asynchronous: without this, that request would meet a pool that is closing and get
+   * "Cannot use a pool after calling end on the pool" — the same class of transient
+   * connection failure this file exists to stop reporting as a bug.
+   */
+  private async readyPool(): Promise<pg.Pool> {
+    if (this.draining) await this.draining;
+    return this.pool;
+  }
+  private draining: Promise<void> | undefined;
 
   /**
    * @param pool a pool to use instead of building one. A TEST SEAM, and nothing else:
@@ -199,9 +234,16 @@ export class PostgresDb implements Db {
           'postgres://portal_api:***@db.<ref>.supabase.co:5432/postgres',
       );
     }
-    this.pool = pool ?? new Pool({
-      connectionString: withoutSslParams(connectionString),
-      max,
+    this.injectedPool = pool;
+    this.connectionString = connectionString;
+    this.max = max;
+    this.currentPool = pool ?? this.buildPool();
+  }
+
+  private buildPool(): pg.Pool {
+    const built = new Pool({
+      connectionString: withoutSslParams(this.connectionString),
+      max: this.max,
       /*
         WAITING FOR A SESSION IS NORMAL; FAILING BECAUSE OF ONE IS NOT.
 
@@ -231,11 +273,57 @@ export class PostgresDb implements Db {
       */
       idleTimeoutMillis: 1_000,
       allowExitOnIdle: true,
-      ssl: sslFor(connectionString),
+      ssl: sslFor(this.connectionString),
     });
-    this.pool.on('error', (err) => {
+    built.on('error', (err) => {
       console.error('[db] idle client error', err.message);
     });
+    return built;
+  }
+
+  /**
+   * HAND THE SESSIONS BACK BEFORE THE RUNTIME FREEZES THIS INSTANCE.
+   *
+   * This is the fix for the outage, and it is deliberately not a timeout. Measured on the
+   * deployed system, with `idleTimeoutMillis` already down to one second:
+   *
+   *     portal_api sessions: 15, state=idle, untouched for 120s
+   *
+   * Fifteen of the pooler's fifteen slots, held by fifteen containers that had finished
+   * their requests two minutes earlier and were merely suspended. Their event loops were
+   * frozen, so no timer ever fired; the sockets stayed open, and every instance that
+   * started afterwards could not get a session at all. Terminating the sessions by hand
+   * restored the service instantly.
+   *
+   * So the close is explicit and it happens on the request that owns the session: after
+   * the response is flushed, the pool is ended and discarded. The next request on this
+   * container builds a new one. The cost is a handshake per request; the alternative is a
+   * fleet that spends a shared budget of fifteen sessions on instances doing nothing.
+   *
+   * A test-supplied pool is left alone — closing it would break the test, not the bug.
+   */
+  async drain(): Promise<void> {
+    if (this.injectedPool) return;
+    if (this.draining) return this.draining;
+    const pool = this.currentPool;
+    if (!pool) return;
+    /*
+      ONLY WHEN NOTHING IS CHECKED OUT. One container can be answering more than one
+      request at a time, and a pool that is closed under a running request would fail it
+      for no reason. If somebody else is mid-request, the drain is simply skipped: that
+      request will drain when it finishes, and the last one out closes the door.
+    */
+    if (pool.idleCount !== pool.totalCount || pool.waitingCount > 0) return;
+    this.currentPool = undefined;
+    /* `end()` waits for a checked-out client to come back. Everything should have been
+       released by now; the ceiling is here so that a leak cannot pin a function open. */
+    const ended = pool.end().then(() => true);
+    this.draining = ended.then(() => undefined, () => undefined);
+    const closed = await Promise.race([
+      ended,
+      new Promise<false>((r) => setTimeout(() => r(false), 2_000)),
+    ]);
+    if (!closed) console.warn('[db] drain did not complete within 2s; a client is still checked out');
   }
 
   /**
@@ -335,7 +423,7 @@ export class PostgresDb implements Db {
    * though `has_table_privilege` reports nothing on the connection.
    */
   private async setReachableRoles(): Promise<AssumedRoleFacts[]> {
-    const res = await this.pool.query<{
+    const res = await (await this.readyPool()).query<{
       rolname: string; rolsuper: boolean; rolbypassrls: boolean; owned_tables: string;
     }>(
       `select r.rolname,
@@ -401,17 +489,17 @@ export class PostgresDb implements Db {
    */
   private async connect(): Promise<pg.PoolClient> {
     /*
-      THE LADDER. Six attempts over roughly three seconds, doubling: a pooler that is at
+      THE LADDER. Six attempts over roughly six seconds, doubling: a pooler that is at
       its client limit frees slots as other requests finish, so the correct behaviour is
       to wait for one rather than to report a failure the reader can do nothing about. A
       permanent failure (a bad password, a missing database) fails on the first attempt —
       retrying it would only delay the answer.
     */
-    const backoffMs = [100, 200, 400, 800, 1_600];
+    const backoffMs = [150, 400, 800, 1_600, 3_200];
     let lastError: unknown;
     for (let attempt = 1; attempt <= backoffMs.length + 1; attempt++) {
       try {
-        return await this.pool.connect();
+        return await (await this.readyPool()).connect();
       } catch (err) {
         lastError = err;
         if (!isTransientConnectionError(err)) throw err;
@@ -635,6 +723,8 @@ export class PostgresDb implements Db {
   }
 
   async close(): Promise<void> {
-    await this.pool.end();
+    const pool = this.currentPool;
+    this.currentPool = undefined;
+    await pool?.end();
   }
 }
