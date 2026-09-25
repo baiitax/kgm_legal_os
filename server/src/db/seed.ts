@@ -72,11 +72,32 @@ async function applyDemoIssuances(db: Db): Promise<void> {
  */
 export async function seedDemoData(
   db: Db,
-  opts: { verbose?: boolean; force?: boolean; storage?: StorageDriver } = {},
+  opts: {
+    verbose?: boolean;
+    force?: boolean;
+    storage?: StorageDriver;
+    /**
+     * Tables to leave alone, by name.
+     *
+     * An operator tool needs this for one legitimate case: a row that was created
+     * through the PRODUCT's own path rather than by the fixture — the fiscal identity
+     * and the device are onboarded by the firm, not seeded into it — and re-inserting
+     * the fixture's own version of it would leave the tenant with two active
+     * identities, which is a state the product is right to be confused by.
+     */
+    skipTables?: string[];
+  } = {},
 ): Promise<void> {
   const rows = buildDemoSeed();
+  const skip = new Set(opts.skipTables ?? []);
+  const issuanceSkipped = skip.has('fiscal_devices');
   let inserted = 0;
+  let skippedRows = 0;
   let skipped = false;
+
+  if (skip.size > 0 && opts.verbose) {
+    console.log(`[seed] leaving ${[...skip].join(', ')} exactly as they are`);
+  }
 
   // Seeding is idempotent (every id is derived from a stable label), but if the
   // dataset is already present we skip the inserts so a restart is cheap and
@@ -94,6 +115,24 @@ export async function seedDemoData(
     for (const { table, row } of rows) {
       if (!TABLE_ORDER.includes(table)) {
         throw new Error(`seed: unknown table "${table}"`);
+      }
+      if (skip.has(table)) {
+        skippedRows++;
+        continue;
+      }
+      /*
+        AND WHEN THE ISSUE PASS IS SKIPPED, SO IS EVERY MOVEMENT THAT DEPENDS ON IT.
+
+        A ledger entry that applies client money to a fee, a credit note that corrects an
+        invoice, and a submission that reports or clears one, are all about a document
+        that must be a valid tax invoice first. A run that deliberately leaves the invoices un-issued cannot seed them —
+        and the database says so in as many words (`invoice_not_fiscally_valid`), which
+        is how this rule was found rather than assumed.
+      */
+      if (issuanceSkipped && row.invoice_id
+          && (table === 'ledger_entries' || table === 'credit_notes' || table === 'invoice_submissions')) {
+        skippedRows++;
+        continue;
       }
       const cols = Object.keys(row);
       const placeholders = cols.map(() => '?').join(', ');
@@ -122,7 +161,16 @@ export async function seedDemoData(
               been ISSUED — which is the guard doing its job on the fixture, and it
               caught exactly this ordering the first time the pass was written.
         */
-        if (table === ISSUANCE_BOUNDARY) await applyDemoIssuances(q);
+        /*
+          The issuance pass is skipped with the devices it needs. A stamp naming a
+          device that was never seeded would fail its foreign key, and the failure
+          would read as a seed bug rather than as the deliberate omission it is.
+        */
+        if (table === ISSUANCE_BOUNDARY && !issuanceSkipped) {
+          await applyDemoIssuances(q);
+        } else if (table === ISSUANCE_BOUNDARY && opts.verbose) {
+          console.log('[seed] invoices were not issued: the fiscal devices are not seeded here');
+        }
       } catch (err) {
         // `on conflict do nothing` covers re-runs; anything else is a real bug.
         const msg = err instanceof Error ? err.message : String(err);
@@ -157,7 +205,7 @@ export async function seedDemoData(
   if (skipped) return;
 
   if (opts.verbose) {
-    console.log(`[seed] demo dataset ready (${inserted} rows)`);
+    console.log(`[seed] demo dataset ready (${inserted} rows${skippedRows ? `, ${skippedRows} left alone` : ''})`);
     console.log('[seed] ─────────────────────────────────────────────────────────');
     console.log('[seed]  CLIENT PORTAL CREDENTIALS — synthetic data only (§44)');
     for (const a of DEMO_ACCOUNTS) {

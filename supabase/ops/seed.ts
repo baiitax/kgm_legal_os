@@ -64,6 +64,17 @@ if (!url) {
 */
 const db = new PostgresDb(url, 2);
 
+/*
+  TABLES THE OPERATOR WANTS LEFT ALONE. In this environment the fiscal identity and the
+  device were created through the product's own onboarding path — the managing partner
+  recorded them, the audit trail says so, and an invoice has already been issued under
+  that device. Seeding the fixture's own copy would leave the tenant with two active
+  identities and two devices, and picking between them would become a matter of which
+  row the query happened to return first.
+*/
+const skipTables = (process.argv.find((a) => a.startsWith('--skip=')) ?? '')
+  .replace('--skip=', '').split(',').map((t) => t.trim()).filter(Boolean);
+
 /** Tables the census reports on — the ones a page actually reads from. */
 const CENSUS = [
   'tenants', 'clients', 'users', 'staff', 'client_users', 'matters', 'matter_team',
@@ -72,6 +83,11 @@ const CENSUS = [
   'notifications', 'consent_records', 'permissions', 'roles', 'role_permissions',
   'departments', 'firm_memberships', 'membership_roles', 'matter_permissions',
   'tenant_settings',
+  // 0034-0036 · the fiscal document, client money and the billing basis. In the census
+  // for the same reason every other table is: a partial seed has to be visible.
+  'fiscal_identity', 'fiscal_devices', 'invoice_submissions', 'credit_notes',
+  'client_ledgers', 'ledger_entries', 'ledger_reconciliations', 'rate_cards',
+  'matter_billing_terms', 'engagement_letters', 'time_entries', 'expenses',
 ];
 
 /** Tables that must be non-empty for the portal and firm OS to render at all. */
@@ -79,6 +95,10 @@ const REQUIRED = [
   'tenants', 'clients', 'users', 'staff', 'client_users', 'matters',
   'documents', 'invoices', 'notifications', 'roles', 'permissions',
   'role_permissions', 'departments', 'firm_memberships', 'tenant_settings',
+  // The P0.2/P1 tables the firm OS renders from. A seed that loaded the client portal
+  // and none of the billing is the partial seed this census exists to name.
+  'fiscal_identity', 'fiscal_devices', 'client_ledgers', 'ledger_entries',
+  'rate_cards', 'matter_billing_terms', 'time_entries', 'expenses', 'engagement_letters',
 ];
 
 async function main() {
@@ -86,7 +106,10 @@ async function main() {
   console.log('  KGM LEGAL OS — seed');
   console.log('  ────────────────────────────────────────────────');
 
-  await seedDemoData(db, { verbose: true, force: true });
+  if (skipTables.length) {
+    console.log(`  skipping   ${skipTables.join(', ')}`);
+  }
+  await seedDemoData(db, { verbose: true, force: true, skipTables });
   /*
     No storage driver is passed. The database rows are what the portal reads;
     the demo document *bytes* live in Supabase Storage, which needs the service
