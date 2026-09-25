@@ -184,3 +184,78 @@ Six items from the revised sequence remain, in the order the plan set:
 
 P‑1 was placed first because it is the only one that changes the meaning of the
 *membership*, and every later gate reads a member.
+
+---
+
+# Live verification — 25 September 2026
+
+`scripts/verify/invoice-fiscal-live.mjs` · **40/40 checks, against the migrated
+production database** (`aws-0-us-east-1.pooler.supabase.com`, 76 tables, 230 policies,
+migrations 0001–0039 applied), driving the deployed API on `0.0.0.0:8787` and then
+attacking the same rows directly with SQL.
+
+    node scripts/verify/invoice-fiscal-live.mjs http://localhost:8787
+
+It exists because the 416 behavioural tests run on SQLite, where a refusal is a trigger's
+`raise(ABORT)`, one role owns every file and every column is writable by it. The deployed
+system has two restricted roles, column-level grants, row-level security, and triggers
+that exist in one dialect only — and it has now been wrong **four more times** in ways the
+SQLite suite could not see.
+
+| what the run proves | why it needs the real engine |
+|---|---|
+| the six new read doors answer with **data** | a grant with no policy and a policy with no grant read identically from outside; only an end-to-end request separates *secured* from *broken* |
+| `portal_api` holds **no privilege at all** on the ten firm-only tables, and SELECT-but-never-write on the two client-facing ones | privileges are a Postgres fact; SQLite has none |
+| `firm_api` may INSERT a ledger entry and may **not** UPDATE or DELETE it | the append-only rule has a trigger *and* an absent privilege, and the absent privilege is the half that survives someone disabling a trigger |
+| a draft is issued through the API: official number, next ICV, hash recomputed from the returned XML, QR decoded, chain linked to the device's head | the ICV, the chain and the guards are Postgres objects |
+| the issued document is then attacked **directly**: amend it, amend its lines, add a line, delete it — all four refused by the database, with `postgres` as the caller | refusals must hold against a caller who is not the server |
+| the authority's answer is recorded against the invoice it clears | the answer route is the only way an invoice becomes `cleared` |
+| **the policies narrow**: one client sees its own credit note and its own engagement letter and the other sees neither, **read as `portal_api`** | `postgres` is not a member of `portal_api` (`set role` is refused, 42501), so the proof needs a session that is the portal role — and it checks itself: the run reports the role it read as |
+| every refusal arrives as a **refusal**: overdrawing the client's money, spending it with no evidence, naming a client the firm has no record of, issuing standard with no buyer VAT | a legitimate refusal that reaches the client as HTTP 500 is the worst of both answers |
+
+## The four defects it found
+
+**1 · Every standard invoice was refused.** `FirmRepo.getClientForInvoice` returned the
+driver's raw row (`vat_number`) while the route read `client?.vatNumber`, so every buyer
+looked VAT-less and `buyer_vat_required` was returned for invoices the firm was obliged
+to issue. *The 41 tests that existed passed because they issue only simplified invoices:
+the negative test was healthy while the gate was fully dead.* Repaired in `firm-repo.ts`
+(one mapped projection) and pinned by the positive test that was missing.
+
+**2 · A credit note against a standard invoice could never be shared.** 0034's
+`guard_credit_note_fiscal_issue` looked the clearance up with `s.invoice_id = new.id`,
+where `new` is a row of `credit_notes` — a comparison that can never be true, so the
+guard raised `credit_note_not_cleared` even after ZATCA had cleared the invoice. A firm
+could not correct a B2B tax invoice at all, and correcting it by credit note is the only
+lawful way to reverse an issued invoice. SQLite's mirror of that guard did not implement
+the rule at all, so nothing in the suite compared the two dialects. Repaired by
+**migration 0039** (the function replaced, the wrong comparison named in the source), the
+rule mirrored into the SQLite schema, and pinned both by a test that refuses-then-admits
+and by the live harness.
+
+**3 · The overdraft guard could not compute the balance.** `ledgerBalance` asked
+`where ledger_id = ? and (? is null or entry_at <= ?)`. Postgres refuses to infer a type
+for a parameter that is only ever tested for nullness (`could not determine data type of
+parameter $2`), so the check that decides whether a client's money may be spent returned
+500 instead of an answer. SQLite accepts it happily. Repaired as two statements — the
+running balance and the balance as of a date are different questions.
+
+**4 · An unknown client was a 500.** `POST /trust/ledgers/:clientId/entries` opened the
+ledger on first movement, so a client id the firm has no record of reached the insert and
+failed its foreign key. Repaired: the route refuses with a tenant-scoped 404 before it
+writes anything, and the harness keeps that refusal pinned.
+
+Two **data** gaps were repaired separately, and neither was a code defect: the live
+clients predated the party register (`clients.party_id` was NULL, so a standard invoice
+had no buyer VAT to name), which `supabase/ops/reconcile_demo.mjs` links by exact
+same-name party and refuses to guess; and the demo's invoices predate the fiscal columns,
+so they carry no UUID and are left exactly as they are.
+
+## What this changes about how the phases are verified
+
+The gate this project wrote into the plan of record — *real Postgres reconciled ·
+projections not filters · audit union and DB admission · live harness · drift test* — is
+now met for P0.2 and P1, and the harness is the artefact that meets it. The rule to carry
+into P0.3 is the one those four defects keep teaching, in the order they were found:
+**a rule that exists in one dialect is not a rule**, and a negative test that passes is
+not evidence that the positive path works.

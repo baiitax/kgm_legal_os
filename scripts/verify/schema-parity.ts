@@ -72,13 +72,14 @@ const PENDING_MIGRATIONS: Record<string, string> = {
  * check below reports any entry that has become unnecessary, so the map cannot quietly
  * become a place where real findings are hidden.
  */
-const PENDING_GRANTS: Record<string, string> = {
-  'invoices amount_paid': '0035',
-  'invoices subtotal': '0036',
-  'invoices vat_amount': '0036',
-  'invoices total': '0036',
-  'invoices notes_internal': '0036',
-};
+const PENDING_GRANTS: Record<string, string> = {};
+/*
+  0035, 0036 and 0038 have been applied, so the five entries that used to live here
+  (amount_paid, subtotal, vat_amount, total, notes_internal) are real checks now — and
+  they pass. The map stays because the next migration that grants a column on a table
+  which already exists will need it, and because an empty map is a readable statement
+  that nothing is currently being taken on trust.
+*/
 
 const SERVER_WRITES: Array<{
   table: string;
