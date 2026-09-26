@@ -32,7 +32,7 @@ import {
 } from '../lib/errors.js';
 import { normalizeArabicName, normalizeIdentifier } from '../domain/arabic-names.js';
 import { evaluateConflicts } from '../domain/conflict-engine.js';
-import { keyedHash, maskNationalId } from '../lib/crypto.js';
+import { keyedHash, maskNationalId, maskRegistration } from '../lib/crypto.js';
 import { ah } from '../auth/middleware.js';
 import { requestInfo } from '../audit/logger.js';
 import {
@@ -46,6 +46,9 @@ import { projectMatter, projectMatterList } from '../domain/classification.js';
 import {
   DISCLOSURE_GROUND_CODES, DISCLOSURE_RECIPIENTS, groundOf, groundPermits,
 } from '../domain/privilege.js';
+import {
+  MATTER_TEAM_ROLES, MATTER_TEAM_LABELS, HIDDEN_MATTER_ROLES,
+} from '../domain/matter-team.js';
 import {
   SERVICE_TAKING_OUTCOMES,
   COURT_WEEKEND_DAYS,
@@ -298,6 +301,996 @@ export function firmRouter(c: Container): Router {
         };
       }),
     });
+  }));
+
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // TASK 25 · INTAKE — open a client, open a matter, staff it, report on it
+  //
+  // WHY THIS BLOCK EXISTS. The system could do everything to a case except open
+  // one. `POST /matters` did not exist; neither did `POST /clients`; `matter_team`
+  // had no insert route and, more to the point, `firm_api` held NO INSERT privilege
+  // on it, so the feature was not merely unbuilt — it was IMPOSSIBLE, and no front
+  // end could have made it work. Migration 0058 opens the four writes; this is the
+  // route layer on top, and the two are one change.
+  //
+  // WHAT MAKES IT A WORKFLOW RATHER THAN FOUR FORMS. The stages a firm runs in one
+  // sitting are the same four stages, and every hand-off between them is a place a
+  // case gets lost: a client recorded under a name the conflict engine will not
+  // match, a matter opened with nobody answerable for it, a check that never ran.
+  // So each route does the WHOLE of its stage inside one transaction, and each one
+  // carries the next stage's evidence forward:
+  //
+  //   POST /clients        → normalises the name the conflict engine will search on
+  //   GET  /matters/new    → ONE call for what the opening form needs, including
+  //                          the matter number it will receive
+  //   POST /matters        → matter + lead assignment + conflict check + opening
+  //                          timeline entry, atomically
+  //   POST /matters/:id/team → assignment, with the §11 role rule applied
+  //   PATCH /matters/:id/report → the case report, and the client-facing summary in
+  //                          the same write
+  //
+  // WHAT IT DELIBERATELY DOES NOT DO. Nothing here asserts `conflict_cleared`: the
+  // matter is born unclear and the derived state clears it (0032, and the SQLite
+  // trigger that mirrors it). Nothing here accepts `internal_status` from a caller
+  // on create, because a matter cannot be born active — the CDD gate guards that
+  // transition and it is guarded in `POST /matters/:id/status`. Nothing here writes
+  // `internal_notes` or `risk_rating`: 0054 removed them from the application role
+  // and P0.5 routes them through the ring, and an intake form is not a way round it.
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * The client register.
+   *
+   * `clients.read` opens it, and the payload carries no `national_id_hash` — the
+   * register is for choosing a client, not for verifying one.
+   */
+  r.get('/clients', ah(async (req, res) => {
+    const p = principal(req);
+    c.permissions.assertCan(p, 'clients.read', { type: 'client_collection' });
+    const query = typeof req.query.q === 'string' && req.query.q.trim()
+      ? req.query.q.trim() : undefined;
+    const clients = await c.firm.listClientsForPicker(p.tenantId, { query });
+    ok(res, { count: clients.length, clients });
+  }));
+
+  /**
+   * ADD CLIENT.
+   *
+   * THE NAME IS NORMALISED HERE, ONCE, BY THE MODULE THE CONFLICT ENGINE USES. A
+   * client created through this route is findable by the conflict search on the
+   * first attempt; a client created by writing `name` alone is a client the firm
+   * can act for and cannot check, which is the defect the intake stage exists to
+   * prevent. `normalizeArabicName` strips the definite article, the honorifics and
+   * the tatweel — so «شركة الأفق التجاري» and "Al-Afaq Trading Co." reach the same
+   * key, and the engine's fallback to the client's own name columns still works.
+   *
+   * IDENTITY IS MASKED AND HASHED, NEVER STORED. The plaintext national id arrives,
+   * is masked for display and hashed for matching, and is dropped: the same
+   * convention `POST /parties` follows, and the reason `clients` has a
+   * `national_id_masked` column and a `national_id_hash` column rather than a
+   * national id column.
+   *
+   * A DUPLICATE IS A QUESTION, NOT A REFUSAL. If the normalised name is already on
+   * the register the route answers 409 with the matches it found — because two
+   * clients with one name is how a firm ends up with two conflict searches that
+   * each see half the truth. `confirmDuplicate: true` records the decision and
+   * proceeds; the audit row carries that it was confirmed, so the choice is
+   * reviewable rather than invisible.
+   */
+  r.post('/clients', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const body = strictBody(
+      z.object({
+        clientType: z.enum(['individual', 'organization']),
+        name: z.string().trim().min(2).max(300),
+        nameAr: z.string().trim().min(2).max(300).optional().nullable(),
+        email: z.string().trim().email().max(200).optional().nullable(),
+        phone: z.string().trim().max(40).optional().nullable(),
+        addressLine: z.string().trim().max(300).optional().nullable(),
+        city: z.string().trim().max(120).optional().nullable(),
+        country: z.string().trim().length(2).default('SA'),
+        /** Plaintext in, masked + hashed out. Never stored. */
+        nationalId: z.string().trim().max(40).optional().nullable(),
+        commercialRegistration: z.string().trim().max(40).optional().nullable(),
+        identityVerified: z.boolean().default(false),
+        verificationNote: z.string().trim().max(500).optional().nullable(),
+        /** The answer to the 409 below, recorded rather than assumed. */
+        confirmDuplicate: z.boolean().default(false),
+      }).strict(),
+      req, c, '/api/firm/clients',
+    );
+
+    c.permissions.assertCan(p, 'clients.create', { type: 'client_collection' });
+
+    const normalized = normalizeArabicName(
+      [body.nameAr, body.name].filter(Boolean).join(' '));
+    if (!normalized) throw badRequest('name_unusable', 'this name has no searchable characters');
+
+    const matches = await c.firm.findClientByName(p.tenantId, body.name, body.nameAr ?? null);
+    if (matches.length && !body.confirmDuplicate) {
+      /*
+        A 409 with the matches in the body. The caller is not being told "no": they
+        are being told what the firm already holds, which is the information they
+        need and did not have.
+      */
+      throw conflict('client_name_exists',
+        `${matches.length} client(s) are already on the register under this name`,
+        { matches });
+    }
+
+    const id = newId();
+    const now = new Date().toISOString();
+    await c.firm.tx(async () => {
+      await c.firm.createClient({
+        id, tenantId: p.tenantId, clientType: body.clientType, name: body.name,
+        nameAr: body.nameAr ?? null,
+        nationalIdMasked: maskNationalId(body.nationalId ?? null),
+        nationalIdHash: body.nationalId ? keyedHash(body.nationalId.trim()) : null,
+        commercialRegMasked: maskRegistration(body.commercialRegistration ?? null),
+        email: body.email ?? null, phone: body.phone ?? null,
+        addressLine: body.addressLine ?? null, city: body.city ?? null,
+        country: body.country, status: 'active',
+        identityVerified: body.identityVerified,
+        verificationNote: body.verificationNote ?? null,
+      });
+      await c.audit.write({
+        action: 'CLIENT_CREATED',
+        actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+        resourceType: 'client', resourceId: id, outcome: 'success',
+        metadata: {
+          membershipId: p.membershipId, clientType: body.clientType,
+          hasIdentity: !!body.nationalId, hasRegistration: !!body.commercialRegistration,
+          // Not the name. An audit trail a client can read is one thing; copying
+          // the register into it in bulk is another.
+          confirmedDuplicate: body.confirmDuplicate, duplicatesFound: matches.length,
+        },
+      }, requestInfo(req, c.trustProxy));
+    });
+
+    ok(res, { id, name: body.name, nameAr: body.nameAr ?? null, normalized, createdAt: now }, 201);
+  }));
+
+  /**
+   * COMPLETE OR CORRECT A CLIENT.
+   *
+   * The columns here are the ones 0058 granted, which is the list the client record
+   * is MADE of rather than the table's columns: `party_id` is absent, so an edit
+   * cannot silently change what the conflict engine will find (that is
+   * `POST /clients/:id/party`, with its own authority), and the identity fields are
+   * write-only in the sense that a hash goes in and nothing comes back.
+   */
+  r.patch('/clients/:id', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const clientId = String(req.params.id);
+    const body = strictBody(
+      z.object({
+        clientType: z.enum(['individual', 'organization']).optional(),
+        name: z.string().trim().min(2).max(300).optional(),
+        nameAr: z.string().trim().max(300).optional().nullable(),
+        email: z.string().trim().email().max(200).optional().nullable(),
+        phone: z.string().trim().max(40).optional().nullable(),
+        addressLine: z.string().trim().max(300).optional().nullable(),
+        city: z.string().trim().max(120).optional().nullable(),
+        country: z.string().trim().length(2).optional(),
+        status: z.enum(['active', 'inactive', 'restricted']).optional(),
+        nationalId: z.string().trim().max(40).optional().nullable(),
+        commercialRegistration: z.string().trim().max(40).optional().nullable(),
+        identityVerified: z.boolean().optional(),
+        verificationNote: z.string().trim().max(500).optional().nullable(),
+      }).strict(),
+      req, c, '/api/firm/clients/:id',
+    );
+
+    c.permissions.assertCan(p, 'clients.update', { type: 'client', id: clientId });
+    // The row is looked up FIRST so an unknown or another firm's client is a 404
+    // rather than a silent zero-row update (trap (m)).
+    const existing = await c.firm.getClientForTenant(p.tenantId, clientId);
+    if (!existing) throw notFoundOrForbidden('client', clientId);
+
+    const patch: Parameters<typeof c.firm.updateClient>[0]['patch'] = {};
+    if (body.clientType !== undefined) patch.clientType = body.clientType;
+    if (body.name !== undefined) patch.name = body.name;
+    if (body.nameAr !== undefined) patch.nameAr = body.nameAr;
+    if (body.email !== undefined) patch.email = body.email;
+    if (body.phone !== undefined) patch.phone = body.phone;
+    if (body.addressLine !== undefined) patch.addressLine = body.addressLine;
+    if (body.city !== undefined) patch.city = body.city;
+    if (body.country !== undefined) patch.country = body.country;
+    if (body.status !== undefined) patch.status = body.status;
+    if (body.identityVerified !== undefined) patch.identityVerified = body.identityVerified;
+    if (body.verificationNote !== undefined) patch.verificationNote = body.verificationNote;
+    if (body.commercialRegistration !== undefined) {
+      patch.commercialRegMasked = maskRegistration(body.commercialRegistration);
+    }
+    if (body.nationalId !== undefined) {
+      patch.nationalIdMasked = maskNationalId(body.nationalId);
+      patch.nationalIdHash = body.nationalId ? keyedHash(body.nationalId.trim()) : null;
+    }
+    if (!Object.keys(patch).length) throw badRequest('nothing_to_update', 'no fields were supplied');
+
+    const changed = await c.firm.updateClient({ tenantId: p.tenantId, clientId, patch });
+    await c.audit.tryWrite({
+      action: 'CLIENT_UPDATED',
+      actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+      resourceType: 'client', resourceId: clientId, outcome: 'success',
+      metadata: { membershipId: p.membershipId, fields: Object.keys(patch).sort() },
+    }, requestInfo(req, c.trustProxy));
+
+    ok(res, { id: clientId, changed });
+  }));
+
+  /**
+   * INVITE THE CLIENT'S PEOPLE TO THE PORTAL.
+   *
+   * This is the fifth hand-off in intake and the one the firm had no way to make:
+   * `client_invitations` could be written by the portal in the AUTH phase and by
+   * nobody else, so "invitation-only onboarding" was a property of a demo route
+   * (`POST /api/dev/invite`) rather than of the product. 0058 grants and admits the
+   * firm's insert; this is the route, and it is the firm's own access grant being
+   * made — which is why it needs `clients.update` rather than anything weaker.
+   *
+   * THE OWNERSHIP CHECK IS THE POINT. An invitation names a client AND a tenant.
+   * The route resolves the client inside the caller's tenant before minting
+   * anything, so a firm member cannot invite a user into another firm's client —
+   * the one write that would cross the tenant boundary the whole system rests on.
+   *
+   * The link is returned as well as emailed: in production the email is the
+   * delivery path, but a firm that has just typed an address in wants to be able to
+   * hand it over, and the token is single-use, expiring and bound server-side.
+   */
+  r.post('/clients/:clientId/invitations', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const clientId = String(req.params.clientId);
+    const body = strictBody(
+      z.object({
+        email: z.string().trim().email().max(200),
+        displayName: z.string().trim().min(2).max(120),
+        displayNameAr: z.string().trim().max(120).optional().nullable(),
+        portalRole: z.enum(['client_primary', 'client_contact']).default('client_contact'),
+      }).strict(),
+      req, c, '/api/firm/clients/:clientId/invitations',
+    );
+
+    c.permissions.assertCan(p, 'clients.update', { type: 'client', id: clientId });
+    const client = await c.firm.getClientForTenant(p.tenantId, clientId);
+    if (!client) throw notFoundOrForbidden('client', clientId);
+
+    const out = await c.auth.createInvitation(requestInfo(req, c.trustProxy), {
+      tenantId: p.tenantId, clientId, email: body.email, displayName: body.displayName,
+      displayNameAr: body.displayNameAr ?? undefined, portalRole: body.portalRole,
+      createdByStaff: p.staffId ?? undefined,
+    });
+
+    /*
+      A client with no email address on file gets one, because an invitation sent to
+      a person the register cannot name is a portal account nobody can find again.
+      The client's own address is preferred and never overwritten.
+    */
+    if (!client.email) {
+      await c.firm.updateClient({
+        tenantId: p.tenantId, clientId, patch: { email: body.email.toLowerCase() },
+      });
+    }
+
+    ok(res, {
+      /*
+        The LINK, and not the token separately: the token is single-use, expiring and
+        bound server-side, and handing the same secret back under two names invites
+        one of them to be logged.
+      */
+      link: out.link, expiresAt: out.expiresAt,
+      portalRole: body.portalRole, email: body.email,
+    }, 201);
+  }));
+
+  /**
+   * WHAT THE OPENING FORM NEEDS, IN ONE CALL.
+   *
+   * Efficiency is the requirement, so the form that opens a matter does not make
+   * four round trips: it receives the client register it will choose from, the
+   * people it can assign, the practice areas this firm actually uses, and THE
+   * MATTER NUMBER IT IS ABOUT TO BE GIVEN — allocated read-only here and reserved
+   * for real at create, so nobody has to ask what the file will be called.
+   */
+  r.get('/matters/new', ah(async (req, res) => {
+    const p = principal(req);
+    c.permissions.assertCan(p, 'matters.create', { type: 'matter_collection' });
+
+    const [clients, staff, tenant] = await Promise.all([
+      c.firm.listClientsForPicker(p.tenantId, {}),
+      c.firm.listAssignableStaff(p.tenantId),
+      c.firm.getTenant(p.tenantId),
+    ]);
+
+    const prefix = String(tenant?.slug ?? 'M').toUpperCase().slice(0, 8);
+    const proposed = await c.firm.allocateMatterNumber(p.tenantId, prefix);
+
+    /*
+      The practice areas offered are the ones THIS firm already runs matters under,
+      plus the areas the member is scoped to. A form that offers a fixed list of
+      thirty areas to a firm that practises in four produces intake data the reports
+      cannot group — and the firm's own vocabulary is the only one that matters.
+    */
+    const existing = await c.firm.listPracticeAreasInUse(p.tenantId);
+    const scoped = [...p.practiceAreas].filter((a) => a !== '*');
+    const practiceAreas = [...new Set([...scoped, ...existing])].sort();
+
+    ok(res, {
+      clients: clients.map((cl) => ({
+        id: cl.id, name: cl.name, nameAr: cl.nameAr, clientType: cl.clientType,
+        status: cl.status, matterCount: cl.matterCount, lastMatterAt: cl.lastMatterAt,
+      })),
+      staff: staff.map((s) => ({
+        staffId: s.staffId, name: s.name, nameAr: s.nameAr, role: s.internalRole,
+        jobTitle: s.jobTitle, jobTitleAr: s.jobTitleAr, roleCodes: s.roleCodes,
+        activeMatters: s.activeMatters,
+      })),
+      practiceAreas,
+      matterNumber: { proposed, prefix },
+      roles: MATTER_TEAM_ROLES,
+    });
+  }));
+
+  /**
+   * ADD THE CASE — matter, lead, conflict check and opening entry, atomically.
+   *
+   * THE FOUR WRITES ARE ONE TRANSACTION BECAUSE ANY THREE OF THEM IS WORSE THAN
+   * NONE. A matter with no lead is a file nobody answers for. A matter with no
+   * conflict check looks, on every screen and in every report, exactly like a matter
+   * that was cleared — and Rule 11's gate then holds it in `conflict_check` with no
+   * way out until somebody notices. A matter with neither, plus a number consumed,
+   * is the state that teaches a firm to work outside the system.
+   *
+   * THE MATTER IS BORN IN `conflict_check` WHEN A PARTY IS KNOWN AND THE CHECK
+   * CANNOT CLEAR, and otherwise in `intake`. Both are non-active: this route cannot
+   * create an active matter, because the CDD gate guards that transition and intake
+   * is where a firm is most tempted to skip it. The promotion is one call to
+   * `POST /matters/:id/status` once the register is satisfied — which is also the
+   * call that asks for the documents.
+   *
+   * THE CONFLICT CHECK RUNS INSIDE THE TRANSACTION IT CREATED THE ROWS FOR. That is
+   * the whole reason the engine takes a dataset rather than a matter id: it reads
+   * the firm's history AND the rows written milliseconds ago, so the check covers the
+   * client and the parties as they are, not as they were before the transaction.
+   *
+   * IT CANNOT CLEAR THE MATTER, AND THAT IS THE DESIGN. `concludeConflictCheck` and
+   * the `conflict_cleared` column belong to the conclusion route, where a human
+   * dispositions every finding first. A create route that cleared its own new matter
+   * would be a way to open a file on a conflicted party without anybody deciding
+   * anything — the exact workaround Rule 8 exists to stop.
+   */
+  r.post('/matters', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const body = strictBody(
+      z.object({
+        clientId: z.string().uuid(),
+        title: z.string().trim().min(2).max(300),
+        titleAr: z.string().trim().max(300).optional().nullable(),
+        /** Omit to have one allocated from the firm's own sequence. */
+        matterNumber: z.string().trim().min(3).max(40).optional().nullable(),
+        caseNumber: z.string().trim().max(60).optional().nullable(),
+        practiceArea: z.string().trim().max(120).optional().nullable(),
+        practiceAreaAr: z.string().trim().max(120).optional().nullable(),
+        court: z.string().trim().max(200).optional().nullable(),
+        courtAr: z.string().trim().max(200).optional().nullable(),
+        summary: z.string().trim().max(4000).optional().nullable(),
+        summaryAr: z.string().trim().max(4000).optional().nullable(),
+        /** Who answers for the file. Assignment is not a second visit to the form. */
+        leadStaffId: z.string().uuid().optional().nullable(),
+        leadRole: z.enum(['lead_partner', 'lead_lawyer']).default('lead_lawyer'),
+        /** Anyone else who should be on it from the first minute. */
+        team: z.array(z.object({
+          staffId: z.string().uuid(),
+          matterRole: z.enum(MATTER_TEAM_ROLES),
+          clientRoleLabel: z.string().trim().max(80).optional().nullable(),
+          clientRoleLabelAr: z.string().trim().max(80).optional().nullable(),
+        }).strict()).max(20).default([]),
+        /*
+          THERE IS NO "SHOW THE OPENING TO THE CLIENT" FLAG, because the answer is always
+          yes. `matter_timeline` is the client's own chronology and 0048 admits only
+          client-visible appends: "a firm that could write a hidden row into the timeline
+          could put an account of events into the portal's table that the client's own
+          session will never render — an internal note in the wrong drawer." An opening
+          entry the firm could hide would be exactly that, so the option was removed
+          rather than defaulted to true-and-ignored. What the client may NOT see belongs in
+          `internal_notes`, which the ring governs.
+        */
+        runConflictCheck: z.boolean().default(true),
+        kind: z.enum(['intake', 'adverse_check', 'periodic', 'recheck']).default('intake'),
+      }).strict(),
+      req, c, '/api/firm/matters',
+    );
+
+    c.permissions.assertCan(p, 'matters.create', { type: 'matter_collection' });
+
+    /*
+      THE CLIENT FIRST, IN THIS TENANT. Not merely for the 404: `matters.client_id`
+      is a foreign key, so a client of another firm would be accepted by the
+      constraint and would then be unreachable through every policy — a matter
+      nobody can see, holding a number from this firm's sequence.
+    */
+    const client = await c.firm.getClientForTenant(p.tenantId, body.clientId);
+    if (!client) throw notFoundOrForbidden('client', body.clientId);
+
+    /*
+      THE LEAD IS RESOLVED BEFORE ANYTHING IS WRITTEN. An assignment naming a
+      departed member is a file nobody answers for, and finding that out after the
+      matter exists means a rollback or a file with a lead who cannot log in.
+    */
+    const lead = body.leadStaffId
+      ? await c.firm.getActiveStaffMember(p.tenantId, body.leadStaffId)
+      : null;
+    if (body.leadStaffId && !lead) {
+      throw notFoundOrForbidden('staff', body.leadStaffId);
+    }
+    const extras: Array<{ staffId: string; matterRole: string;
+      clientRoleLabel: string | null; clientRoleLabelAr: string | null;
+      name: string; nameAr: string | null }> = [];
+    for (const member of body.team) {
+      if (member.staffId === body.leadStaffId) continue;
+      const staff = await c.firm.getActiveStaffMember(p.tenantId, member.staffId);
+      if (!staff) throw notFoundOrForbidden('staff', member.staffId);
+      extras.push({
+        staffId: staff.staffId, matterRole: member.matterRole,
+        clientRoleLabel: member.clientRoleLabel ?? MATTER_TEAM_LABELS[member.matterRole].en,
+        clientRoleLabelAr: member.clientRoleLabelAr ?? MATTER_TEAM_LABELS[member.matterRole].ar,
+        name: staff.name, nameAr: staff.nameAr,
+      });
+    }
+
+    const tenant = await c.firm.getTenant(p.tenantId);
+    const prefix = String(tenant?.slug ?? 'M').toUpperCase().slice(0, 8);
+    const practiceArea = body.practiceArea
+      ?? [...p.practiceAreas].find((a) => a !== '*')
+      ?? 'general';
+    /*
+      BOTH TITLE COLUMNS ARE NOT NULL, IN BOTH DIALECTS, AND THE FALLBACK IS THE
+      ENGLISH ONE. A firm that names a file "Sharjah arbitration — Crescent" and
+      types no Arabic is not making an error; the register holds two names because
+      the portal and the court are addressed differently, and a file with one name
+      gets that name in both columns. Refusing the create over a missing translation
+      would be the kind of rule that teaches people to type a hyphen into the Arabic
+      field, which is worse than the fallback.
+    */
+    const titleAr = body.titleAr?.trim() || body.title;
+    const practiceAreaAr = body.practiceAreaAr?.trim() || practiceArea;
+    const matterId = newId();
+    const openedAt = new Date().toISOString();
+
+    /*
+      THE NUMBER, AND THE RETRY. `allocateMatterNumber` counts what exists; two
+      simultaneous openings can therefore compute the same number, and the unique
+      constraint on (tenant_id, matter_number) is the arbiter. Each attempt is its
+      own transaction because the first failing attempt has already aborted one, and
+      the retry is bounded because an unbounded one would turn a full register into a
+      hung request. On the last attempt the error is rethrown with its own name.
+    */
+    let attempt = 0;
+    let matterNumber = '';
+    let conflictResult: {
+      checkId: string | null; hits: unknown[]; warnings: string[];
+      partiesChecked: number; mattersSearched: number;
+    } = { checkId: null, hits: [], warnings: [], partiesChecked: 0, mattersSearched: 0 };
+    let status = 'intake';
+
+    for (;;) {
+      attempt += 1;
+      matterNumber = body.matterNumber?.trim()
+        || await c.firm.allocateMatterNumber(p.tenantId, prefix);
+
+      if (body.matterNumber && await c.firm.matterNumberTaken(p.tenantId, matterNumber)) {
+        throw conflict('matter_number_taken',
+          `${matterNumber} is already on this firm's register`);
+      }
+
+      try {
+        await c.firm.tx(async () => {
+          await c.firm.createMatter({
+            id: matterId, tenantId: p.tenantId, clientId: body.clientId,
+            matterNumber, caseNumber: body.caseNumber ?? null,
+            title: body.title, titleAr: titleAr,
+            practiceArea, practiceAreaAr: practiceAreaAr,
+            court: body.court ?? null, courtAr: body.courtAr ?? null,
+            // Never 'active': the CDD gate owns that transition.
+            internalStatus: 'intake', riskRating: null,
+            summary: body.summary ?? null, summaryAr: body.summaryAr ?? null,
+            openedAt, createdByMembershipId: p.membershipId,
+          });
+
+          if (lead) {
+            await c.firm.assignMatterTeamMember({
+              id: newId(), tenantId: p.tenantId, matterId, staffId: lead.staffId,
+              matterRole: body.leadRole, clientVisible: true,
+              clientRoleLabel: MATTER_TEAM_LABELS[body.leadRole].en,
+              clientRoleLabelAr: MATTER_TEAM_LABELS[body.leadRole].ar,
+            });
+          }
+          for (const member of extras) {
+            /*
+              EVERY MEMBER IS AUDITED, NOT JUST THE LEAD. The trail below used to record the
+              lead and mention the team only as a count — so "who was on this file" was
+              answerable for one person and for nobody else, which is the question the audit
+              trail exists to answer. Assigning a member changes who can read the file; that
+              is the event, and one row per event is the rule everywhere else in this file.
+            */
+            const assigned = await c.firm.assignMatterTeamMember({
+              id: newId(), tenantId: p.tenantId, matterId, staffId: member.staffId,
+              matterRole: member.matterRole,
+              // §11 in the service, and again in the table (0058's CHECK).
+              clientVisible: !HIDDEN_MATTER_ROLES.includes(member.matterRole),
+              clientRoleLabel: member.clientRoleLabel,
+              clientRoleLabelAr: member.clientRoleLabelAr,
+            });
+            await c.audit.write({
+              action: 'MATTER_TEAM_ASSIGNED',
+              actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+              resourceType: 'matter', resourceId: matterId, outcome: 'success',
+              metadata: {
+                membershipId: p.membershipId, staffId: member.staffId,
+                matterRole: member.matterRole, via: 'intake', created: assigned.created,
+                clientVisible: !HIDDEN_MATTER_ROLES.includes(member.matterRole),
+              },
+            }, requestInfo(req, c.trustProxy));
+          }
+
+          await c.firm.addTimelineEntry({
+            tenantId: p.tenantId, matterId, clientId: body.clientId,
+            eventType: 'matter_opened', occurredAt: openedAt,
+            title: 'Matter opened', titleAr: 'تم فتح القضية',
+            description: `File ${matterNumber} opened for ${String(client.name)}`
+              + (lead ? `, led by ${lead.name}` : ''),
+            descriptionAr: `فُتح الملف ${matterNumber}` + (lead ? `، بقيادة ${lead.name}` : ''),
+            /* Forced, not defaulted: 0048's WITH CHECK requires `client_visible is true`
+               for anything firm_api appends, so a hidden opening is a 500 on PostgreSQL and
+               a silent internal row on SQLite. One dialect must not be the only one tested. */
+            status: 'complete', clientVisible: true,
+            createdByStaff: p.staffId ?? null,
+          });
+
+          /*
+            THE CHECK, INSIDE THE SAME TRANSACTION.
+
+            The dataset is loaded after the matter row exists, so the parties link to
+            a real matter and the client is reachable through it; `clientIdentityForMatter`
+            then resolves the identity the engine matches on, including the client's
+            linked party when the firm has recorded one.
+          */
+          if (body.runConflictCheck) {
+            const dataset = await c.firm.loadConflictDataset(p.tenantId, matterId);
+            const identity = await c.firm.clientIdentityForMatter(p.tenantId, body.clientId);
+            if (dataset.matter && identity) {
+              const result = evaluateConflicts({
+                matter: {
+                  id: matterId,
+                  matterNumber,
+                  caseNumber: body.caseNumber ?? null,
+                  clientId: body.clientId,
+                  clientIdentity: identity.identity,
+                  clientPartyId: identity.partyId,
+                },
+                parties: dataset.parties,
+                priorAppearances: dataset.priorAppearances,
+                clients: dataset.clients,
+                affiliations: dataset.affiliations,
+                clientMatters: dataset.clientMatters,
+              });
+              const checkId = newId();
+              await c.firm.recordConflictCheckWithHits({
+                id: checkId, tenantId: p.tenantId, matterId, kind: body.kind,
+                startedByMembershipId: p.membershipId,
+                partiesChecked: result.partiesChecked, mattersSearched: result.mattersSearched,
+                findings: result.findings,
+              });
+              conflictResult = {
+                checkId, hits: await c.firm.listConflictHits(p.tenantId, checkId),
+                warnings: result.warnings, partiesChecked: result.partiesChecked,
+                mattersSearched: result.mattersSearched,
+              };
+              status = result.findings.length ? 'conflict_check' : 'intake';
+
+              await c.audit.write({
+                action: 'CONFLICT_CHECK_RUN',
+                actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+                resourceType: 'matter', resourceId: matterId, outcome: 'success',
+                metadata: {
+                  membershipId: p.membershipId, checkId, kind: body.kind,
+                  partiesChecked: result.partiesChecked, mattersSearched: result.mattersSearched,
+                  hitsFound: result.findings.length, warnings: result.warnings,
+                  via: 'intake',
+                },
+              }, requestInfo(req, c.trustProxy));
+              for (const finding of result.findings) {
+                await c.audit.tryWrite({
+                  action: 'CONFLICT_HIT',
+                  actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+                  resourceType: 'matter', resourceId: matterId, outcome: 'success',
+                  reasonCode: finding.relation,
+                  metadata: {
+                    checkId, partyId: finding.partyId, matchedPartyId: finding.matchedPartyId,
+                    severity: finding.severity, matchStrength: finding.matchStrength,
+                    ruleCited: finding.ruleCited, via: 'intake',
+                  },
+                }, requestInfo(req, c.trustProxy));
+              }
+            }
+          }
+
+          /*
+            THE STATUS IS SET LAST, AND ONLY TO A NON-ACTIVE ONE.
+
+            `createMatter` writes the row in `intake`; when the check found something
+            the matter moves to `conflict_check` so the Rule 11 gate holds it there
+            until a human dispositions the findings. Writing it through the repository
+            (rather than in the insert) keeps ONE way a matter's status changes, which
+            is what makes the gate auditable: every transition is a call to
+            `setMatterStatus`, on this path and on the route that owns the lifecycle.
+          */
+          if (status !== 'intake') {
+            await c.firm.setMatterStatus({
+              tenantId: p.tenantId, matterId, internalStatus: status, conflictCleared: false,
+            });
+          }
+
+          await c.audit.write({
+            action: 'MATTER_CREATED',
+            actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+            resourceType: 'matter', resourceId: matterId, outcome: 'success',
+            metadata: {
+              membershipId: p.membershipId, matterNumber, clientId: body.clientId,
+              practiceArea, internalStatus: status, leadStaffId: lead?.staffId ?? null,
+              leadRole: lead ? body.leadRole : null, teamSize: extras.length + (lead ? 1 : 0),
+              openedWithConflictCheck: !!conflictResult.checkId,
+              conflictFindings: conflictResult.hits.length,
+            },
+          }, requestInfo(req, c.trustProxy));
+
+          if (lead) {
+            await c.audit.write({
+              action: 'MATTER_TEAM_ASSIGNED',
+              actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+              resourceType: 'matter', resourceId: matterId, outcome: 'success',
+              metadata: {
+                membershipId: p.membershipId, staffId: lead.staffId,
+                matterRole: body.leadRole, via: 'intake',
+              },
+            }, requestInfo(req, c.trustProxy));
+          }
+        });
+        break;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        const collided = /matter_number|duplicate key|unique/i.test(message)
+          && /matter_number|matters_tenant_id_matter_number/i.test(message);
+        if (!collided || attempt >= 5 || body.matterNumber) {
+          if (!collided) throw err;
+          throw conflict('matter_number_taken',
+            `could not allocate a matter number after ${attempt} attempts — supply one explicitly`);
+        }
+      }
+    }
+
+    ok(res, {
+      id: matterId, matterNumber, internalStatus: status, practiceArea,
+      client: { id: body.clientId, name: String(client.name) },
+      lead: lead ? { staffId: lead.staffId, name: lead.name, matterRole: body.leadRole } : null,
+      conflict: conflictResult,
+      next: {
+        matter: `/matters/${matterId}`,
+        // The two calls the next stage needs, named rather than described, so the
+        // screen after this one does not have to derive them.
+        status: `/api/firm/matters/${matterId}/status`,
+        report: `/api/firm/matters/${matterId}/report`,
+      },
+    }, 201);
+  }));
+
+  /** The case report as the matter header and the report form read it. */
+  r.get('/matters/:id/report', ah(async (req, res) => {
+    const p = principal(req);
+    const matterId = String(req.params.id);
+    c.permissions.assertCan(p, 'matters.read', { type: 'matter', id: matterId });
+    const { level } = await c.permissions.requireMatter(p, matterId, MATTER_READ);
+
+    const report = await c.firm.getMatterReport(p.tenantId, matterId);
+    if (!report) throw notFoundOrForbidden('matter', matterId);
+
+    const team = await c.firm.listMatterTeam(p.tenantId, matterId);
+    ok(res, {
+      report: {
+        id: report.id, matterNumber: report.matterNumber, caseNumber: report.caseNumber,
+        title: report.title, titleAr: report.titleAr,
+        practiceArea: report.practiceArea, practiceAreaAr: report.practiceAreaAr,
+        court: report.court, courtAr: report.courtAr,
+        summary: report.summary, summaryAr: report.summaryAr,
+        internalStatus: report.internalStatus, clientStatus: report.clientStatus,
+        openedAt: report.openedAt, lastClientUpdateAt: report.lastClientUpdateAt,
+        client: { id: report.clientId, name: report.clientName, nameAr: report.clientNameAr },
+      },
+      team,
+      /**
+        Whether this member may change any of it — the form's own gate, so an
+        operational or financial reader sees the report and no "Save" button rather
+        than a button that fails. `MATTER_WRITE` is the same list the PATCH below
+        enforces, which is what stops the two answers drifting.
+      */
+      mayUpdate: p.permissions.has('matters.update') && MATTER_WRITE.includes(level),
+    });
+  }));
+
+  /**
+   * UPDATE THE CASE REPORT.
+   *
+   * One route for the four things a report is made of — what the file is called, what
+   * the court calls it, what it is about, and what the CLIENT is told — because in
+   * practice a lawyer does all four in one sitting, and a form that posts them
+   * separately is a form that gets half-filled.
+   *
+   * `notifyClient` IS THE EFFICIENCY THAT MATTERS. When it is set (the default when a
+   * summary is supplied), the same transaction writes a `status_update` entry to the
+   * matter timeline and moves `last_client_update_at`. The client portal reads both, so
+   * "update the case report" and "tell the client" stop being two jobs — and the
+   * second one stops being forgotten, which is the complaint clients actually make.
+   * The timeline entry is client-visible: a summary written for the client and hidden
+   * from them would be worse than no summary.
+   *
+   * THE STATUS IS NOT HERE. `internal_status` moves through
+   * `POST /matters/:id/status`, where the conflict, CDD and enforcement gates live.
+   * A report form that could set `active` would be a second, unguarded door into the
+   * lifecycle.
+   */
+  r.patch('/matters/:id/report', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const matterId = String(req.params.id);
+    const body = strictBody(
+      z.object({
+        title: z.string().trim().min(2).max(300).optional(),
+        titleAr: z.string().trim().max(300).optional().nullable(),
+        caseNumber: z.string().trim().max(60).optional().nullable(),
+        practiceArea: z.string().trim().max(120).optional(),
+        practiceAreaAr: z.string().trim().max(120).optional().nullable(),
+        court: z.string().trim().max(200).optional().nullable(),
+        courtAr: z.string().trim().max(200).optional().nullable(),
+        summary: z.string().trim().max(4000).optional().nullable(),
+        summaryAr: z.string().trim().max(4000).optional().nullable(),
+        /** Client-facing progress note; written to the timeline when notifyClient. */
+        note: z.string().trim().max(2000).optional().nullable(),
+        noteAr: z.string().trim().max(2000).optional().nullable(),
+        notifyClient: z.boolean().optional(),
+      }).strict(),
+      req, c, '/api/firm/matters/:id/report',
+    );
+
+    c.permissions.assertCan(p, 'matters.update', { type: 'matter', id: matterId });
+    const { facts, level } = await c.permissions.requireMatter(p, matterId, MATTER_WRITE);
+
+    const existing = await c.firm.getMatterReport(p.tenantId, matterId);
+    if (!existing) throw notFoundOrForbidden('matter', matterId);
+
+    const patch: Parameters<typeof c.firm.updateMatterReport>[0]['patch'] = {};
+    for (const key of ['title', 'titleAr', 'caseNumber', 'court', 'courtAr',
+      'practiceArea', 'practiceAreaAr', 'summary', 'summaryAr'] as const) {
+      const value = body[key];
+      if (value !== undefined) patch[key] = value as never;
+    }
+
+    const tellsClient = body.summary !== undefined || body.summaryAr !== undefined;
+    const notifyClient = body.notifyClient ?? tellsClient;
+    const now = new Date().toISOString();
+
+    if (Object.keys(patch).length) {
+      const changed = await c.firm.updateMatterReport({
+        tenantId: p.tenantId, matterId, updatedAt: now, touchClient: notifyClient, patch,
+      });
+      if (!changed) throw notFoundOrForbidden('matter', matterId);
+    } else if (!body.note && !notifyClient) {
+      throw badRequest('nothing_to_update', 'no report fields were supplied');
+    }
+
+    /*
+      THE NOTE REACHES THE TIMELINE ONLY WHEN THE CLIENT IS TOLD. `client_visible` is fixed
+      at true for firm appends (0048), so a note written while `notifyClient` is false has no
+      legal home in this table — it is the firm talking to itself, which is what the audit
+      row and `internal_notes` are for. Writing it anyway produced a 500 on PostgreSQL.
+    */
+    if ((body.note || body.noteAr) && notifyClient) {
+      await c.firm.addTimelineEntry({
+        tenantId: p.tenantId, matterId, clientId: String(existing.clientId ?? ''),
+        eventType: 'status_update', occurredAt: now,
+        title: (body.note ?? body.noteAr ?? '').slice(0, 120),
+        titleAr: (body.noteAr ?? body.note ?? '').slice(0, 120),
+        description: body.note ?? null, descriptionAr: body.noteAr ?? null,
+        status: 'complete', clientVisible: true,
+        createdByStaff: p.staffId ?? null,
+      });
+    }
+
+    await c.audit.write({
+      action: 'MATTER_REPORT_UPDATED',
+      actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+      resourceType: 'matter', resourceId: matterId, outcome: 'success',
+      metadata: {
+        membershipId: p.membershipId,
+        // Field NAMES, never values: the summary is the client's confidential
+        // business and an audit search returns rows in bulk.
+        fields: Object.keys(patch).sort(),
+        notifiedClient: notifyClient, noteAdded: !!body.note || !!body.noteAr,
+        restricted: facts.isRestricted, accessLevel: level,
+      },
+    }, requestInfo(req, c.trustProxy));
+
+    ok(res, { id: matterId, updatedAt: now, notifiedClient: notifyClient,
+      fields: Object.keys(patch).sort() });
+  }));
+
+  /**
+   * ASSIGN THE CASE TO A LAWYER.
+   *
+   * `matters.assign` plus full access on the file: deciding who can read a matter is
+   * a decision about the matter's confidentiality, so it may not be made by somebody
+   * who merely has it open.
+   *
+   * TWO RULES ARE APPLIED HERE THAT THE DATABASE ALSO HOLDS, because the refusal has
+   * to be readable and `matter_team` has no way to explain itself:
+   *
+   *   §11 · THE HIDDEN ROLES. A finance or compliance contact is on the file and is
+   *   NOT shown to the client. When one is assigned, `clientVisible` is forced false
+   *   rather than refused — the caller's intent to display the firm's AML officer is
+   *   not a legitimate request to deny, and the constraint in 0058 would refuse the
+   *   write anyway. The response says it was forced, so nothing is silent.
+   *
+   *   ONE LEAD PER ROLE. A file with two lead partners has two people who each believe
+   *   they answer for it, which is how a deadline is missed by both. `replaceLead`
+   *   makes taking over one step rather than two, and the transaction deactivates the
+   *   incumbent so the index in 0058 is never even tested by a losing race.
+   */
+  r.post('/matters/:id/team', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const matterId = String(req.params.id);
+    const body = strictBody(
+      z.object({
+        staffId: z.string().uuid(),
+        matterRole: z.enum(MATTER_TEAM_ROLES),
+        clientVisible: z.boolean().optional(),
+        clientRoleLabel: z.string().trim().max(80).optional().nullable(),
+        clientRoleLabelAr: z.string().trim().max(80).optional().nullable(),
+        /** Take the role over from the incumbent rather than being refused. */
+        replaceLead: z.boolean().default(false),
+      }).strict(),
+      req, c, '/api/firm/matters/:id/team',
+    );
+
+    c.permissions.assertCan(p, 'matters.assign', { type: 'matter', id: matterId });
+    const { facts } = await c.permissions.requireMatter(p, matterId, MATTER_MANAGE);
+
+    const matter = await c.firm.getMatterReport(p.tenantId, matterId);
+    if (!matter) throw notFoundOrForbidden('matter', matterId);
+
+    const staff = await c.firm.getActiveStaffMember(p.tenantId, body.staffId);
+    if (!staff) throw notFoundOrForbidden('staff', body.staffId);
+
+    const hidden = HIDDEN_MATTER_ROLES.includes(body.matterRole);
+    const clientVisible = hidden ? false : (body.clientVisible ?? true);
+    const isLead = body.matterRole === 'lead_partner' || body.matterRole === 'lead_lawyer';
+
+    const incumbent = isLead
+      ? await c.firm.activeLeadFor(matterId, body.matterRole) : null;
+    if (incumbent && incumbent.staffId !== body.staffId && !body.replaceLead) {
+      throw conflict('matter_has_lead',
+        `${incumbent.name} is already the ${MATTER_TEAM_LABELS[body.matterRole].en} on this file —`
+        + ' reassign with replaceLead, or deactivate them first',
+        { incumbent });
+    }
+
+    const now = new Date().toISOString();
+    let replaced = false;
+    let created = false;
+    await c.firm.tx(async () => {
+      if (incumbent && incumbent.staffId !== body.staffId) {
+        await c.firm.deactivateMatterTeamMember({
+          tenantId: p.tenantId, matterId, staffId: incumbent.staffId,
+        });
+        replaced = true;
+        await c.audit.write({
+          action: 'MATTER_TEAM_UNASSIGNED',
+          actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+          resourceType: 'matter', resourceId: matterId, outcome: 'success',
+          reasonCode: 'replaced',
+          metadata: {
+            membershipId: p.membershipId, staffId: incumbent.staffId,
+            matterRole: body.matterRole, replacedBy: staff.staffId,
+          },
+        }, requestInfo(req, c.trustProxy));
+      }
+
+      const assigned = await c.firm.assignMatterTeamMember({
+        id: newId(), tenantId: p.tenantId, matterId, staffId: staff.staffId,
+        matterRole: body.matterRole, clientVisible,
+        clientRoleLabel: body.clientRoleLabel ?? MATTER_TEAM_LABELS[body.matterRole].en,
+        clientRoleLabelAr: body.clientRoleLabelAr ?? MATTER_TEAM_LABELS[body.matterRole].ar,
+      });
+      created = assigned.created;
+
+      /*
+        THE ASSIGNMENT IS NOT A TIMELINE ENTRY, AND THAT IS A DECISION, NOT AN OMISSION.
+
+        This used to write an internal `note` row saying who had been assigned. On SQLite
+        that looked like good practice; on PostgreSQL every assignment returned 500, because
+        0048's `firm_timeline_append` requires `client_visible is true`: the client's
+        chronology is the CLIENT's, and the firm may not write history into it that the
+        client's own session will never render.
+
+        So the fact goes where the platform already keeps it:
+
+          · `matter_team.client_visible` is the client-facing answer to "who runs my case",
+            and the portal projects it — one fact, one place it becomes visible;
+          · the audit row below is the firm's internal record of who changed what, when, and
+            whether the previous holder had to be replaced;
+          · `internal_notes` is where an internal narrative belongs, and it is ring-governed.
+
+        A hidden timeline row would be a fourth copy in the wrong drawer.
+      */
+
+      await c.audit.write({
+        action: 'MATTER_TEAM_ASSIGNED',
+        actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+        resourceType: 'matter', resourceId: matterId, outcome: 'success',
+        metadata: {
+          membershipId: p.membershipId, staffId: staff.staffId, matterRole: body.matterRole,
+          created, clientVisible, clientVisibleForced: hidden && body.clientVisible !== false,
+          replaced, restricted: facts.isRestricted,
+        },
+      }, requestInfo(req, c.trustProxy));
+    });
+
+    const team = await c.firm.listMatterTeam(p.tenantId, matterId);
+    ok(res, {
+      id: matterId, staffId: staff.staffId, matterRole: body.matterRole,
+      clientVisible, clientVisibleForced: hidden && body.clientVisible !== false,
+      created, replaced, team,
+    }, 201);
+  }));
+
+  /**
+   * TAKE SOMEBODY OFF A FILE.
+   *
+   * A deactivation, never a delete: the record of who worked a matter, and when, is
+   * the firm's answer to a disqualification motion, and `matter_team`'s row is the
+   * only place it exists. The audit row carries the reason code the register shows.
+   */
+  r.patch('/matters/:id/team/:staffId', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const matterId = String(req.params.id);
+    const staffId = String(req.params.staffId);
+    const body = strictBody(
+      z.object({ reason: z.string().trim().max(300).optional().nullable() }).strict(),
+      req, c, '/api/firm/matters/:id/team/:staffId',
+    );
+
+    c.permissions.assertCan(p, 'matters.assign', { type: 'matter', id: matterId });
+    await c.permissions.requireMatter(p, matterId, MATTER_MANAGE);
+    const matter = await c.firm.getMatterReport(p.tenantId, matterId);
+    if (!matter) throw notFoundOrForbidden('matter', matterId);
+
+    const team = await c.firm.listMatterTeam(p.tenantId, matterId);
+    const member = team.find((m) => m.staffId === staffId);
+    if (!member) throw notFoundOrForbidden('matter_team_member', staffId);
+
+    const changed = await c.firm.deactivateMatterTeamMember({
+      tenantId: p.tenantId, matterId, staffId,
+    });
+    await c.audit.write({
+      action: 'MATTER_TEAM_UNASSIGNED',
+      actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+      resourceType: 'matter', resourceId: matterId, outcome: 'success',
+      reasonCode: body.reason ?? 'removed',
+      metadata: {
+        membershipId: p.membershipId, staffId, matterRole: member.matterRole, changed,
+      },
+    }, requestInfo(req, c.trustProxy));
+
+    const remaining = await c.firm.listMatterTeam(p.tenantId, matterId);
+    ok(res, { id: matterId, staffId, active: false, changed, team: remaining });
   }));
 
   /**
@@ -614,12 +1607,31 @@ export function firmRouter(c: Container): Router {
     await c.permissions.requireMatter(p, matterId, MATTER_READ);
     const team = await c.firm.listMatterTeam(p.tenantId, matterId);
     const { level } = await c.permissions.requireMatter(p, matterId, MATTER_READ);
+
+    /*
+      WHO THIS MEMBER MAY PUT ON THE FILE, AND ONLY WHEN THEY MAY.
+
+      The assignment control lives on this tab, and a control that fetches its own
+      options in a second request can show a picker populated from a different
+      authority than the one that will refuse the write — so the options travel with
+      the team. They are withheld entirely from a member without `matters.assign`:
+      an empty picker would invite the attempt this refuses.
+    */
+    const mayAssign = p.permissions.has('matters.assign') && level === 'full';
+    const assignable = mayAssign ? await c.firm.listAssignableStaff(p.tenantId) : [];
+
     ok(res, {
       matterId,
       count: team.length,
       /* The viewer's own level, so the tab can say which of these rows is them and
          why their name may or may not appear. */
       yourAccessLevel: level,
+      mayAssign,
+      assignable: assignable.map((s) => ({
+        staffId: s.staffId, name: s.name, nameAr: s.nameAr, role: s.internalRole,
+        jobTitle: s.jobTitle, jobTitleAr: s.jobTitleAr, activeMatters: s.activeMatters,
+        onThisMatter: team.some((m) => m.staffId === s.staffId),
+      })),
       team,
     });
   }));

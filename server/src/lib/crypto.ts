@@ -334,6 +334,22 @@ export function maskNationalId(value: string | null | undefined): string | null 
   return `${'*'.repeat(Math.max(digits.length - 4, 4))}${digits.slice(-4)}`;
 }
 
+/**
+ * A commercial registration, kept for identification and not for transcription.
+ *
+ * Separate from `maskNationalId` because a CR is not a number: it can carry
+ * letters, and stripping non-digits from it (as the national-id masker does) would
+ * return a mask with nothing behind it. The last three characters are kept and the
+ * rest is masked — the same convention the client register already shows.
+ */
+export function maskRegistration(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const v = String(value).trim();
+  if (!v) return null;
+  if (v.length <= 3) return '***';
+  return `${'*'.repeat(Math.max(v.length - 3, 3))}${v.slice(-3)}`;
+}
+
 export function maskEmail(email: string | null | undefined): string | null {
   if (!email) return null;
   const [local, domain] = email.split('@');

@@ -24,7 +24,7 @@
  */
 import { useEffect, useMemo, useState } from 'react';
 import {
-  AccessBadge, Badge, Button, EmptyState, IconFilter, IconRefresh, IconRestricted,
+  AccessBadge, Badge, Button, EmptyState, IconFilter, IconPlus, IconRefresh, IconRestricted,
   PageSkeleton, StatusChip, Table, TextField, useFmt, useI18n,
   type Column, type SortState,
 } from '@kgm/ui';
@@ -207,9 +207,18 @@ export function Matters({ onNavigate }: MattersProps) {
           <Button variant="ghost" size="sm" icon={<IconRefresh size={15} />} onClick={load} disabled={loading}>
             {t('common.refresh')}
           </Button>
+          {/*
+            ADD THE CASE. The button used to navigate to `/matters?new=1`, a query the
+            matters screen never read — so the primary action on the firm's most-used
+            screen did nothing at all. It now opens the intake screen, which is the
+            only place a matter is created.
+          */}
           {can('matters.create') && (
-            <Button variant="primary" size="sm" onClick={() => onNavigate('/matters?new=1')}>
-              {t('nav.matters')}
+            <Button
+              variant="primary" size="sm" icon={<IconPlus size={15} />}
+              onClick={() => onNavigate('/matters/new')}
+            >
+              {t('matter.new')}
             </Button>
           )}
         </div>

@@ -187,7 +187,26 @@ export type ErrorCode =
   | 'expense_wrong_client'
   | 'entry_already_billed'
   | 'ceiling_actor_unknown'
+  /*
+    ── TASK 25 · INTAKE ─────────────────────────────────────────────────────────
+
+    Three of these are the duplicate-name question and the allocation of a matter
+    number, and they follow the rule the codes above follow: a refusal names the
+    obstacle. `client_name_exists` in particular is not a rejection — it carries the
+    clients the firm already holds under that name, because "we already have someone
+    called that" and "you are about to create the second half of a conflict search"
+    are the same sentence and only one of them is useful.
+  */
+  /** The firm already holds a client under this name; confirm or reconcile. */
+  | 'client_name_exists'
+  /** The name has no characters left after normalisation, so nothing can search on it. */
+  | 'name_unusable'
+  /** The matter number is already on the register, or could not be allocated. */
+  | 'matter_number_taken'
+  /** One active holder per lead role — the index in 0058 says so. */
+  | 'matter_has_lead'
   // validation
+  | 'nothing_to_update'
   | 'validation_failed'
   | 'upload_too_large'
   | 'upload_type_not_allowed'
@@ -293,7 +312,8 @@ export const notFoundOrForbidden = (what = 'resource', id?: string | null) =>
     resource: { type: what, id: id ?? null },
   });
 
-export const conflict = (code: ErrorCode, msg: string) => new PortalError(409, code, msg);
+export const conflict = (code: ErrorCode, msg: string, details?: Record<string, unknown>) =>
+  new PortalError(409, code, msg, { details });
 
 export const tooMany = (retryAfterSeconds: number) =>
   new PortalError(429, 'rate_limited', 'too many requests', {

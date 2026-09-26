@@ -26,8 +26,8 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Badge, Card, CardBody, CardHeader, EmptyState, IconLock,
-  Skeleton, StatusChip, Table, useFmt, useI18n,
+  Badge, Button, Card, CardBody, CardHeader, Checkbox, EmptyState, IconLock,
+  SelectField, Skeleton, StatusChip, Table, useFmt, useI18n, useToast,
   type Column,
 } from '@kgm/ui';
 import { firmApi, FirmApiError, type MatterDeadlineRow, type MatterDocumentRow, type MatterHearingRow, type MatterTimelineRow, type MatterTeamRow } from '../../api/firm.js';
@@ -191,9 +191,76 @@ export function MatterTimelinePanel({ matterId }: { matterId: string }) {
 
 /* ------------------------------------------------------------------- team -- */
 
+/**
+ * THE TEAM — who answers for the file, and the one control that changes it.
+ *
+ * WHY THE ASSIGNMENT IS HERE AND NOT IN A SETTINGS SCREEN. Assigning a matter is the
+ * second stage of intake and it happens while somebody is looking at the file: the
+ * partner reads the team, sees nobody carrying it, and puts a name on it. A control
+ * one screen away is a control that gets skipped, and a matter with no lead is the
+ * defect this whole phase is about.
+ *
+ * THE PICKER IS FED BY THE SAME RESPONSE AS THE LIST. `assignable` arrives with the
+ * team, resolved by the server at the same access level that will accept the write —
+ * so the options a member sees and the assignments they may make cannot disagree.
+ * When the member may not assign, the control is absent and `mayAssign` is false.
+ *
+ * `replaceLead` IS SHOWN, NOT HIDDEN. The database holds one active lead per role
+ * (0058). Rather than let a member discover that as a refusal, the box appears exactly
+ * when it applies — a lead role already held by somebody else — and taking the file
+ * over is then one action instead of two.
+ */
+/** 0002's CHECK, in order. A seventh name here would be refused by the database. */
+const MATTER_ROLE_CODES = [
+  'lead_lawyer', 'lead_partner', 'associate', 'paralegal',
+  'finance_contact', 'compliance_contact',
+] as const;
+
 export function MatterTeamPanel({ matterId }: { matterId: string }) {
   const { t, pick } = useI18n();
+  const toast = useToast();
   const state = usePanel(matterId, () => firmApi.matterTeam(matterId));
+  const [staffId, setStaffId] = useState('');
+  const [matterRole, setMatterRole] = useState('associate');
+  const [replaceLead, setReplaceLead] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const isLead = matterRole === 'lead_partner' || matterRole === 'lead_lawyer';
+
+  async function assign(incumbent: { staffId: string; name: string } | null) {
+    if (!staffId) return;
+    setBusy(true);
+    try {
+      const out = await firmApi.assignMatterMember(matterId, {
+        staffId, matterRole, replaceLead: replaceLead || (!!incumbent && isLead),
+      });
+      toast.success(
+        t('panel.assign.done'),
+        out.clientVisibleForced ? t('matter.hiddenRole') : undefined,
+      );
+      setStaffId('');
+      setReplaceLead(false);
+      state.reload();
+    } catch (err) {
+      const e = err as FirmApiError;
+      toast.error(t('panel.assign.failed'), e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(member: MatterTeamRow) {
+    setBusy(true);
+    try {
+      await firmApi.removeMatterMember(matterId, member.staffId, 'removed');
+      toast.success(t('panel.remove.done'), pick(member.nameAr, member.name));
+      state.reload();
+    } catch (err) {
+      toast.error(t('panel.remove.failed'), (err as FirmApiError).message);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
     <PanelFrame
@@ -202,34 +269,99 @@ export function MatterTeamPanel({ matterId }: { matterId: string }) {
       emptyTitle={t('panel.team.empty')}
       isEmpty={(d) => d.team.length === 0}
     >
-      {(d) => (
-        <ul className="firm-teamlists">
-          {d.team.map((m: MatterTeamRow) => (
-            <li className="firm-teammember" key={m.id}>
-              <span className="firm-teammember__avatar" aria-hidden="true">
-                {initials(pick(m.nameAr, m.name))}
-              </span>
-              <span className="firm-teammember__main">
-                <span className="firm-teammember__name">{pick(m.nameAr, m.name)}</span>
-                <span className="firm-teammember__meta">
-                  {m.matterRole.replace(/_/g, ' ')}
-                  {m.barNumber ? ` · ${t('panel.bar')} ${m.barNumber}` : ''}
-                </span>
-              </span>
-              <span className="firm-teammember__tags">
-                {/*
-                  The client-facing label is shown beside the internal role because
-                  the two are different columns on purpose: what the firm calls a
-                  person and what the client is told are not the same sentence.
-                */}
-                {m.clientVisible && m.clientRoleLabel && (
-                  <Badge tone="neutral" size="xs">{pick(m.clientRoleLabelAr, m.clientRoleLabel)}</Badge>
+      {(d) => {
+        const options = d.assignable.filter((s) => !s.onThisMatter);
+        const incumbent = isLead
+          ? d.team.find((m) => m.matterRole === matterRole) ?? null
+          : null;
+
+        return (
+          <>
+            <ul className="firm-teamlists">
+              {d.team.map((m: MatterTeamRow) => (
+                <li className="firm-teammember" key={m.id}>
+                  <span className="firm-teammember__avatar" aria-hidden="true">
+                    {initials(pick(m.nameAr, m.name))}
+                  </span>
+                  <span className="firm-teammember__main">
+                    <span className="firm-teammember__name">{pick(m.nameAr, m.name)}</span>
+                    <span className="firm-teammember__meta">
+                      {t(`role.matterRole.${m.matterRole}` as never)}
+                      {m.barNumber ? ` · ${t('panel.bar')} ${m.barNumber}` : ''}
+                    </span>
+                  </span>
+                  <span className="firm-teammember__tags">
+                    {/*
+                      The client-facing label is shown beside the internal role because
+                      the two are different columns on purpose: what the firm calls a
+                      person and what the client is told are not the same sentence.
+                    */}
+                    {m.clientVisible && m.clientRoleLabel && (
+                      <Badge tone="neutral" size="xs">{pick(m.clientRoleLabelAr, m.clientRoleLabel)}</Badge>
+                    )}
+                    {!m.clientVisible && (
+                      <Badge tone="gold" size="xs">{t('matter.hiddenRole.badge')}</Badge>
+                    )}
+                    {d.mayAssign && (
+                      <Button
+                        variant="ghost" size="xs" disabled={busy}
+                        onClick={() => void remove(m)}
+                      >
+                        {t('panel.remove')}
+                      </Button>
+                    )}
+                  </span>
+                </li>
+              ))}
+            </ul>
+
+            {d.mayAssign && (
+              <div className="firm-assign">
+                <h3 className="firm-panel__subhead">{t('panel.assign')}</h3>
+                <div className="firm-formgrid">
+                  <SelectField
+                    label={t('panel.assign.who')}
+                    value={staffId}
+                    onChange={(e) => setStaffId(e.target.value)}
+                    placeholder={t('intake.lead.none')}
+                    options={options.map((s) => ({
+                      value: s.staffId,
+                      label: `${pick(s.nameAr, s.name)} · ${pick(s.jobTitleAr, s.jobTitle) || s.role}`
+                        + (s.activeMatters ? ` (${t('intake.lead.load', { n: String(s.activeMatters) })})` : ''),
+                    }))}
+                  />
+                  <SelectField
+                    label={t('panel.assign.role')}
+                    value={matterRole}
+                    onChange={(e) => { setMatterRole(e.target.value); setReplaceLead(false); }}
+                    options={MATTER_ROLE_CODES.map((r) => ({
+                      value: r,
+                      label: t(`role.matterRole.${r}` as never),
+                    }))}
+                  />
+                </div>
+
+                {incumbent && incumbent.staffId !== staffId && (
+                  <Checkbox
+                    label={t('panel.assign.replace', { name: pick(incumbent.nameAr, incumbent.name) })}
+                    hint={t('panel.assign.replace.hint')}
+                    checked={replaceLead}
+                    onChange={(e) => setReplaceLead(e.target.checked)}
+                  />
                 )}
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
+
+                <Button
+                  variant="primary" size="sm"
+                  disabled={busy || !staffId || (!!incumbent && incumbent.staffId !== staffId && !replaceLead)}
+                  onClick={() => void assign(incumbent)}
+                >
+                  {busy ? t('common.saving') : t('panel.assign.submit')}
+                </Button>
+              </div>
+            )}
+          </>
+        );
+      }}
     </PanelFrame>
   );
 }

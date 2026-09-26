@@ -44,6 +44,7 @@ import { Clients } from './pages/Clients.js';
 import { Matters } from './pages/Matters.js';
 import { MyWork } from './pages/MyWork.js';
 import { MatterWorkspace } from './pages/MatterWorkspace.js';
+import { Intake } from './pages/Intake.js';
 import './shell/shell.css';
 
 /** Sentinel the More sheet uses to request a sign-out through the shell. */
@@ -148,7 +149,7 @@ function Shell() {
         ) : guard.kind === 'unknown' ? (
           <Denied onNavigate={onNavigate} unknown />
         ) : (
-          <Routed basePath={route.basePath} onNavigate={onNavigate} />
+          <Routed basePath={route.basePath} query={route.query} onNavigate={onNavigate} />
         )}
       </main>
 
@@ -171,7 +172,27 @@ function Shell() {
  * module count grows past a dozen this is the piece to replace — and it is the
  * only piece, because the guard and the nav are already separate from it.
  */
-function Routed({ basePath, onNavigate }: { basePath: string; onNavigate: (to: string) => void }) {
+function Routed({ basePath, query, onNavigate }: {
+  basePath: string;
+  query: URLSearchParams;
+  onNavigate: (to: string) => void;
+}) {
+  /*
+    INTAKE IS MATCHED BEFORE THE MATTER DETAIL ROUTE. `/matters/new` is a path a
+    reader would expect to be the matter whose id is "new", and a workspace that
+    tried to load it would answer 404 about a file that was never created. The
+    explicit match is what makes the route unambiguous.
+  */
+  if (basePath === '/matters/new' || basePath === '/clients/new') {
+    return (
+      <Intake
+        mode={basePath === '/clients/new' ? 'client' : 'matter'}
+        initialClientId={query.get('client')}
+        onNavigate={onNavigate}
+      />
+    );
+  }
+
   const matterMatch = basePath.match(/^\/matters\/([^/]+)$/);
   if (matterMatch) {
     return <MatterWorkspace matterId={decodeURIComponent(matterMatch[1])} onNavigate={onNavigate} />;

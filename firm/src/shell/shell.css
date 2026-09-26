@@ -2378,3 +2378,308 @@
 /* Tables inside a panel keep their own rounded shell so a scrolling body does
    not look like it has escaped the card. */
 .firm-panel .kgm-tablewrap { border-radius: var(--radius-md); }
+
+/* ==========================================================================
+   TASK 25 · INTAKE · ASSIGNMENT · THE CASE REPORT
+   ==========================================================================
+   The classes below are the ones the intake one-pager, the team panel's assign
+   block and the report editor render. They were written before the styles, so
+   every one of them was a block of unstyled boxes — which is why this section
+   is exhaustive rather than aspirational: if a class is in the JSX, it is here.
+
+   Two rules hold throughout:
+
+     · TOKENS ONLY. No literal colour, radius or duration appears below. The
+       dark premium theme and the light theme are one set of semantic names
+       (`--surface-1`, `--text-hi`, `--line-soft`, `--accent`), so a screen
+       written once is correct in both, and the next theme arrives for free.
+
+     · LOGICAL PROPERTIES ONLY. `margin-inline-end`, never `margin-right`. The
+       firm OS runs in Arabic and English from the same bundle, and a single
+       physical property is a hole that only shows up in the other direction.
+   ========================================================================== */
+
+/* ---- the numbered step in a card heading ---- */
+
+/* A step number is wayfinding, not decoration: it says "this is one of three"
+   where the eye arrives. Filled with the accent rather than the gold, because
+   gold in this system marks what is not the primary action. */
+.firm-steps__n {
+  display: inline-grid;
+  place-items: center;
+  inline-size: 1.5rem;
+  block-size: 1.5rem;
+  margin-inline-end: var(--sp-2);
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: var(--fs-caption);
+  font-weight: var(--fw-semibold);
+  line-height: 1;
+  vertical-align: middle;
+}
+
+/* ---- the field grid the forms are laid out with ---- */
+
+/* `auto-fit` with a 220px floor rather than a fixed two-column grid: at 320px a
+   two-column grid gives each field 150px and the labels wrap mid-word, and on a
+   wide desktop two columns stretch a text input to a line length nobody reads. */
+.firm-formgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--sp-4);
+  align-items: start;
+  min-inline-size: 0;
+}
+/* A grid item that should use the whole row — a checkbox under a row of inputs,
+   or a hint that belongs to the grid rather than to one field. */
+.firm-formgrid__wide { grid-column: 1 / -1; }
+
+/* ---- stage 1 · the client ---- */
+
+.firm-intake__chosen {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  padding: var(--sp-3);
+  border: 1px solid var(--border-brand);
+  border-radius: var(--radius-md);
+  background: var(--accent-soft);
+}
+.firm-intake__chosen-main {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: 1 1 12rem;
+  min-inline-size: 0;
+}
+.firm-intake__chosen-main svg { flex: none; color: var(--text-brand); }
+.firm-intake__chosen-name {
+  font-weight: var(--fw-semibold);
+  color: var(--text-hi);
+  overflow-wrap: anywhere;
+}
+
+/* The register as a list of buttons: one target per client, keyboard-reachable
+   by tab, and bounded in height so a firm with 300 clients scrolls a list
+   instead of pushing the rest of the form below the fold. */
+.firm-intake__clients {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-block-size: 16rem;
+  overflow-y: auto;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+}
+.firm-intake__client {
+  display: block;
+  inline-size: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-hi);
+  text-align: start;
+  font: inherit;
+  font-size: var(--fs-body-sm);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+.firm-intake__client:hover { background: var(--hover-surface); }
+.firm-intake__client:focus-visible { outline: 2px solid var(--focus-ring-color); outline-offset: -2px; }
+.firm-intake__client-name { overflow-wrap: anywhere; }
+
+/* The "new client" block sits in the same column as the register, separated by
+   the border rather than by a heading nobody reads. */
+.firm-intake__newsclient {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  margin-block-start: var(--sp-3);
+  padding-block-start: var(--sp-4);
+  border-block-start: 1px solid var(--line-soft);
+}
+
+/* A duplicate name is a question, and questions in this system are GOLD — the
+   same accent the conflict notice uses, because it is the same kind of fact:
+   something the firm should look at before it becomes a matter of record. */
+.firm-intake__matches {
+  list-style: none;
+  margin: var(--sp-2) 0 0;
+  padding: var(--sp-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  border: 1px solid var(--border-gold);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+}
+.firm-intake__match {
+  padding: var(--sp-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-hi);
+  text-align: start;
+  font: inherit;
+  font-size: var(--fs-body-sm);
+  cursor: pointer;
+}
+.firm-intake__match:hover { background: var(--hover-surface); }
+.firm-intake__match:focus-visible { outline: 2px solid var(--focus-ring-color); outline-offset: -2px; }
+
+/* The row of actions under the register ("I checked — create it anyway"). */
+.firm-intake__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-block-start: var(--sp-3);
+}
+
+/* ---- stage 3 · the team ---- */
+
+.firm-intake__team {
+  list-style: none;
+  margin: var(--sp-3) 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+.firm-intake__team > li {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-full);
+  background: var(--surface-1);
+  font-size: var(--fs-body-sm);
+  color: var(--text-hi);
+}
+
+/* Adding a member is an inline row rather than a modal: the choice is two
+   values deep, and a dialog for two values is a context switch. */
+.firm-intake__addmember {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto;
+  align-items: end;
+  gap: var(--sp-2);
+  margin-block-start: var(--sp-3);
+}
+@media (max-width: 599px) {
+  .firm-intake__addmember { grid-template-columns: minmax(0, 1fr); }
+}
+.firm-intake__rolepick {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  font-size: var(--fs-caption);
+  color: var(--text-dim);
+}
+
+/* ---- the submit line ---- */
+
+/* Sticky at the foot of the content column while the form scrolls: on a phone
+   the create button is otherwise six fields below the last thing read. */
+.firm-intake__submit {
+  position: sticky;
+  inset-block-end: 0;
+  z-index: var(--z-base);
+  margin-block-start: var(--sp-4);
+  padding-block: var(--sp-3);
+  border-block-start: 1px solid var(--line-soft);
+  background: var(--surface-2);
+  backdrop-filter: blur(var(--blur-bar));
+}
+.firm-intake__submitline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+/* ---- the receipt ---- */
+
+/* What the firm gets back when the file exists: the number first, because the
+   number is the thing that will be said out loud on the phone. */
+.firm-intake__receipt { display: flex; flex-direction: column; gap: var(--sp-4); }
+.firm-receipt__number {
+  font-family: var(--font-mono);
+  font-size: var(--fs-h2);
+  font-weight: var(--fw-semibold);
+  letter-spacing: var(--tracking-label);
+  color: var(--text-gold);
+  margin-block-end: var(--sp-3);
+  overflow-wrap: anywhere;
+}
+.firm-intake__next {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-block-start: var(--sp-2);
+}
+
+/* ---- the assign block inside the team panel ---- */
+
+/* A bordered block, not another card: it lives inside a card already, and a card
+   inside a card is how a panel starts to look like a page. */
+.firm-assign {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  margin-block-start: var(--sp-4);
+  padding: var(--sp-4);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+}
+.firm-assign > .firm-panel__subhead { margin: 0; }
+
+/* ---- the case report editor ---- */
+
+.firm-report { margin-block-end: var(--sp-4); }
+.firm-report__last {
+  color: var(--text-dim);
+  font-size: var(--fs-caption);
+  white-space: nowrap;
+}
+.firm-report__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-block-start: var(--sp-3);
+  padding-block-start: var(--sp-3);
+  border-block-start: 1px solid var(--line-soft);
+}
+
+/* ---- clients with no file yet (task 25) ---- */
+
+.firm-unfiled { margin-block-start: var(--sp-4); }
+.firm-unfiled__list { margin: 0; }
+.firm-unfiled__list > li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-2) 0;
+  border-block-end: 1px solid var(--line-soft);
+}
+.firm-unfiled__list > li:last-child { border-block-end: 0; }
+.firm-unfiled__name { display: flex; align-items: baseline; gap: var(--sp-2); color: var(--text-hi); font-size: var(--fs-body-sm); overflow-wrap: anywhere; }
+.firm-unfiled__city { color: var(--text-dim); font-size: var(--fs-caption); }
+
+/* ---- two classes older screens used before they were styled ---- */
+
+/* The deadline list, which was rendering as a bulleted list of rows. */
+.firm-deadlines { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
+/* The em-dash an empty cell shows. Fainter than muted text: it is an absence, not a value. */
+.firm-muted { color: var(--text-faint); }

@@ -56,6 +56,33 @@ export type AuditAction =
     carries the affected party — because the obligation is owed to that party, and
     the regulator's question is whether THEY consented, not whether consent exists.
   */
+  /*
+    ── TASK 25 · INTAKE ────────────────────────────────────────────────────────
+
+    The four stages the firm runs on its first meeting with a client, and the six
+    actions that make them reviewable. Each one answers a different question, and the
+    questions are asked in this order after something goes wrong:
+
+      CLIENT_CREATED     — who admitted this client to the register, and under what
+                           name did the conflict engine learn to find them
+      CLIENT_UPDATED     — the record changed; WHICH FIELDS, never their values
+      MATTER_CREATED     — the file exists. Carries the number, the client, the
+                           practice area and whether a conflict check ran with it
+      MATTER_TEAM_ASSIGNED   — who is answerable for the file, from when
+      MATTER_TEAM_UNASSIGNED — and who no longer is. The pair is the answer to a
+                           disqualification motion, and neither half alone is
+      MATTER_REPORT_UPDATED  — the case report changed, and whether the CLIENT was
+                           told. `notifiedClient` is the field that makes "the client
+                           was never informed" a recorded fact rather than an
+                           accusation
+
+    THEY ARE NOT ONE `MATTER_INTAKE_COMPLETED` ACTION. A single row for the act of
+    opening a file cannot say which of the four stages was skipped, and the stage that
+    gets skipped is the whole question.
+  */
+  | 'CLIENT_CREATED' | 'CLIENT_UPDATED'
+  | 'MATTER_CREATED' | 'MATTER_REPORT_UPDATED'
+  | 'MATTER_TEAM_ASSIGNED' | 'MATTER_TEAM_UNASSIGNED'
   | 'PARTY_CREATED' | 'PARTY_UPDATED' | 'PARTY_MERGED' | 'PARTY_ALIAS_ADDED'
   | 'PARTY_AFFILIATION_RECORDED' | 'MATTER_PARTY_ADDED' | 'MATTER_PARTY_UPDATED'
   | 'MATTER_STATUS_CHANGED'

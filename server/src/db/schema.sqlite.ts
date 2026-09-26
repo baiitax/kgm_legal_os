@@ -249,8 +249,18 @@ create table if not exists matters (
   practice_area_ar text not null,
   court text,
   court_ar text,
-  internal_status text not null default 'intake',
-  client_status text not null default 'opened',
+  /* THE TWO STATUS COLUMNS ARE CHECKED HERE BECAUSE POSTGRES CHECKS THEM.
+     The live database has matters_internal_status_check and matters_client_status_check,
+     and their absence here is how createMatter came to write 'active' — an
+     internal_status value — into client_status. Twenty-three SQLite tests passed and
+     every POST /matters returned 500 on the real database. A mirror that cannot
+     reject what the original rejects is not a mirror. */
+  internal_status text not null default 'intake'
+    check (internal_status in ('intake','conflict_check','restricted','internal_review',
+                               'partner_review','active','on_hold','judgment','execution',
+                               'closed','archived')),
+  client_status text not null default 'opened'
+    check (client_status in ('opened','under_review','hearings','judgment','execution','closed')),
   summary text,
   summary_ar text,
   opened_at text not null,
@@ -270,7 +280,9 @@ create table if not exists matter_team (
   matter_id text not null references matters(id) on delete cascade,
   tenant_id text not null references tenants(id),
   staff_id text not null references staff(id),
-  matter_role text not null,
+  matter_role text not null
+                check (matter_role in ('lead_partner','lead_lawyer','associate','paralegal',
+                                       'finance_contact','compliance_contact')),
   client_visible integer not null default 1,
   client_role_label text,
   client_role_label_ar text,
@@ -279,6 +291,15 @@ create table if not exists matter_team (
   unique (matter_id, staff_id)
 );
 create index if not exists matter_team_matter_idx on matter_team(matter_id);
+
+-- 0058 · ONE ACTIVE HOLDER PER LEAD ROLE, PER FILE — the SQLite mirror of the partial
+-- unique index the migration creates. Postgres and SQLite both support a partial index,
+-- and the rule is the same rule: two lead partners on one matter is two people who each
+-- believe they answer for it, which is how a deadline is missed by both. Written in both
+-- dialects so the demo database refuses the state as well as the API refusing the request.
+create unique index if not exists matter_team_one_lead_uq
+  on matter_team (matter_id, matter_role)
+  where is_active = 1 and matter_role in ('lead_partner','lead_lawyer');
 
 create table if not exists matter_timeline (
   id text primary key,

@@ -400,6 +400,118 @@ export const firmApi = {
     return request(`/matters/${encodeURIComponent(id)}/billing`);
   },
 
+  // ---- intake (task 25) -------------------------------------------------
+
+  /**
+   * The client register, for choosing from.
+   *
+   * The firm app has a Clients screen built from the matter list — deliberately, so
+   * there is one scope rule. This is the register the INTAKE form needs: clients who
+   * have no matter yet appear here and nowhere else, which is exactly the client
+   * somebody is about to open a file for.
+   */
+  async clients(query?: string): Promise<{ count: number; clients: FirmClientRow[] }> {
+    const qs = query ? `?q=${encodeURIComponent(query)}` : '';
+    return request(`/clients${qs}`);
+  },
+
+  /**
+   * ADD CLIENT.
+   *
+   * `confirmDuplicate` is the answer to the 409 this can raise: the caller is told
+   * which clients the firm already holds under the name, and decides. The refusal
+   * carries `details.matches`, so a screen can offer them rather than dead-end.
+   */
+  async createClient(body: {
+    clientType: 'individual' | 'organization';
+    name: string;
+    nameAr?: string | null;
+    email?: string | null;
+    phone?: string | null;
+    city?: string | null;
+    commercialRegistration?: string | null;
+    nationalId?: string | null;
+    identityVerified?: boolean;
+    verificationNote?: string | null;
+    confirmDuplicate?: boolean;
+  }): Promise<{ id: string; name: string; nameAr: string | null; normalized: string; createdAt: string }> {
+    return request('/clients', { method: 'POST', body });
+  },
+
+  /** Correct or complete a client. Never a party link — that is its own route. */
+  async updateClient(id: string, patch: Record<string, unknown>): Promise<{ id: string; changed: number }> {
+    return request(`/clients/${encodeURIComponent(id)}`, { method: 'PATCH', body: patch });
+  },
+
+  /** Invite one of the client's people to the portal. Returns the link to hand over. */
+  async inviteClientUser(
+    clientId: string,
+    body: { email: string; displayName: string; displayNameAr?: string | null;
+      portalRole?: 'client_primary' | 'client_contact' },
+  ): Promise<{ link: string; expiresAt: string; portalRole: string; email: string }> {
+    return request(`/clients/${encodeURIComponent(clientId)}/invitations`, { method: 'POST', body });
+  },
+
+  /** Everything the opening form needs, including the number it will be given. */
+  async matterIntake(): Promise<MatterIntakeBootstrap> {
+    return request('/matters/new');
+  },
+
+  /**
+   * ADD THE CASE — matter, lead, conflict check and opening entry in one call.
+   *
+   * One call and not four: each of the four stages is a step a case can be lost at,
+   * and every one of them is mandatory in the sense that a file missing any of them
+   * is a file somebody has to repair.
+   */
+  async createMatter(body: {
+    clientId: string;
+    title: string;
+    titleAr?: string | null;
+    matterNumber?: string | null;
+    caseNumber?: string | null;
+    practiceArea?: string | null;
+    practiceAreaAr?: string | null;
+    court?: string | null;
+    courtAr?: string | null;
+    summary?: string | null;
+    summaryAr?: string | null;
+    leadStaffId?: string | null;
+    leadRole?: 'lead_partner' | 'lead_lawyer';
+    team?: Array<{ staffId: string; matterRole: string }>;
+    runConflictCheck?: boolean;
+  }): Promise<CreateMatterResult> {
+    return request('/matters', { method: 'POST', body });
+  },
+
+  /** The case report, the team, and whether this member may change any of it. */
+  async matterReport(id: string): Promise<MatterReportPayload> {
+    return request(`/matters/${encodeURIComponent(id)}/report`);
+  },
+
+  /** UPDATE THE CASE REPORT — and tell the client in the same write. */
+  async updateMatterReport(id: string, patch: MatterReportPatch):
+  Promise<{ id: string; updatedAt: string; notifiedClient: boolean; fields: string[] }> {
+    return request(`/matters/${encodeURIComponent(id)}/report`, { method: 'PATCH', body: patch });
+  },
+
+  /** ASSIGN — the lawyer who answers for the file, or anyone else on it. */
+  async assignMatterMember(id: string, body: {
+    staffId: string; matterRole: string; clientVisible?: boolean;
+    clientRoleLabel?: string | null; clientRoleLabelAr?: string | null; replaceLead?: boolean;
+  }): Promise<AssignTeamResult> {
+    return request(`/matters/${encodeURIComponent(id)}/team`, { method: 'POST', body });
+  },
+
+  /** Take somebody off a file. A deactivation: the record of the work stays. */
+  async removeMatterMember(id: string, staffId: string, reason?: string):
+  Promise<{ id: string; staffId: string; active: boolean; changed: number; team: MatterTeamRow[] }> {
+    return request(
+      `/matters/${encodeURIComponent(id)}/team/${encodeURIComponent(staffId)}`,
+      { method: 'PATCH', body: { reason: reason ?? null } },
+    );
+  },
+
   // ---- administration (§49-§51) -----------------------------------------
 
   /**
@@ -825,7 +937,23 @@ export interface MatterTeamResponse {
   matterId: string;
   count: number;
   yourAccessLevel: MatterAccessLevel;
+  /** Whether this member may change the team, and the people they may add. */
+  mayAssign: boolean;
+  assignable: AssignableStaffRow[];
   team: MatterTeamRow[];
+}
+
+/** A member who can be put on a matter, and the load they already carry. */
+export interface AssignableStaffRow {
+  staffId: string;
+  name: string;
+  nameAr: string | null;
+  role: string;
+  jobTitle: string | null;
+  jobTitleAr: string | null;
+  activeMatters: number;
+  /** Already on this file — the picker marks them rather than offering them twice. */
+  onThisMatter: boolean;
 }
 
 export interface MatterPartyRow {
@@ -886,4 +1014,125 @@ export interface DashboardSummary {
   outstanding: { amountSar: number; openInvoiceCount: number } | null;
   /** Which metrics were withheld, so the screen can explain a short dashboard. */
   withheld: string[];
+}
+
+/*
+  ── TASK 25 · INTAKE ──────────────────────────────────────────────────────────
+
+  The four stages, typed. The shapes follow the routes exactly: a create returns the
+  number it allocated and the conflict result it produced, because the screen that
+  just opened a file has to be able to say what the file is called and whether the
+  Rule 11 gate is holding it — and asking again would be a second round trip that can
+  disagree with the first.
+*/
+
+/** A client as the register projects them. Never carries `national_id_hash`. */
+export interface FirmClientRow {
+  id: string;
+  clientType: string;
+  name: string;
+  nameAr: string | null;
+  status: string;
+  city: string | null;
+  hasParty: boolean;
+  matterCount: number;
+  lastMatterAt: string | null;
+}
+
+/** A member who can be given a matter, with the load they already carry. */
+export interface IntakeStaffRow {
+  staffId: string;
+  name: string;
+  nameAr: string | null;
+  role: string;
+  jobTitle: string | null;
+  jobTitleAr: string | null;
+  roleCodes: string[];
+  activeMatters: number;
+}
+
+export interface MatterIntakeBootstrap {
+  clients: FirmClientRow[];
+  staff: IntakeStaffRow[];
+  practiceAreas: string[];
+  matterNumber: { proposed: string; prefix: string };
+  roles: string[];
+}
+
+export interface CreateMatterResult {
+  id: string;
+  matterNumber: string;
+  internalStatus: string;
+  practiceArea: string;
+  client: { id: string; name: string };
+  lead: { staffId: string; name: string; matterRole: string } | null;
+  conflict: {
+    checkId: string | null;
+    hits: Array<Record<string, unknown> & { id: string; severity?: string | null }>;
+    warnings: string[];
+    partiesChecked: number;
+    mattersSearched: number;
+  };
+  next: { matter: string; status: string; report: string };
+}
+
+export interface MatterReportPayload {
+  report: {
+    id: string;
+    matterNumber: string;
+    caseNumber: string | null;
+    title: string;
+    titleAr: string | null;
+    practiceArea: string;
+    practiceAreaAr: string | null;
+    court: string | null;
+    courtAr: string | null;
+    summary: string | null;
+    summaryAr: string | null;
+    internalStatus: string;
+    clientStatus: string;
+    openedAt: string;
+    lastClientUpdateAt: string | null;
+    client: { id: string | null; name: string | null; nameAr: string | null };
+  };
+  team: MatterTeamRow[];
+  /** Whether this member may change the report — the form's own gate. */
+  mayUpdate: boolean;
+}
+
+/** The body of `PATCH /matters/:id/report`. Only these keys are accepted. */
+export interface MatterReportPatch {
+  title?: string;
+  titleAr?: string | null;
+  caseNumber?: string | null;
+  practiceArea?: string;
+  practiceAreaAr?: string | null;
+  court?: string | null;
+  courtAr?: string | null;
+  summary?: string | null;
+  summaryAr?: string | null;
+  note?: string | null;
+  noteAr?: string | null;
+  notifyClient?: boolean;
+}
+
+export interface AssignTeamResult {
+  id: string;
+  staffId: string;
+  matterRole: string;
+  clientVisible: boolean;
+  /** True when §11 forced the role off the client's view. */
+  clientVisibleForced: boolean;
+  created: boolean;
+  replaced: boolean;
+  team: MatterTeamRow[];
+}
+
+/** The 409 body of `POST /clients`: the clients the firm already holds under this name. */
+export interface ClientNameMatch {
+  id: string;
+  name: string;
+  nameAr: string | null;
+  status: string;
+  matterCount: number;
 }

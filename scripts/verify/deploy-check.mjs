@@ -210,6 +210,47 @@ check('the dashboard reads its own numbers rather than an apology',
     && firm.includes('dash.openInvoices') && firm.includes('dashboard/summary'),
   'dash.* note keys and the /dashboard/summary call');
 
+/* ── TASK 25 · THE INTAKE WORKFLOW, IN THE ARTEFACT ──────────────────────────── */
+
+check('the intake workflow ships, and it is one screen per stage',
+  /* The three stage headings and the receipt, by KEY — the keys survive minification
+     and disappear with the component. A build that dropped the one-pager would still
+     serve a working firm OS with no way to add a case. */
+  firm.includes('intake.case') && firm.includes('intake.lead') && firm.includes('intake.done.title')
+    && firm.includes('client.new') && firm.includes('matter.new'),
+  'intake.* / client.new / matter.new');
+
+check('the assignment and report surfaces are in the bundle',
+  firm.includes('panel.assign.who') && firm.includes('panel.assign.role')
+    && firm.includes('report.save') && firm.includes('matter.hiddenRole')
+    && firm.includes('clients.unfiled.open'),
+  'panel.assign.* / report.save / matter.hiddenRole / clients.unfiled.open');
+
+check('the new screens ship their own styling',
+  /* Asserted on the selectors the browser must receive. `firm-formgrid` alone would
+     pass on a build that carried the class in the JSX and no rule for it — which is
+     exactly the state this phase found the intake form in. */
+  /\.firm-formgrid\{/.test(firm) && /\.firm-steps__n\{/.test(firm)
+    && /\.firm-intake__submit\{/.test(firm) && /\.firm-receipt__number\{/.test(firm)
+    && /\.firm-assign\{/.test(firm) && /\.firm-report__actions\{/.test(firm)
+    && /\.firm-unfiled\{/.test(firm),
+  'firm-formgrid / firm-steps__n / firm-intake__submit / firm-receipt__number / firm-assign / firm-report__actions');
+
+check('the matter-number receipt is styled in the monospace face',
+  /* The number is read aloud and typed by hand; it gets the mono face and the gold
+     accent, and both facts are in the served bytes rather than in the source. */
+  /\.firm-receipt__number\{[^}]*font-family:var\(--font-mono\)/.test(firm),
+  '');
+
+check('the register the intake form reads is reachable in the build',
+  /* Quoted loosely on purpose: a minifier is free to turn `'/clients'` into
+     `` `/clients${qs}` `` and the check must be about the PATH, not the punctuation.
+     `?q=` is asserted too, because the picker's search is part of the register call —
+     a build that shipped the path and dropped the query would still be a regression. */
+  firm.includes('/matters/new') && firm.includes('/clients/new')
+    && firm.includes('/clients') && firm.includes('?q='),
+  'the two new routes, the register call and its search');
+
 // ---- behaviour ------------------------------------------------------------
 const csrf = await fetch(`${BASE}/api/firm/auth/csrf`, { headers: { accept: 'application/json' } });
 check('firm door answers a CSRF bootstrap', csrf.status === 200, `HTTP ${csrf.status}`);

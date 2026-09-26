@@ -28,7 +28,7 @@ import {
   evaluateConflicts, type AffiliationRecord, type ClientRecord, type ConflictFinding,
   type MatterPartyRecord, type MatterPartyRole, type PartyIdentity, type PriorAppearance,
 } from '../domain/conflict-engine.js';
-import { normalizeArabicName } from '../domain/arabic-names.js';
+import { matchPartyNames, normalizeArabicName } from '../domain/arabic-names.js';
 
 /** The membership row plus the identity it points at. */
 export interface MembershipRow {
@@ -5098,6 +5098,615 @@ export class FirmRepo {
     return row ? { id: String(row.id), kind: String(row.kind), dueAt: String(row.due_at),
       ruleCited: strOrNull(row.rule_cited), ruleDays: row.rule_days === null ? null : Number(row.rule_days),
       internalStatus: String(row.internal_status), title: String(row.title) } : null;
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // TASK 25 · INTAKE — open a client, open a matter, staff it, report on it
+  //
+  // Four writes that did not exist, in the order a firm performs them. Every
+  // method here writes only the columns migration 0058 granted: the day a column
+  // is added to one of these statements without a grant, the statement is a 500
+  // on Postgres and still green on SQLite, which is the class of defect that
+  // `scripts/verify/schema-parity.ts` exists to catch — so each statement below
+  // is transcribed there in the same change.
+  //
+  // NOTHING IN THIS SECTION READS A RESTRICTED COLUMN. `internal_notes` and
+  // `risk_rating` are withheld from `firm_api` since 0054 and reached only
+  // through the definer function P0.5 introduced; a SELECT * here would return
+  // nulls on Postgres and values on SQLite, which is trap (q) in its other
+  // direction. Every read names its columns.
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * The client register, projected for the matter form's picker.
+   *
+   * `national_id_hash` is deliberately absent: it is written at intake and read
+   * for identity verification, and a list is not a verification. Returning it
+   * here would put a keyed identifier of every client of the firm into every
+   * intake screen's payload.
+   */
+  async listClientsForPicker(tenantId: string, opts: { query?: string; limit?: number } = {}) {
+    const limit = Math.min(Math.max(opts.limit ?? 200, 1), 500);
+    const q = opts.query ? normalizeArabicName(opts.query) : null;
+    /*
+      THE SEARCH IS A PREFILTER, THEN A MATCH IN TYPESCRIPT — because `clients` has
+      no normalised-name column and never had one. `parties` does (it is the identity
+      register, and the conflict engine searches it in SQL), while clients are matched
+      by normalising their names in the application, which is the same path
+      `loadConflictDataset` takes for them. Asking the database for a column that does
+      not exist is a 500 on both dialects, and a `like` on the raw name alone would
+      find "Al-Afaq" and miss «الأفق».
+    */
+    const rows = q
+      ? await this.q().all<Row>(
+        `select c.id, c.client_type, c.name, c.name_ar, c.status, c.city, c.party_id,
+                (select count(*) from matters m where m.client_id = c.id) as matter_count,
+                (select max(m.opened_at) from matters m where m.client_id = c.id) as last_matter_at
+           from clients c
+          where c.tenant_id = ? and (lower(c.name) like ? or c.name_ar like ?)
+          order by c.name limit ${limit}`,
+        [tenantId, `%${opts.query!.toLowerCase()}%`, `%${opts.query!.trim()}%`],
+      )
+      : await this.q().all<Row>(
+        `select c.id, c.client_type, c.name, c.name_ar, c.status, c.city, c.party_id,
+                (select count(*) from matters m where m.client_id = c.id) as matter_count,
+                (select max(m.opened_at) from matters m where m.client_id = c.id) as last_matter_at
+           from clients c
+          where c.tenant_id = ?
+          order by c.name limit ${limit}`,
+        [tenantId],
+      );
+    return rows.map((r) => ({
+      id: String(r.id),
+      clientType: String(r.client_type),
+      name: String(r.name),
+      nameAr: strOrNull(r.name_ar),
+      status: String(r.status),
+      city: strOrNull(r.city),
+      hasParty: r.party_id != null,
+      matterCount: Number(r.matter_count ?? 0),
+      lastMatterAt: r.last_matter_at == null ? null : toIso(r.last_matter_at),
+    }));
+  }
+
+  /**
+   * Is this client already on the register under this name?
+   *
+   * The intake screen asks it so a firm can be TOLD before it creates a duplicate
+   * rather than discovering it during a conflict check — and it is the same
+   * normalisation the conflict engine uses, so "Al Rajhi Co." and "شركة الراجحي"
+   * are one answer rather than two.
+   */
+  /**
+   * IS THIS NAME ALREADY ON THE REGISTER?
+   *
+   * THE ANSWER IS THE CONFLICT ENGINE'S ANSWER, COMPUTED BY THE CONFLICT ENGINE'S
+   * FUNCTION — `matchPartyNames`, the same comparison the register uses to decide
+   * whether a party is the same party. Writing a second, simpler equality here would
+   * be the mistake this codebase has already paid for twice (bite (o): one rule,
+   * three copies, drifted): the form would call two spellings "different" and the
+   * conflict check that runs seconds later would call them the same, so the firm
+   * would create the duplicate the check then has to reconcile.
+   *
+   * 'exact' AND 'strong' ARE DUPLICATES; 'candidate' IS NOT. The engine ranks
+   * containment (a shorter name inside a longer one) as a candidate for a human
+   * because a subsidiary and a trading name look identical to it — and a form that
+   * refused on a candidate would block a firm from opening a file for the daughter
+   * company of its own client. `clients` has no normalised-name column (unlike
+   * `parties`), so the whole register is compared here; a firm's client list is
+   * small enough for that to be the honest way to ask.
+   */
+  async findClientByName(tenantId: string, name: string, nameAr?: string | null) {
+    const candidates = await this.q().all<Row>(
+      `select c.id, c.name, c.name_ar, c.status,
+              (select count(*) from matters m where m.client_id = c.id) as matter_count
+         from clients c
+        where c.tenant_id = ?
+        order by c.created_at
+        limit 500`,
+      [tenantId],
+    );
+    const wanted = [name, nameAr ?? ''].filter((v) => v && v.trim());
+    if (!wanted.length) return [];
+    const matches = candidates.filter((r) => {
+      const pairs: Array<[string, string]> = [];
+      for (const w of wanted) {
+        if (r.name) pairs.push([w, String(r.name)]);
+        if (r.name_ar) pairs.push([w, String(r.name_ar)]);
+      }
+      return pairs.some(([a, b]) => {
+        const strength = matchPartyNames(a, b);
+        return strength === 'exact' || strength === 'strong';
+      });
+    });
+    return matches.slice(0, 5).map((r) => ({
+      id: String(r.id), name: String(r.name), nameAr: strOrNull(r.name_ar),
+      status: String(r.status), matterCount: Number(r.matter_count ?? 0),
+    }));
+  }
+
+  async createClient(opts: {
+    id: string; tenantId: string; clientType: string; name: string; nameAr: string | null;
+    nationalIdMasked: string | null; nationalIdHash: string | null;
+    commercialRegMasked: string | null; email: string | null; phone: string | null;
+    addressLine: string | null; city: string | null; country: string; status: string;
+    identityVerified: boolean; verificationNote: string | null;
+  }): Promise<void> {
+    const now = new Date().toISOString();
+    /*
+      NO `name_normalized` COLUMN IS WRITTEN, because there is none. `parties` carries
+      one — it is the identity register, and the conflict engine searches it in SQL —
+      while a client is a commercial relationship whose two names are normalised in
+      the application. Writing a column that does not exist is a 500 on Postgres and
+      on SQLite alike; it is the defect the first run of `intake.test.ts` caught.
+    */
+    await this.q().run(
+      `insert into clients
+         (id, tenant_id, client_type, name, name_ar, national_id_masked,
+          national_id_hash, commercial_reg_masked, email, phone, address_line, city, country,
+          identity_verified, verification_note, status, created_at, updated_at)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [opts.id, opts.tenantId, opts.clientType, opts.name, opts.nameAr,
+       opts.nationalIdMasked, opts.nationalIdHash, opts.commercialRegMasked, opts.email,
+       opts.phone, opts.addressLine, opts.city, opts.country,
+       // A postgres BOOLEAN and a sqlite 0/1 are different types, and the driver
+       // boundary is the only place that difference is allowed to exist.
+       this.db.driver === 'postgres' ? opts.identityVerified : (opts.identityVerified ? 1 : 0),
+       opts.verificationNote, opts.status, now, now],
+    );
+  }
+
+  /**
+   * The columns a client record can be corrected on, and no others.
+   *
+   * `party_id` is absent on purpose: linking a client to a party decides what the
+   * conflict engine will FIND for that client, and it has its own route and its
+   * own authority (`clients.update` on an existing relationship). An intake edit
+   * must not be able to change it by including a field.
+   */
+  async updateClient(opts: {
+    tenantId: string; clientId: string;
+    patch: Partial<{
+      clientType: string; name: string; nameAr: string | null;
+      email: string | null; phone: string | null; addressLine: string | null;
+      city: string | null; country: string; status: string; identityVerified: boolean;
+      verificationNote: string | null; nationalIdMasked: string | null; nationalIdHash: string | null;
+      commercialRegMasked: string | null;
+    }>;
+  }): Promise<number> {
+    const map: Array<[keyof typeof opts.patch, string]> = [
+      ['clientType', 'client_type'], ['name', 'name'], ['nameAr', 'name_ar'],
+      ['email', 'email'], ['phone', 'phone'],
+      ['addressLine', 'address_line'], ['city', 'city'], ['country', 'country'],
+      ['status', 'status'], ['identityVerified', 'identity_verified'],
+      ['verificationNote', 'verification_note'], ['nationalIdMasked', 'national_id_masked'],
+      ['nationalIdHash', 'national_id_hash'], ['commercialRegMasked', 'commercial_reg_masked'],
+    ];
+    const sets: string[] = [];
+    const params: Param[] = [];
+    for (const [key, column] of map) {
+      const value = opts.patch[key];
+      if (value === undefined) continue;
+      sets.push(`${column} = ?`);
+      params.push(key === 'identityVerified'
+        ? (this.db.driver === 'postgres' ? value : (value ? 1 : 0))
+        : value);
+    }
+    if (!sets.length) return 0;
+    sets.push('updated_at = ?');
+    params.push(new Date().toISOString(), opts.clientId, opts.tenantId);
+    const res = await this.q().run(
+      `update clients set ${sets.join(', ')} where id = ? and tenant_id = ?`,
+      params,
+    );
+    return res.changes;
+  }
+
+  /**
+   * THE MATTER NUMBER.
+   *
+   * Allocated here, once, for the whole system, because a matter number that two
+   * people can compute differently is a matter number that collides — and the
+   * unique constraint would then refuse the OPENING of a file, which is the one
+   * moment a firm cannot be told to try again later.
+   *
+   * The shape follows the firm's existing register (`KGM-2026-0148`): a per-tenant
+   * prefix, the Gregorian year, and a sequence that is the count of matters
+   * already opened under that prefix in that year plus one. The count is not a
+   * sequence table because a firm's register is expected to be gapless when a
+   * number is allocated and to leave a GAP when one is abandoned, which is what
+   * "the file was never opened" looks like from outside.
+   *
+   * The caller may supply its own number; uniqueness is then the database's
+   * `unique (tenant_id, matter_number)` and this method is bypassed. What the
+   * caller may NOT do is leave it absent and receive a null.
+   */
+  async allocateMatterNumber(tenantId: string, prefix: string): Promise<string> {
+    const year = new Date().getUTCFullYear();
+    const like = `${prefix}-${year}-%`;
+    const row = await this.q().get<Row>(
+      `select count(*) as n from matters
+        where tenant_id = ? and matter_number like ?`,
+      [tenantId, like],
+    );
+    const used = Number(row?.n ?? 0);
+    /*
+      The count is a snapshot, so two simultaneous openings can compute the same
+      number. Rather than trust it, the caller retries: the unique constraint is
+      the arbiter and the retry is bounded. Reading `matter_number` back inside
+      the same transaction would need a lock and would serialise the whole firm's
+      intake on one counter — which is exactly the cost this design declines.
+    */
+    return `${prefix}-${year}-${String(used + 1).padStart(4, '0')}`;
+  }
+
+  async matterNumberTaken(tenantId: string, matterNumber: string): Promise<boolean> {
+    const row = await this.q().get<Row>(
+      `select 1 as x from matters where tenant_id = ? and matter_number = ? limit 1`,
+      [tenantId, matterNumber],
+    );
+    return row != null;
+  }
+
+  /**
+   * OPEN THE FILE.
+   *
+   * `internal_status` is not a parameter. A matter is opened at one of exactly
+   * two places — 'conflict_check', where the gate holds work until an excluding
+   * check exists, or 'intake' — and the ROUTE decides which from the conflict
+   * outcome, not the caller. `conflict_cleared` is likewise always the literal
+   * false here: migration 0032 and the SQLite trigger both refuse an assertion of
+   * clearance that the ledger does not support, so a create path that accepted
+   * one would be a way to write a matter that the state machine can never move.
+   */
+  async createMatter(opts: {
+    id: string; tenantId: string; clientId: string; matterNumber: string;
+    caseNumber: string | null; title: string; titleAr: string | null;
+    practiceArea: string; practiceAreaAr: string | null;
+    court: string | null; courtAr: string | null;
+    internalStatus: string; riskRating: string | null;
+    summary: string | null; summaryAr: string | null; openedAt: string;
+    createdByMembershipId: string | null;
+  }): Promise<void> {
+    const now = new Date().toISOString();
+    await this.q().run(
+      `insert into matters
+         (id, tenant_id, client_id, matter_number, case_number, title, title_ar, practice_area,
+          practice_area_ar, court, court_ar, internal_status, client_status, summary, summary_ar,
+          opened_at, conflict_cleared, created_at, updated_at)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [opts.id, opts.tenantId, opts.clientId, opts.matterNumber, opts.caseNumber,
+       opts.title, opts.titleAr, opts.practiceArea, opts.practiceAreaAr, opts.court, opts.courtAr,
+       opts.internalStatus,
+       /*
+         TWO VOCABULARIES, NEVER CROSSED. `internal_status` is the firm's own stage —
+         intake, conflict_check, partner_review, active, on_hold — while `client_status`
+         is the four-or-five word summary the CLIENT sees, and the database keeps them
+         apart with a CHECK: ('opened','under_review','hearings','judgment','execution',
+         'closed'). This row used to be written with 'active', which is an
+         `internal_status` value and not a legal `client_status` at all. SQLite has no
+         CHECK on this column, so 23 SQLite tests passed and the request 500'd on the
+         real database — 'active' is not in the constraint's array. A file that has just
+         been opened and not yet reported on is 'opened'; the seed's newest matter says
+         the same thing, and the state machine moves it from here.
+       */
+       'opened',
+       opts.summary, opts.summaryAr, opts.openedAt,
+       // Derived server-side elsewhere; the row is born unclear and the gate clears it.
+       this.db.driver === 'postgres' ? false : 0,
+       now, now],
+    );
+  }
+
+  /**
+   * The practice areas this firm RUNS MATTERS UNDER, most used first.
+   *
+   * The intake form offers these rather than a fixed list of thirty: a firm that
+   * practises in four areas and is shown thirty produces intake data its own reports
+   * cannot group, and the vocabulary a register is grouped by is a decision the firm
+   * has already made everywhere else.
+   *
+   * `matters.practice_area` is free text in the schema — deliberately, because the
+   * areas a Saudi firm practises in are not a closed set — so the distinct values in
+   * use ARE the firm's list. Ordered by frequency because the commonest is the one
+   * somebody is most likely to want, and an intake form is not a place to browse.
+   */
+  async listPracticeAreasInUse(tenantId: string): Promise<string[]> {
+    const rows = await this.q().all<Row>(
+      `select practice_area, count(*) as n
+         from matters
+        where tenant_id = ? and practice_area is not null
+        group by practice_area
+        order by count(*) desc, practice_area`,
+      [tenantId],
+    );
+    return rows.map((r) => String(r.practice_area)).filter(Boolean);
+  }
+
+  /** The report as the firm reads it on the matter header. */
+  async getMatterReport(tenantId: string, matterId: string) {
+    const row = await this.q().get<Row>(
+      `select m.id, m.matter_number, m.case_number, m.title, m.title_ar, m.practice_area,
+              m.practice_area_ar, m.court, m.court_ar, m.summary, m.summary_ar,
+              m.internal_status, m.client_status, m.opened_at, m.last_client_update_at,
+              c.id as client_id, c.name as client_name, c.name_ar as client_name_ar
+         from matters m
+         left join clients c on c.id = m.client_id and c.tenant_id = m.tenant_id
+        where m.id = ? and m.tenant_id = ?`,
+      [matterId, tenantId],
+    );
+    if (!row) return null;
+    return {
+      id: String(row.id),
+      matterNumber: String(row.matter_number),
+      caseNumber: strOrNull(row.case_number),
+      title: String(row.title),
+      titleAr: strOrNull(row.title_ar),
+      practiceArea: String(row.practice_area),
+      practiceAreaAr: strOrNull(row.practice_area_ar),
+      court: strOrNull(row.court),
+      courtAr: strOrNull(row.court_ar),
+      summary: strOrNull(row.summary),
+      summaryAr: strOrNull(row.summary_ar),
+      internalStatus: String(row.internal_status),
+      clientStatus: String(row.client_status),
+      openedAt: toIso(row.opened_at),
+      lastClientUpdateAt: row.last_client_update_at == null ? null : toIso(row.last_client_update_at),
+      clientId: row.client_id == null ? null : String(row.client_id),
+      clientName: strOrNull(row.client_name),
+      clientNameAr: strOrNull(row.client_name_ar),
+    };
+  }
+
+  /**
+   * UPDATE THE CASE REPORT.
+   *
+   * The five columns a report is made of, plus the timestamp that tells the client
+   * portal a new summary exists. `internal_status` is not among them: it moves
+   * through `POST /matters/:id/status`, which enforces the conflict, CDD and
+   * enforcement gates. Letting a report edit set the status would route a matter
+   * around every one of them.
+   */
+  async updateMatterReport(opts: {
+    tenantId: string; matterId: string; updatedAt: string; touchClient: boolean;
+    patch: Partial<{
+      title: string; titleAr: string | null; caseNumber: string | null;
+      court: string | null; courtAr: string | null;
+      practiceArea: string; practiceAreaAr: string | null;
+      summary: string | null; summaryAr: string | null;
+    }>;
+  }): Promise<number> {
+    const map: Array<[keyof typeof opts.patch, string]> = [
+      ['title', 'title'], ['titleAr', 'title_ar'], ['caseNumber', 'case_number'],
+      ['court', 'court'], ['courtAr', 'court_ar'], ['practiceArea', 'practice_area'],
+      ['practiceAreaAr', 'practice_area_ar'], ['summary', 'summary'], ['summaryAr', 'summary_ar'],
+    ];
+    const sets: string[] = [];
+    const params: Param[] = [];
+    for (const [key, column] of map) {
+      const value = opts.patch[key];
+      if (value === undefined) continue;
+      sets.push(`${column} = ?`);
+      params.push(value);
+    }
+    if (!sets.length) return 0;
+    if (opts.touchClient) { sets.push('last_client_update_at = ?'); params.push(opts.updatedAt); }
+    sets.push('updated_at = ?');
+    params.push(opts.updatedAt, opts.matterId, opts.tenantId);
+    const res = await this.q().run(
+      `update matters set ${sets.join(', ')} where id = ? and tenant_id = ?`,
+      params,
+    );
+    return res.changes;
+  }
+
+  /**
+   * The people a matter can be assigned to: active members of THIS firm, with the
+   * role names they hold, so a picker can show "Partner" rather than a uuid.
+   *
+   * Suspended and departed members are excluded at the query rather than greyed
+   * in the UI: a matter assigned to somebody who has left the firm is a file with
+   * nobody answerable for it, and the system should not offer to create one.
+   */
+  async listAssignableStaff(tenantId: string) {
+    const rows = await this.q().all<Row>(
+      `select fm.id as membership_id, fm.staff_id, fm.status, fm.job_title, fm.job_title_ar,
+              u.email, s.full_name, s.full_name_ar, s.internal_role, s.bar_number,
+              (select count(*) from matter_team mt
+                where mt.staff_id = fm.staff_id and mt.tenant_id = fm.tenant_id and mt.is_active) as matter_count
+         from firm_memberships fm
+         join users u on u.id = fm.user_id
+         join staff s on s.id = fm.staff_id
+        where fm.tenant_id = ? and fm.status = 'active'
+        order by s.full_name`,
+      [tenantId],
+    );
+    if (!rows.length) return [];
+    const codes = await this.q().all<Row>(
+      `select mr.membership_id, r.code
+         from membership_roles mr
+         join roles r on r.id = mr.role_id
+        where r.is_active = ? and mr.revoked_at is null
+          and mr.membership_id in (${rows.map(() => '?').join(',')})`,
+      [this.db.driver === 'postgres' ? true : 1, ...rows.map((r) => String(r.membership_id))],
+    );
+    const byMembership = new Map<string, string[]>();
+    for (const c of codes) {
+      const key = String(c.membership_id);
+      byMembership.set(key, [...(byMembership.get(key) ?? []), String(c.code)]);
+    }
+    return rows.map((r) => ({
+      membershipId: String(r.membership_id),
+      staffId: String(r.staff_id),
+      email: String(r.email),
+      name: req(r.full_name),
+      nameAr: strOrNull(r.full_name_ar),
+      internalRole: req(r.internal_role),
+      barNumber: strOrNull(r.bar_number),
+      jobTitle: strOrNull(r.job_title),
+      jobTitleAr: strOrNull(r.job_title_ar),
+      roleCodes: byMembership.get(String(r.membership_id)) ?? [],
+      activeMatters: Number(r.matter_count ?? 0),
+    }));
+  }
+
+  /**
+   * The staff row behind an invitation email, or null.
+   *
+   * Used at INVITATION ACCEPTANCE to attach an invited lawyer to the matter they
+   * were invited for. The link is by email because that is the only identifier the
+   * firm has at invitation time — our `staff.email` is the firm's own address for
+   * the person, and the invitation goes to it.
+   */
+  async getStaffByEmail(tenantId: string, email: string) {
+    const row = await this.q().get<Row>(
+      `select s.id, s.full_name, s.full_name_ar, s.internal_role
+         from staff s
+         join firm_memberships fm on fm.staff_id = s.id and fm.tenant_id = s.tenant_id
+        where s.tenant_id = ? and lower(s.email) = lower(?) and fm.status = 'active'
+        limit 1`,
+      [tenantId, email],
+    );
+    return row ? { staffId: String(row.id), name: req(row.full_name),
+      nameAr: strOrNull(row.full_name_ar), internalRole: req(row.internal_role) } : null;
+  }
+
+  /**
+   * ASSIGN — one statement, both cases.
+   *
+   * `matter_team` carries `unique (matter_id, staff_id)`, so a person cannot appear
+   * twice on one file; changing their role must therefore UPDATE the row rather
+   * than insert a second. An upsert would need INSERT *and* UPDATE on Postgres
+   * (bite (h)), both of which 0058 grants, but the two paths say different things:
+   * the insert is "this person joins the file", the update is "this person's role
+   * on the file changed". Keeping them separate lets the caller decide which fact
+   * to record in the timeline, and avoids the write-lock semantics of a conflict
+   * clause for a row a human is looking at.
+   */
+  async assignMatterTeamMember(opts: {
+    id: string; tenantId: string; matterId: string; staffId: string;
+    matterRole: string; clientVisible: boolean;
+    clientRoleLabel: string | null; clientRoleLabelAr: string | null;
+  }): Promise<{ created: boolean }> {
+    const now = new Date().toISOString();
+    const existing = await this.q().get<Row>(
+      `select id, is_active, matter_role from matter_team
+        where matter_id = ? and staff_id = ? limit 1`,
+      [opts.matterId, opts.staffId],
+    );
+    if (existing) {
+      await this.q().run(
+        `update matter_team
+            set matter_role = ?, client_visible = ?, client_role_label = ?,
+                client_role_label_ar = ?, is_active = ?
+          where id = ? and tenant_id = ?`,
+        [opts.matterRole,
+         this.db.driver === 'postgres' ? opts.clientVisible : (opts.clientVisible ? 1 : 0),
+         opts.clientRoleLabel, opts.clientRoleLabelAr,
+         this.db.driver === 'postgres' ? true : 1,
+         String(existing.id), opts.tenantId],
+      );
+      return { created: false };
+    }
+    await this.q().run(
+      `insert into matter_team
+         (id, matter_id, tenant_id, staff_id, matter_role, client_visible,
+          client_role_label, client_role_label_ar, is_active, created_at)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [opts.id, opts.matterId, opts.tenantId, opts.staffId, opts.matterRole,
+       this.db.driver === 'postgres' ? opts.clientVisible : (opts.clientVisible ? 1 : 0),
+       opts.clientRoleLabel, opts.clientRoleLabelAr,
+       this.db.driver === 'postgres' ? true : 1, now],
+    );
+    return { created: true };
+  }
+
+  /**
+   * An active lead of this role, or null — asked BEFORE the write so a second lead
+   * is a clean 409 naming the rule, not a raw unique violation surfacing as a 500.
+   * The index in 0058 is still the arbiter; this is the message.
+   */
+  async activeLeadFor(matterId: string, matterRole: string) {
+    const row = await this.q().get<Row>(
+      `select mt.staff_id, s.full_name from matter_team mt
+         join staff s on s.id = mt.staff_id
+        where mt.matter_id = ? and mt.matter_role = ? and mt.is_active = ? limit 1`,
+      [matterId, matterRole, this.db.driver === 'postgres' ? true : 1],
+    );
+    return row ? { staffId: String(row.staff_id), name: req(row.full_name) } : null;
+  }
+
+  /** Taking somebody off a file is a deactivation: the record of their having been on it stays. */
+  async deactivateMatterTeamMember(opts: {
+    tenantId: string; matterId: string; staffId: string;
+  }): Promise<number> {
+    const res = await this.q().run(
+      `update matter_team set is_active = ?
+        where tenant_id = ? and matter_id = ? and staff_id = ?`,
+      [this.db.driver === 'postgres' ? false : 0, opts.tenantId, opts.matterId, opts.staffId],
+    );
+    return res.changes;
+  }
+
+  /**
+   * The ACTIVE member of this firm behind a staff id, or null.
+   *
+   * One row, asked before an assignment is written, so that assigning a matter to
+   * somebody who has left the firm is a 404 naming them rather than a foreign key
+   * violation surfacing as a 500 (trap (m)) — and so that a suspended member cannot
+   * be silently handed a file. `matter_team` references `staff`, not memberships, so
+   * the database alone would accept a departed person.
+   */
+  async getActiveStaffMember(tenantId: string, staffId: string) {
+    const row = await this.q().get<Row>(
+      `select fm.id as membership_id, fm.staff_id, fm.job_title, fm.job_title_ar,
+              s.full_name, s.full_name_ar, s.internal_role
+         from firm_memberships fm
+         join staff s on s.id = fm.staff_id
+        where fm.tenant_id = ? and fm.staff_id = ? and fm.status = 'active' limit 1`,
+      [tenantId, staffId],
+    );
+    return row ? {
+      membershipId: String(row.membership_id), staffId: String(row.staff_id),
+      name: req(row.full_name), nameAr: strOrNull(row.full_name_ar),
+      internalRole: req(row.internal_role),
+      jobTitle: strOrNull(row.job_title), jobTitleAr: strOrNull(row.job_title_ar),
+    } : null;
+  }
+
+  /**
+   * THE INTAKE CONFLICT CHECK — one transaction, and it exists because the route
+   * could not be reused otherwise.
+   *
+   * `POST /matters/:id/conflict-check` runs against a matter that already exists, so it
+   * resolves the matter, its client and the firm's whole history by id. Intake needs the
+   * same engine over rows created seconds earlier inside the same transaction, and it
+   * needs the whole thing to be atomic: a matter that exists with a check that never ran
+   * looks identical to a matter that was cleared, which is the worst state intake can
+   * leave behind.
+   *
+   * The EVALUATION is passed IN rather than performed here — the engine belongs to the
+   * domain, and a repository that called it would be a fourth place where the conflict
+   * rule lives (trap (o): one rule, three copies, drifted).
+   */
+  async recordConflictCheckWithHits(opts: {
+    id: string; tenantId: string; matterId: string; kind: string;
+    startedByMembershipId: string; partiesChecked: number; mattersSearched: number;
+    findings: ConflictFinding[];
+  }): Promise<void> {
+    await this.createConflictCheck({
+      id: opts.id, tenantId: opts.tenantId, matterId: opts.matterId, kind: opts.kind,
+      startedByMembershipId: opts.startedByMembershipId,
+    });
+    for (const finding of opts.findings) {
+      await this.recordConflictHit({
+        id: newId(), tenantId: opts.tenantId, checkId: opts.id, matterId: opts.matterId, finding,
+      });
+    }
+    await this.updateCheckScope({
+      checkId: opts.id, tenantId: opts.tenantId, partiesChecked: opts.partiesChecked,
+      mattersSearched: opts.mattersSearched, hitsFound: opts.findings.length,
+    });
   }
 
 }

@@ -30,7 +30,7 @@
  *   classified, so a member without `matters.restrict` sees that the matter is
  *   restricted (an authorization fact, always returned) but not why.
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AccessBadge, Alert, Badge, Button, Card, CardBody, CardHeader, EmptyState,
   IconChevronBack, IconEdit, IconLock, IconRestricted, IconTime, PageSkeleton,
@@ -59,6 +59,7 @@ import {
 import {
   MatterBillingPanel, MatterConflictsPanel, MatterJudgmentsPanel, MatterPartiesPanel,
 } from './matter/Registers.js';
+import { ReportEditor } from './matter/ReportEditor.js';
 import type { MatterTimelineRow } from '../api/firm.js';
 import '../shell/shell.css';
 
@@ -79,13 +80,25 @@ export function MatterWorkspace({ matterId, onNavigate }: MatterWorkspaceProps) 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<FirmApiError | null>(null);
   const [tab, setTab] = useState<MatterTabId>('overview');
+  /*
+    The report editor is opened from the header and rendered inside the Overview
+    column, so a member who opened it from the top of the page sees it appear in the
+    column they are already reading rather than in a modal that hides the case.
+  */
+  const [reportOpen, setReportOpen] = useState(false);
 
-  useEffect(() => {
+  /*
+    ONE LOADER, SO A WRITE CAN RE-READ. The report editor saves through its own route
+    and then needs the header, the identity card and the withheld list to reflect what
+    it just wrote — a save that leaves the screen showing the previous values is a save
+    nobody believes happened.
+  */
+  const load = useCallback(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
     setMatter(null);
-    firmApi.matter(matterId)
+    void firmApi.matter(matterId)
       .then((res) => { if (!cancelled) setMatter(res); })
       .catch((err) => {
         if (cancelled) return;
@@ -94,6 +107,8 @@ export function MatterWorkspace({ matterId, onNavigate }: MatterWorkspaceProps) 
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [matterId]);
+
+  useEffect(() => load(), [load]);
 
   // Reset to the first tab when moving between matters, so a tab that exists for
   // one matter's access level is not left selected on another's.
@@ -207,9 +222,25 @@ export function MatterWorkspace({ matterId, onNavigate }: MatterWorkspaceProps) 
         </div>
 
         <div className="firm-matterhead__actions">
+          {/*
+            UPDATE THE CASE REPORT.
+
+            This button used to read "Save" and do nothing at all — it was a `<Button>`
+            with no handler, on the busiest screen in the product, which is the one
+            defect a reader is certain to find. It now opens the report editor, which is
+            the write the header was promising: what the file is called, what it is
+            about, and what the client is told.
+
+            Shown only to a member who may actually make the change: `matters.update`
+            plus an editing access level on THIS matter. The route checks the same pair,
+            so the button and the refusal cannot disagree.
+          */}
           {can('matters.update') && matter.accessLevel !== 'view' && (
-            <Button variant="secondary" size="sm" icon={<IconEdit size={15} />}>
-              {t('common.save')}
+            <Button
+              variant="secondary" size="sm" icon={<IconEdit size={15} />}
+              onClick={() => setReportOpen(true)}
+            >
+              {t('report.edit')}
             </Button>
           )}
         </div>
@@ -258,6 +289,18 @@ export function MatterWorkspace({ matterId, onNavigate }: MatterWorkspaceProps) 
       {tab === 'overview' && (
         <div className="firm-mattergrid">
           <div className="firm-dashcol">
+            {/*
+              THE REPORT EDITOR, IN THE COLUMN, WHEN ASKED FOR. Rendered above the
+              identity card rather than in a modal: a drawer would cover the very facts
+              the lawyer is updating the report FROM.
+            */}
+            {reportOpen && (
+              <ReportEditor
+                matterId={matterId}
+                onClose={() => setReportOpen(false)}
+                onSaved={load}
+              />
+            )}
             <Card variant="default">
               <CardHeader title={t('tab.overview')} />
               <CardBody>

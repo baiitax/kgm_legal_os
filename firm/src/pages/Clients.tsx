@@ -27,10 +27,13 @@
  */
 import { useEffect, useMemo, useState } from 'react';
 import {
-  AccessBadge, Button, Card, CardBody, EmptyState, IconClients, IconRestricted,
-  PageSkeleton, useI18n,
+  AccessBadge, Button, Card, CardBody, EmptyState, IconClients, IconMatters, IconPlus,
+  IconRefresh, IconRestricted, PageSkeleton, useI18n,
 } from '@kgm/ui';
-import { FirmApiError, firmApi, type MatterListResponse, type MatterSummary } from '../api/firm.js';
+import {
+  FirmApiError, firmApi, type FirmClientRow, type MatterListResponse, type MatterSummary,
+} from '../api/firm.js';
+import { useFirmSession } from '../auth/FirmSession.js';
 import '../shell/shell.css';
 
 interface ClientsProps {
@@ -51,14 +54,25 @@ const ACTIONABLE = new Set(['full', 'edit', 'operational']);
 
 export function Clients({ onNavigate }: ClientsProps) {
   const { t, lang } = useI18n();
+  const { can } = useFirmSession();
   const [data, setData] = useState<MatterListResponse | null>(null);
+  /*
+    THE REGISTER, BESIDE THE DERIVED LIST — for the one case the derivation cannot see.
+
+    A client the firm added thirty seconds ago has no matters, so nothing in the matter
+    list can produce them and they are invisible exactly when somebody needs to find them.
+    The register (GET /clients) is the only place they appear, and the section below says
+    what they are: on the firm's books, not yet on a file. The primary list keeps its
+    derived scope rule — the two are answers to different questions, not two rules for one.
+  */
+  const [register, setRegister] = useState<FirmClientRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<FirmApiError | null>(null);
 
   const load = () => {
     setLoading(true);
-    firmApi.matters()
-      .then((res) => { setData(res); setError(null); })
+    Promise.all([firmApi.matters(), firmApi.clients().catch(() => ({ count: 0, clients: [] }))])
+      .then(([matters, clients]) => { setData(matters); setRegister(clients.clients); setError(null); })
       .catch((err) => {
         setData(null);
         setError(err instanceof FirmApiError ? err : new FirmApiError(0, 'network_error', 'unreachable'));
@@ -98,6 +112,22 @@ export function Clients({ onNavigate }: ClientsProps) {
       .sort((a, b) => a.name.localeCompare(b.name, lang === 'ar' ? 'ar' : 'en'));
   }, [data, lang]);
 
+  /*
+    CLIENTS ON THE REGISTER WITH NO MATTER AT ALL. Filtered by NAME against the grouped
+    list rather than by id, for the same reason the grouping is by name: the matter list's
+    client projection carries no id. A name that appears in both is a client with a file,
+    so it belongs to the derived section and is not repeated here.
+  */
+  const unfiled = useMemo(() => {
+    const withMatters = new Set(clients.map((c) => c.name));
+    return register
+      .filter((c) => c.matterCount === 0
+        && !withMatters.has(c.name) && !withMatters.has(c.nameAr ?? ''))
+      .sort((a, b) => a.name.localeCompare(b.name, lang === 'ar' ? 'ar' : 'en'));
+    // `clients` is derived from `data` and the language, so it is a stable dependency.
+  }, [register, clients, lang]);
+
+
   if (loading) return <PageSkeleton />;
 
   if (error) {
@@ -130,7 +160,32 @@ export function Clients({ onNavigate }: ClientsProps) {
           </p>
         </div>
         <div className="firm-pagehead__actions">
-          <Button variant="ghost" onClick={load}>{t('common.refresh')}</Button>
+          <Button variant="ghost" size="sm" icon={<IconRefresh size={15} />} onClick={load}
+            disabled={loading}>
+            {t('common.refresh')}
+          </Button>
+          {/*
+            ADD CLIENT, and ADD THE CASE — the two intake stages, reachable from the
+            screen a member is looking at when they learn they need them. Both are
+            gated by the same permissions the API checks; the buttons are a courtesy,
+            never the control.
+          */}
+          {can('clients.create') && (
+            <Button
+              variant="secondary" size="sm" icon={<IconPlus size={15} />}
+              onClick={() => onNavigate('/clients/new')}
+            >
+              {t('client.new')}
+            </Button>
+          )}
+          {can('matters.create') && (
+            <Button
+              variant="primary" size="sm" icon={<IconMatters size={15} />}
+              onClick={() => onNavigate('/matters/new')}
+            >
+              {t('matter.new')}
+            </Button>
+          )}
         </div>
       </header>
 
@@ -190,6 +245,43 @@ export function Clients({ onNavigate }: ClientsProps) {
             </Card>
           ))}
         </div>
+      )}
+
+      {/*
+        THE CLIENTS WITH NO FILE — the intake output, findable afterwards.
+
+        Only rendered when there are any: a firm that files every client immediately should
+        not carry a permanent empty heading. Each row's action is the next step for that
+        client (open their case), because a client sitting on the register unfiled is a
+        decision somebody has already made and not yet acted on.
+      */}
+      {unfiled.length > 0 && (
+        <Card className="firm-unfiled">
+          <CardBody>
+            <h2 className="firm-subsection__title">{t('clients.unfiled.title')}</h2>
+            <p className="firm-panel__note">{t('clients.unfiled.sub', { n: unfiled.length })}</p>
+            <ul className="firm-clientcard__matters firm-unfiled__list">
+              {unfiled.map((c) => (
+                <li key={c.id}>
+                  <span className="firm-unfiled__name">
+                    {(lang === 'ar' ? c.nameAr : c.name) ?? c.name}
+                    {c.city && <span className="firm-unfiled__city">{c.city}</span>}
+                  </span>
+                  {can('matters.create') && (
+                    <button
+                      type="button"
+                      className="firm-clientcard__matter"
+                      onClick={() => onNavigate(`/matters/new?client=${encodeURIComponent(c.id)}`)}
+                    >
+                      <span className="firm-clientcard__title">{t('clients.unfiled.open')}</span>
+                      <IconMatters size={14} aria-hidden="true" />
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </CardBody>
+        </Card>
       )}
     </div>
   );
