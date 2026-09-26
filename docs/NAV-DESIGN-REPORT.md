@@ -143,15 +143,16 @@ and `aria-current`, marked by the same `isPathAllowed` the guard uses.
 
 | check | result |
 |---|---|
-| `web/src/test/nav.test.tsx` (new, 18) | **18/18** — capability model, unknown-role default, reachability per role over the whole model, sheet behaviour, header orientation, role chip |
-| web suite (`npm run test:web`) | **48/48**, 6 files |
+| `web/src/test/nav.test.tsx` (new, 19) | **19/19** — capability model, unknown-role default, reachability per role over the whole model, sheet behaviour, header orientation, role chip |
+| web suite (`npm run test:web`) | **49/49**, 6 files |
 | `firm/src/test/rail-and-persona.test.tsx` (new, 14) | **14/14** — identity block (en/ar), built/planned split, divider placement, persona defaults, usage precedence, authorised-set bound |
 | firm suite (`npm run test:firm`) | **68/68**, 7 files — `shell-layout`, `authorization`, `bottomnav`, `roles`, `sessions`, `language` all still green, untouched |
 | `tests/security/portal-roles.test.ts` (new, 10) | **10/10** — the gate refuses all four surfaces by name, is no oracle, audits once with the reason, leaves nine work surfaces open, and the session names the entity |
-| server suite (`npm run test:server`) | **577/577**, 17 files, 251 s before the RLS fix; re-run after it — see §3.1 |
+| server suite (`npm run test:server`) | **577/577**, 17 files — run twice, before and after the RLS fix |
 | `scripts/verify/portal-roles-live.mjs` (new) | **26/26** against the production server on the live database |
 | `tsc --noEmit` server / web / firm | clean |
 | `npm run build:all` | clean |
+| deployed origin (`https://kgmlegal.vercel.app`) | **26/26** — see §3.2 |
 
 ### 3.1 The live harness, and what it found
 
@@ -177,6 +178,26 @@ password `Demo!Contact2026` (synthetic, like every other demo credential). It ex
 portal roles can be shown side by side without editing the database.
 
 ---
+
+### 3.2 On the deployed origin
+
+Commit `8e69aa4`, pushed to `main`, deployed by Vercel (`kgmlegal-ayi2ft6gp…`, READY at
+11:15Z). `scripts/verify/portal-roles-live.mjs https://kgmlegal.vercel.app` — **26/26** against
+the live Supabase database:
+
+* the holder's session carries `clientName = "Gulf Horizon Trading Co."`, and the client's
+  identifier appears nowhere in the body;
+* a contact authenticates, resolves to `client_contact`, and is refused all four billing surfaces
+  with `403 role_not_permitted` — a REAL invoice and a fabricated one byte-identically;
+* six work surfaces stay open to the contact;
+* the trail holds one `AUTHZ_DENIED` row per attempt with
+  `{capability: 'billing', portalRole: 'client_contact'}`;
+* the served bundle carries the role model and not the server's error codes.
+
+The deployed stylesheets were checked by reading them rather than trusting the build: the portal's
+grid keeps the header at ≥1024 px (`grid-template-areas: "sidebar topbar" "sidebar main"`), the
+print block hides the sheet with the other two surfaces, and the firm's rail carries
+`.kgm-rail__identity`, `.kgm-rail__divider` and the More sheet's active tile.
 
 ## 4 · What is deliberately not done
 
