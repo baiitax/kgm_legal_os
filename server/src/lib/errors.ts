@@ -40,6 +40,14 @@ export type ErrorCode =
   | 'tenant_mismatch'
   | 'client_mismatch'
   | 'resource_not_accessible'
+  /*
+    The portal's role gate (§36). A `client_contact` is a colleague the account
+    holder has admitted to the WORK; the invoices, the receipts and the act of
+    paying belong to the holder. Named rather than generic `forbidden` because
+    the reader deserves the rule, not a shut door — and because the audit trail
+    should say which rule refused, not that something did.
+  */
+  | 'role_not_permitted'
   | 'internal_resource'
   | 'mutation_denied'
   | 'field_not_writable'

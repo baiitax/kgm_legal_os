@@ -855,6 +855,24 @@ export class ClientService {
   }
 
   /**
+   * The entity this session acts for, by NAME.
+   *
+   * The portal's chrome renders it — under the reader's own name, so a person
+   * who is a contact of more than one client can see which one they are in —
+   * and it is read HERE rather than while the session is being resolved, because
+   * `clients` is invisible in the auth phase: the RLS policy is scoped to a
+   * tenant and a set of client ids that only exist once the principal has been
+   * resolved. A join in the auth query therefore returns null on the real
+   * database and a name on SQLite, which is exactly how it shipped once.
+   *
+   * Names only, never the identifier: §35's rule that the SPA renders names is
+   * as true of the chrome as of a page.
+   */
+  async getEntityName(p: Principal): Promise<{ name: string; nameAr: string | null } | null> {
+    return this.repo.getClientEntityName(p.primaryClientId, p.tenantId);
+  }
+
+  /**
    * Only these fields are writable by a client. Everything else — name,
    * client_type, national_id, identity_verified, tenant_id, portal_role —
    * belongs to the firm (§25, §35 R11).

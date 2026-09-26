@@ -137,6 +137,73 @@
   border-color: var(--line-soft);
 }
 
+/* ---- identity block ---- */
+/*
+   Who the tree below belongs to. It sits under the brand and above the first
+   group because that is the order of the question: which firm am I in, as whom,
+   and — only then — what may I open.
+*/
+.kgm-rail__identity {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0 var(--sp-2) var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  border: 1px solid var(--line-soft);
+  min-inline-size: 0;
+}
+
+.kgm-rail__identityname {
+  color: var(--text-hi);
+  font-size: var(--fs-body);
+  font-weight: var(--fw-semibold);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kgm-rail__identityrole {
+  color: var(--text-md);
+  font-size: var(--fs-meta);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The firm — and, where the member sits, their department, which is what makes
+   the counterparty scope of the tree below legible rather than surprising. */
+.kgm-rail__identityfirm {
+  color: var(--text-gold);
+  font-size: var(--fs-meta);
+  letter-spacing: var(--tracking-label);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- the line between what works and what is coming ---- */
+.kgm-rail__divider {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: var(--sp-3) 0 var(--sp-1);
+  padding-inline: var(--sp-2);
+  color: var(--text-dim);
+  font-size: var(--fs-meta);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.kgm-rail__divider::after {
+  content: '';
+  flex: 1 1 auto;
+  block-size: 1px;
+  background: var(--line-soft);
+}
+
 /* ---- scroll region ---- */
 
 .kgm-rail__scroll {
@@ -1932,3 +1999,26 @@
 
 .firm-workcard__tags { display: flex; flex-wrap: wrap; gap: 4px; margin-block-start: 2px; }
 .firm-workcard__tags > * { display: inline-flex; align-items: center; gap: 4px; }
+
+/* --------------------------------------------------------------------------
+   THE MORE SHEET · the tile you are standing in
+   --------------------------------------------------------------------------
+   The rail lights the link you are on and the bar lights the slot; the sheet,
+   which is the surface a phone uses to reach everything else, lit nothing. So it
+   gets the same treatment as the rail link: a bar on the inline-start edge, which
+   is a state rather than a highlight and therefore does not compete with the
+   tiles that are merely tappable.
+   -------------------------------------------------------------------------- */
+
+.kgm-morelist__item[data-active] {
+  color: var(--text-hi);
+  font-weight: var(--fw-semibold);
+  background: var(--surface-1);
+  box-shadow: inset 3px 0 0 var(--kgm-lime-500, var(--text-gold));
+}
+
+[dir='rtl'] .kgm-morelist__item[data-active] {
+  box-shadow: inset -3px 0 0 var(--kgm-lime-500, var(--text-gold));
+}
+
+.kgm-morelist__item[data-active] .kgm-morelist__icon { color: var(--text-hi); }

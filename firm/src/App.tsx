@@ -36,6 +36,7 @@ import { Users } from './pages/Users.js';
 import { Audit } from './pages/Audit.js';
 import { Settings } from './pages/Settings.js';
 import { Denied, navigate, useGuard, useRoute } from './app/routes.js';
+import { isPathAllowed } from './app/nav.js';
 import { FIRM_I18N } from './i18n/dictionary.js';
 import { SignIn } from './pages/SignIn.js';
 import { Dashboard } from './pages/Dashboard.js';
@@ -154,7 +155,7 @@ function Shell() {
       <BottomNav path={route.basePath} onNavigate={onNavigate} onOpenMore={() => setMoreOpen(true)} />
 
       <BottomSheet open={moreOpen} onClose={() => setMoreOpen(false)} title={t('mobile.moreTitle')}>
-        <MoreSheetBody onNavigate={onNavigate} />
+        <MoreSheetBody path={route.basePath} onNavigate={onNavigate} />
       </BottomSheet>
     </div>
   );
@@ -226,9 +227,20 @@ function PlannedScreen({ onNavigate }: { onNavigate: (to: string) => void }) {
  * Built from the same permission-filtered nav the rail uses, so mobile and desktop
  * cannot disagree about what a member may reach.
  */
-function MoreSheetBody({ onNavigate }: { onNavigate: (to: string) => void }) {
+function MoreSheetBody({ path, onNavigate }: { path: string; onNavigate: (to: string) => void }) {
   const { t } = useI18n();
   const { nav } = useFirmSession();
+
+  /*
+    WHICH TILE IS WHERE I AM.
+
+    The bar lights the slot you are on, and the rail lights the link. The sheet
+    was the one surface that answered no question at all — you opened the menu to
+    find the module you were already standing in and it looked like every other
+    tile. `isPathAllowed` is the same matcher the rail and the guard use, so a
+    tile is lit by exactly the rule that would let the member route there.
+  */
+  const isCurrent = (to: string) => isPathAllowed(new Set([to]), path);
 
   if (nav.groups.length === 0) {
     return (
@@ -268,6 +280,8 @@ function MoreSheetBody({ onNavigate }: { onNavigate: (to: string) => void }) {
                   type="button"
                   className="kgm-morelist__item"
                   data-planned={tile.planned || undefined}
+                  data-active={!tile.planned && isCurrent(tile.to) ? true : undefined}
+                  aria-current={!tile.planned && isCurrent(tile.to) ? 'page' : undefined}
                   aria-disabled={tile.planned || undefined}
                   onClick={() => { if (!tile.planned) onNavigate(tile.to); }}
                 >

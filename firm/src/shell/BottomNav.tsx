@@ -85,13 +85,79 @@ const SLOT_PRIORITY: readonly string[] = [
   'users', 'teams', 'settings', 'audit',
 ];
 
+/**
+ * THE SAME DEFAULT, PER PERSONA · §16/§17
+ *
+ * One global order gave a finance officer and a litigator the same three slots
+ * on their first day, which is a default that fits one of them. This table
+ * supplies the three that fit the work each role family actually does — and
+ * nothing more than that: it is consulted only when the member has no history,
+ * it is filtered by the authorised set exactly like the global order, and usage
+ * still outranks it.
+ *
+ * PRECEDENCE IS BY SPECIFICITY, top to bottom. A finance director who is also a
+ * qualified lawyer gets the finance bar, because a member who holds both roles
+ * is the one whose day is decided by the scarcer role, and the legal modules
+ * (matters, my work) are the global default anyway — they are never far away.
+ *
+ * Role codes come from the catalogue (`roles.code`), which the session carries;
+ * nothing here is guessed from a job title, which is free text and could be
+ * anything.
+ */
+const PERSONA_PRIORITY: ReadonlyArray<{ readonly match: readonly string[]; readonly order: readonly string[] }> = [
+  {
+    /*
+      Each order names the modules that family leads with — today's built ones
+      and the planned ones — and the bar simply cannot see the planned half yet,
+      because a planned module is not a destination. So the difference a member
+      feels today is the order of the modules that DO exist, and that is the
+      difference that matters: it is the first screen they open.
+    */
+    match: ['FINANCE', 'BILLING_OFFICER', 'ACCOUNTANT'],
+    order: ['billing', 'collections', 'time', 'expenses', 'clients', 'matters', 'mywork', 'documents'],
+  },
+  {
+    match: ['COMPLIANCE', 'MLRO', 'RISK'],
+    order: ['conflicts', 'licences', 'complaints', 'training', 'audit', 'clients', 'matters', 'mywork'],
+  },
+  {
+    match: ['ADMIN', 'HR', 'IT_ADMIN'],
+    order: ['users', 'settings', 'teams', 'audit', 'clients', 'matters', 'mywork'],
+  },
+  {
+    match: ['MANAGING_PARTNER', 'PARTNER'],
+    // A partner's phone answers "what is on today" and "who is in front of me".
+    order: ['mywork', 'matters', 'calendar', 'hearings', 'clients', 'tasks', 'billing', 'audit'],
+  },
+  {
+    match: ['LAWYER', 'ASSOCIATE', 'PARALEGAL', 'TRAINEE', 'LEGAL'],
+    order: ['matters', 'mywork', 'tasks', 'hearings', 'deadlines', 'documents', 'calendar', 'clients'],
+  },
+];
+
 const SLOT_COUNT = 3;
 const HOME = '/';
 
-/** Ranks a nav id by the default order; unknown ids sort last, stably. */
-function rank(id: string): number {
-  const i = SLOT_PRIORITY.indexOf(id);
-  return i === -1 ? SLOT_PRIORITY.length : i;
+/**
+ * The default order for a member, given their roles.
+ *
+ * Built by putting the persona's own order in front of the global one and
+ * de-duplicating: a module the persona names keeps its persona position, every
+ * other module falls back to the designed global position. So the bar differs by
+ * persona at the front — where a first-day member looks — and degrades to the
+ * same order behind, which is what keeps this a default rather than a second
+ * navigation.
+ */
+function defaultOrder(roleCodes: readonly string[]): readonly string[] {
+  const persona = PERSONA_PRIORITY.find((p) => p.match.some((m) => roleCodes.includes(m)));
+  if (!persona) return SLOT_PRIORITY;
+  return [...persona.order, ...SLOT_PRIORITY.filter((id) => !persona.order.includes(id))];
+}
+
+/** Ranks a nav id in that order; unknown ids sort last, stably. */
+function rankIn(order: readonly string[], id: string): number {
+  const i = order.indexOf(id);
+  return i === -1 ? order.length : i;
 }
 
 /* --------------------------------------------------------------------------
@@ -149,6 +215,19 @@ export function BottomNav({ path, onNavigate, onOpenMore, badges }: BottomNavPro
   const { nav, member } = useFirmSession();
 
   /**
+   * The member's role codes, joined into a stable string.
+   *
+   * A string rather than the array itself because the array is rebuilt by the
+   * session provider on every render, and the ranking below is memoised: an
+   * unstable dependency would re-rank the bar on every frame and move a slot
+   * under the member's thumb, which is the one thing this component is built
+   * not to do.
+   */
+  const roleCodes = member?.roles.map((r) => String(r.code).toUpperCase()) ?? [];
+  const persona = roleCodes.join('|');
+  const order = useMemo(() => defaultOrder(roleCodes), [persona]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /**
    * Flattens the filtered nav into candidates, ordered by SLOT_PRIORITY.
    *
    * Derived from `nav` — the same permission-filtered tree the rail renders — so
@@ -176,8 +255,8 @@ export function BottomNav({ path, onNavigate, onOpenMore, badges }: BottomNavPro
         items.push(leaf);
       }
     }
-    return items.filter((i) => i.id !== 'dashboard').sort((a, b) => rank(a.id) - rank(b.id));
-  }, [nav]);
+    return items.filter((i) => i.id !== 'dashboard').sort((a, b) => rankIn(order, a.id) - rankIn(order, b.id));
+  }, [nav, order]);
 
   const membershipId = member?.membershipId ?? null;
   const key = usageKey(membershipId);
@@ -203,12 +282,12 @@ export function BottomNav({ path, onNavigate, onOpenMore, badges }: BottomNavPro
     ids.sort((a, b) => {
       const byUse = (usage[b] ?? 0) - (usage[a] ?? 0);
       if (byUse !== 0) return byUse;
-      const byRank = rank(a) - rank(b);
+      const byRank = rankIn(order, a) - rankIn(order, b);
       return byRank !== 0 ? byRank : a.localeCompare(b);
     });
     return ids.slice(0, SLOT_COUNT);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [setSignature, key]);
+  }, [setSignature, key, persona]);
 
   /** Resolved fresh on every render, so a slot always holds the live leaf. */
   const slots = useMemo(

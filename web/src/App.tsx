@@ -6,23 +6,16 @@
  * the request anyway if they navigate there directly. Nothing in this file is
  * load-bearing for security.
  */
-import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
-import type { ReactNode } from 'react';
-import {
-  BrowserRouter,
-  Link,
-  Navigate,
-  NavLink,
-  Route,
-  Routes,
-  useLocation,
-  useNavigate,
-} from 'react-router-dom';
+import { Suspense, lazy, useEffect, useState } from 'react';
+import type { ComponentType, ReactNode } from 'react';
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './auth';
 import { get } from './api/client';
 import { I18nProvider, useI18n } from './i18n';
 import { Icon, PageLoader } from './components/ui';
 import { LanguageToggle } from './components/LanguageToggle';
+import { Sidebar, TabBar, TopBar, useCapability } from './shell';
+import { DETAIL_ITEMS, DESTINATIONS, capabilitiesFor } from './nav';
 
 const Login = lazy(() => import('./pages/Login'));
 const Invite = lazy(() => import('./pages/Invite'));
@@ -46,62 +39,6 @@ const Security = lazy(() => import('./pages/Security'));
 const Privacy = lazy(() => import('./pages/Privacy'));
 const NotFound = lazy(() => import('./pages/NotFound'));
 
-/* --------------------------------------------------------------- nav model -- */
-interface NavItem {
-  to: string;
-  labelKey: 'nav.dashboard' | 'nav.matters' | 'nav.hearings' | 'nav.deadlines'
-    | 'nav.documents' | 'nav.invoices' | 'nav.receipts' | 'nav.messages'
-    | 'nav.appointments' | 'nav.notifications' | 'nav.profile' | 'nav.security'
-    | 'nav.privacy';
-  icon: Parameters<typeof Icon>[0]['name'];
-  badge?: number;
-}
-
-const NAV_GROUPS: Array<{ key: 'nav.group.main' | 'nav.group.matters' | 'nav.group.finance' | 'nav.group.account'; items: NavItem[] }> = [
-  {
-    key: 'nav.group.main',
-    items: [
-      { to: '/portal', labelKey: 'nav.dashboard', icon: 'home' },
-      { to: '/portal/notifications', labelKey: 'nav.notifications', icon: 'bell' },
-    ],
-  },
-  {
-    key: 'nav.group.matters',
-    items: [
-      { to: '/portal/matters', labelKey: 'nav.matters', icon: 'folder' },
-      { to: '/portal/hearings', labelKey: 'nav.hearings', icon: 'gavel' },
-      { to: '/portal/deadlines', labelKey: 'nav.deadlines', icon: 'clock' },
-      { to: '/portal/documents', labelKey: 'nav.documents', icon: 'doc' },
-      { to: '/portal/messages', labelKey: 'nav.messages', icon: 'chat' },
-      { to: '/portal/appointments', labelKey: 'nav.appointments', icon: 'calendar' },
-    ],
-  },
-  {
-    key: 'nav.group.finance',
-    items: [
-      { to: '/portal/invoices', labelKey: 'nav.invoices', icon: 'invoice' },
-      { to: '/portal/receipts', labelKey: 'nav.receipts', icon: 'receipt' },
-    ],
-  },
-  {
-    key: 'nav.group.account',
-    items: [
-      { to: '/portal/profile', labelKey: 'nav.profile', icon: 'user' },
-      { to: '/portal/security', labelKey: 'nav.security', icon: 'shield' },
-      { to: '/portal/privacy', labelKey: 'nav.privacy', icon: 'lock' },
-    ],
-  },
-];
-
-/** The five destinations that earn a place on the mobile tab bar. */
-const TABS: NavItem[] = [
-  { to: '/portal', labelKey: 'nav.dashboard', icon: 'home' },
-  { to: '/portal/matters', labelKey: 'nav.matters', icon: 'folder' },
-  { to: '/portal/documents', labelKey: 'nav.documents', icon: 'doc' },
-  { to: '/portal/invoices', labelKey: 'nav.invoices', icon: 'invoice' },
-  { to: '/portal/profile', labelKey: 'nav.profile', icon: 'user' },
-];
-
 function BrandMark({ small }: { small?: boolean }) {
   return (
     <div className={small ? 'brand-mark brand-mark--sm' : 'brand-mark'} aria-hidden="true">
@@ -110,282 +47,14 @@ function BrandMark({ small }: { small?: boolean }) {
   );
 }
 
-function Sidebar() {
-  const { t, fmt, lang } = useI18n();
-  const { session, signOut } = useAuth();
-  const navigate = useNavigate();
-  const user = session.user;
-  const name = lang === 'ar' ? (user?.displayNameAr ?? user?.displayName) : user?.displayName;
-
-  return (
-    <aside className="sidebar">
-      <div className="sidebar__head">
-        <div className="sidebar__logo">
-          <BrandMark />
-          <div>
-            <b>{t('app.name')}</b>
-            <small>{t('app.portal')}</small>
-          </div>
-        </div>
-        {user && (
-          <div className="sidebar__who">
-            <b>{name}</b>
-            <span className="ltr">{user.email}</span>
-            {session.security?.sessionExpiresAt && (
-              <span>
-                {t('auth.sessionEnding')} {fmt.relative(session.security.sessionExpiresAt)}
-              </span>
-            )}
-          </div>
-        )}
-      </div>
-
-      <nav className="sidebar__nav" aria-label={t('a11y.mainNav')}>
-        {NAV_GROUPS.map((group) => (
-          <div key={group.key}>
-            <div className="sidebar__group">{t(group.key)}</div>
-            {group.items.map((item) => (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                end={item.to === '/portal'}
-                className="navlink"
-              >
-                <span className="navlink__icon"><Icon name={item.icon} size={17} /></span>
-                {t(item.labelKey)}
-                {item.badge ? <span className="navlink__badge">{item.badge}</span> : null}
-              </NavLink>
-            ))}
-          </div>
-        ))}
-      </nav>
-
-      <div className="sidebar__foot">
-        <div className="row" style={{ marginBlockEnd: 10 }}>
-          <LanguageToggle />
-        </div>
-        <button
-          className="btn btn--ghost btn--sm btn--block"
-          style={{ color: '#eaf1ee' }}
-          onClick={async () => {
-            await signOut();
-            navigate('/login');
-          }}
-        >
-          <Icon name="logout" size={15} />
-          {t('nav.signOut')}
-        </button>
-      </div>
-    </aside>
-  );
-}
-
-/**
- * Initials for the avatar. Two letters at most: this is a label, and Arabic
- * given names are long enough that three initials turn the circle into a smudge.
- */
-function initialsOf(displayName: string | undefined, email: string | undefined, lang: string): string {
-  const source = displayName?.trim();
-  if (source) {
-    const parts = source.split(/\s+/).filter(Boolean);
-    return (parts.length > 1 ? parts[0][0] + parts[1][0] : source.slice(0, 2)).toUpperCase();
-  }
-  // No name on the session: fall back to the local part of the address rather
-  // than rendering an empty circle.
-  return (email?.split('@')[0]?.slice(0, 2) ?? '').toUpperCase() || (lang === 'ar' ? 'م' : 'A');
-}
-
-/**
- * THE ACCOUNT MENU
- *
- * The portal used to have exactly one way to sign out, and it lived in the
- * sidebar — which is `display: none` below 1024 px. The tab bar that replaces
- * the sidebar there was never given a sign-out, so on a phone or a tablet there
- * was no way to end a session at all. On a shared device, in a product whose
- * whole premise is that sessions expire and are audited, that is not a cosmetic
- * gap: the only way out was to clear the browser's cookies.
- *
- * So this is a real popover rather than a sixth tab. It is anchored to the top
- * bar, which exists at EVERY width, and it carries the identity of the person
- * signed in — which the mobile layout had also lost, because it too lived in the
- * sidebar. One surface answers both questions a person actually asks: who am I
- * signed in as, and how do I get out.
- *
- * Behaviour it owes a keyboard user, because it is a menu: Escape closes and
- * returns focus to the button, a click outside closes, and opening it moves
- * focus inside. Without those, a menu is a trap.
- */
-function AccountMenu() {
-  const { t, lang, fmt } = useI18n();
-  const { session, signOut } = useAuth();
-  const navigate = useNavigate();
-  const [open, setOpen] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const wrapRef = useRef<HTMLDivElement | null>(null);
-  const triggerRef = useRef<HTMLButtonElement | null>(null);
-  const panelRef = useRef<HTMLDivElement | null>(null);
-
-  const close = useCallback((returnFocus = false) => {
-    setOpen(false);
-    if (returnFocus) triggerRef.current?.focus();
-  }, []);
-
-  useEffect(() => {
-    if (!open) return;
-    const onPointer = (e: MouseEvent) => {
-      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        close(true);
-      }
-    };
-    document.addEventListener('mousedown', onPointer);
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('mousedown', onPointer);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [open, close]);
-
-  // Focus the first control on open, so Tab continues from inside the menu.
-  useEffect(() => {
-    if (open) panelRef.current?.querySelector<HTMLElement>('button, a')?.focus();
-  }, [open]);
-
-  // Navigating away closes it: a menu left open over a new page is a bug the
-  // reader has to clean up themselves.
-  const go = (to: string) => {
-    close();
-    navigate(to);
-  };
-
-  const user = session.user;
-  const name = (lang === 'ar' ? (user?.displayNameAr ?? user?.displayName) : user?.displayName) ?? '';
-  const initials = initialsOf(name || undefined, user?.email, lang);
-
-  const end = async () => {
-    setBusy(true);
-    try {
-      await signOut();
-    } finally {
-      // Whether the server call succeeded or not, the local session is gone and
-      // the reader must not be left on an authenticated-looking page. The
-      // redirect is the point; a failed sign-out that leaves the portal on
-      // screen is the one outcome that is not acceptable.
-      setBusy(false);
-      close();
-      navigate('/login');
-    }
-  };
-
-  return (
-    <div className="acct" ref={wrapRef}>
-      <button
-        ref={triggerRef}
-        type="button"
-        className="acct__trigger"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-label={t('a11y.accountMenu')}
-        onClick={() => (open ? close() : setOpen(true))}
-      >
-        <span className="acct__avatar" aria-hidden="true">{initials}</span>
-      </button>
-
-      {open && (
-        <div className="acct__panel" role="menu" ref={panelRef} aria-label={t('a11y.accountMenu')}>
-          <div className="acct__who">
-            <span className="acct__avatar acct__avatar--lg" aria-hidden="true">{initials}</span>
-            <div>
-              <b>{name}</b>
-              <span className="ltr">{user?.email}</span>
-              {session.security?.sessionExpiresAt && (
-                <span className="acct__meta">
-                  {t('auth.sessionEnding')} {fmt.relative(session.security.sessionExpiresAt)}
-                </span>
-              )}
-            </div>
-          </div>
-
-          <div className="acct__row"><LanguageToggle /></div>
-
-          <button type="button" role="menuitem" className="acct__item" onClick={() => go('/portal/profile')}>
-            <Icon name="user" size={16} />{t('nav.profile')}
-          </button>
-          <button type="button" role="menuitem" className="acct__item" onClick={() => go('/portal/security')}>
-            <Icon name="shield" size={16} />{t('nav.security')}
-          </button>
-          <button type="button" role="menuitem" className="acct__item" onClick={() => go('/portal/privacy')}>
-            <Icon name="lock" size={16} />{t('nav.privacy')}
-          </button>
-
-          <div className="acct__sep" />
-
-          <button
-            type="button"
-            role="menuitem"
-            className="acct__item acct__item--danger"
-            onClick={end}
-            disabled={busy}
-          >
-            <Icon name="logout" size={16} />{t('nav.signOut')}
-          </button>
-          <p className="acct__hint">{t('nav.signOutConfirm')}</p>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function TopBar({ unread }: { unread: number }) {
-  const { t, lang } = useI18n();
-  const { session } = useAuth();
-  const user = session.user;
-  const name = lang === 'ar' ? (user?.displayNameAr ?? user?.displayName) : user?.displayName;
-
-  return (
-    <header className="topbar">
-      <Link to="/portal" className="topbar__brand" aria-label={t('app.name')}>
-        <BrandMark small />
-        <span>{name ?? t('app.portal')}</span>
-      </Link>
-      <span className="topbar__spacer" />
-      <LanguageToggle variant="compact" />
-      <Link
-        to="/portal/notifications"
-        className="icon-btn"
-        aria-label={t('a11y.notifications', { n: unread })}
-        style={{ position: 'relative' }}
-      >
-        <Icon name="bell" size={18} />
-        {unread > 0 && <span className="tabbar__dot" />}
-      </Link>
-      <AccountMenu />
-    </header>
-  );
-}
-
-function TabBar({ unread }: { unread: number }) {
-  const { t } = useI18n();
-  return (
-    <nav className="tabbar" aria-label={t('a11y.mainNav')}>
-      {TABS.map((item) => (
-        <NavLink key={item.to} to={item.to} end={item.to === '/portal'}>
-          <Icon name={item.icon} size={20} />
-          <span>{t(item.labelKey)}</span>
-          {item.labelKey === 'nav.dashboard' && unread > 0 && <span className="tabbar__dot" />}
-        </NavLink>
-      ))}
-    </nav>
-  );
-}
-
 /**
  * The unread count is polled rather than pushed: there is no websocket, so the
  * portal stays a plain request/response app with no extra attack surface. The
  * interval is deliberately gentle.
+ *
+ * It lives here, beside the shell, because three surfaces now read it — the
+ * desktop sidebar's orientation badge would be a fourth, and one number read
+ * four times is one number.
  */
 function useUnread(signedIn: boolean): number {
   const [unread, setUnread] = useState(0);
@@ -412,16 +81,17 @@ function useUnread(signedIn: boolean): number {
   return unread;
 }
 
-/**
- * The authenticated chrome. Exported so a test can render the shell alone with
- * a stub body: several of this app's worst defects have been in the SHELL rather
- * than in any page (a sign-out that existed at only one width, a tab bar that
- * collapsed to zero width), and the shell cannot be reached through a page test.
- */
 export function Shell({ children }: { children: ReactNode }) {
   const { signedIn } = useAuth();
   const location = useLocation();
   const unread = useUnread(signedIn);
+  /*
+    A contact must not land on a screen they cannot use. The account surfaces
+    are the holder's, and the guard turns a typed URL into a sentence rather
+    than a page that loads and then fails — the server refuses the request
+    either way, which is what actually protects it.
+  */
+  const { has } = useCapability();
 
   // Scroll to the top on navigation: a long matter page should not open halfway.
   useEffect(() => {
@@ -433,9 +103,11 @@ export function Shell({ children }: { children: ReactNode }) {
       {signedIn && <Sidebar />}
       {signedIn && <TopBar unread={unread} />}
       <main className="main" id="main">
-        {children}
+        {signedIn && !has('billing') && isBillingPath(location.pathname)
+          ? <HolderOnly />
+          : children}
       </main>
-      {signedIn && <TabBar unread={unread} />}
+      {signedIn && <TabBar unread={unread} path={location.pathname} />}
     </div>
   );
 }
@@ -497,6 +169,38 @@ function BootFailure() {
   );
 }
 
+/**
+ * The screens, keyed by the nav model's ids.
+ *
+ * `DESTINATIONS` is the list; this map is only "which component answers", and
+ * the parity between the two is enforced by the type on the map — a nav entry
+ * without a screen, or a screen without a nav entry, is a compile error rather
+ * than a page nobody can reach. That is the defect this replaced: the portal
+ * held a nav array and a route table as two independent literals, and nine of
+ * fourteen destinations were reachable only on a desktop.
+ */
+const SCREENS: Record<string, ComponentType> = {
+  dashboard: Dashboard,
+  notifications: Notifications,
+  messages: Messages,
+  thread: Thread,
+  matters: Matters,
+  matter: MatterDetail,
+  documents: Documents,
+  hearings: Hearings,
+  deadlines: Deadlines,
+  appointments: Appointments,
+  profile: Profile,
+  security: Security,
+  privacy: Privacy,
+  invoices: Invoices,
+  invoice: InvoiceDetail,
+  receipts: Receipts,
+};
+
+/** The exact shape of a nav path, as a react-router pattern. */
+const asRoute = (to: string) => to.replace(/:id$/, ':id');
+
 function AppRoutes() {
   const { loading, error } = useAuth();
   if (loading) return <PageLoader />;
@@ -509,26 +213,59 @@ function AppRoutes() {
       <Route path="/forgot-password" element={<RequireAnonymous><ForgotPassword /></RequireAnonymous>} />
       <Route path="/reset-password" element={<RequireAnonymous><ResetPassword /></RequireAnonymous>} />
 
-      <Route path="/portal" element={<RequireAuth><Dashboard /></RequireAuth>} />
-      <Route path="/portal/matters" element={<RequireAuth><Matters /></RequireAuth>} />
-      <Route path="/portal/matters/:id" element={<RequireAuth><MatterDetail /></RequireAuth>} />
-      <Route path="/portal/hearings" element={<RequireAuth><Hearings /></RequireAuth>} />
-      <Route path="/portal/deadlines" element={<RequireAuth><Deadlines /></RequireAuth>} />
-      <Route path="/portal/documents" element={<RequireAuth><Documents /></RequireAuth>} />
-      <Route path="/portal/invoices" element={<RequireAuth><Invoices /></RequireAuth>} />
-      <Route path="/portal/invoices/:id" element={<RequireAuth><InvoiceDetail /></RequireAuth>} />
-      <Route path="/portal/receipts" element={<RequireAuth><Receipts /></RequireAuth>} />
-      <Route path="/portal/messages" element={<RequireAuth><Messages /></RequireAuth>} />
-      <Route path="/portal/messages/:id" element={<RequireAuth><Thread /></RequireAuth>} />
-      <Route path="/portal/appointments" element={<RequireAuth><Appointments /></RequireAuth>} />
-      <Route path="/portal/notifications" element={<RequireAuth><Notifications /></RequireAuth>} />
-      <Route path="/portal/profile" element={<RequireAuth><Profile /></RequireAuth>} />
-      <Route path="/portal/security" element={<RequireAuth><Security /></RequireAuth>} />
-      <Route path="/portal/privacy" element={<RequireAuth><Privacy /></RequireAuth>} />
+      {/*
+        Every destination the nav model declares, in the model's order, guarded
+        by the capability the model assigns it. A detail path is governed by the
+        same capability as its list (`/portal/matters/:id` is `work` because
+        `/portal/matters` is) — which is why the model states the capability once
+        per screen rather than once per URL.
+      */}
+      {DESTINATIONS.concat(DETAIL_ITEMS).map((item) => {
+        const Screen = SCREENS[item.id];
+        if (!Screen) throw new Error(`nav entry '${item.id}' has no screen`);
+        return (
+          <Route
+            key={item.to}
+            path={asRoute(item.to)}
+            element={<RequireAuth><RequireCapability capability={item.capability}><Screen /></RequireCapability></RequireAuth>}
+          />
+        );
+      })}
 
       <Route path="/" element={<Navigate to="/portal" replace />} />
       <Route path="*" element={<NotFound />} />
     </Routes>
+  );
+}
+
+/**
+ * The client-side half of the role rule.
+ *
+ * It says WHY in the reader's language instead of rendering a page whose every
+ * request will 403, and it is explicitly not a control: the server refuses the
+ * money surfaces itself (`requireAccountHolder` in the API), so a contact who
+ * edits the URL, or calls the endpoint directly, is refused there.
+ */
+function RequireCapability({ capability, children }: { capability: string; children: ReactNode }) {
+  const { role } = useCapability();
+  if (!capabilitiesFor(role).has(capability as never)) return <HolderOnly />;
+  return <>{children}</>;
+}
+
+function isBillingPath(path: string): boolean {
+  return path.startsWith('/portal/invoices') || path.startsWith('/portal/receipts');
+}
+
+function HolderOnly() {
+  const { t } = useI18n();
+  return (
+    <div className="page">
+      <div className="empty">
+        <Icon name="lock" size={28} />
+        <h2>{t('nav.group.finance')}</h2>
+        <p>{t('nav.holderOnly')}</p>
+      </div>
+    </div>
   );
 }
 

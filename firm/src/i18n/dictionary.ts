@@ -105,6 +105,10 @@ const ar = {
   'nav.audit': 'سجل التدقيق',
 
   'nav.planned': 'قيد التطوير',
+  'nav.plannedSection': 'وحدات قيد التطوير',
+  'nav.identity': 'الدور والجهة',
+  'nav.atFirm': 'في',
+  'nav.roleNone': 'بدون دور مُسند',
   'nav.collapse': 'طي القائمة',
   'nav.expand': 'توسيع القائمة',
   'nav.noModules': 'لا توجد وحدات متاحة لحسابك',
@@ -593,6 +597,10 @@ const en = {
   'nav.audit': 'Audit',
 
   'nav.planned': 'In development',
+  'nav.plannedSection': 'In development',
+  'nav.identity': 'Role and firm',
+  'nav.atFirm': 'at',
+  'nav.roleNone': 'No role assigned',
   'nav.collapse': 'Collapse sidebar',
   'nav.expand': 'Expand sidebar',
   'nav.noModules': 'No modules available for your account',

@@ -13,7 +13,7 @@ import { Router } from 'express';
 import multer from 'multer';
 import { z } from 'zod';
 import type { Container } from '../container.js';
-import { ah, csrfGuard, requireClient, uploadRateLimit, tamperGuard } from '../auth/middleware.js';
+import { ah, csrfGuard, requireAccountHolder, requireClient, uploadRateLimit, tamperGuard } from '../auth/middleware.js';
 import { ok } from '../lib/http.js';
 import { requestInfo } from '../audit/logger.js';
 import { badRequest } from '../lib/errors.js';
@@ -40,6 +40,16 @@ export function clientRouter(c: Container): Router {
   const ctxOf = (req: Parameters<typeof requestInfo>[0]) => requestInfo(req, c.trustProxy);
   /** Shorthand so every mutating route reads the same way. */
   const guard = (exempt?: string[]) => tamperGuard(c, exempt) as never;
+  /**
+   * The money, and who may see it. Mounted on every billing route below.
+   *
+   * Filtering the sidebar is not a control, and this project has already
+   * rejected "hide functionality" as a posture: a contact whose menu omits
+   * Invoices must not be able to GET them either. The gate lives here rather
+   * than in the service so that the route table reads as the contract it is —
+   * you can see, on one line per route, which role each surface answers to.
+   */
+  const holder = requireAccountHolder(c);
 
   // Everything below requires a fully authorized client principal.
   r.use(requireClient(c));
@@ -172,11 +182,11 @@ export function clientRouter(c: Container): Router {
   // =========================================================================
   // INVOICES & PAYMENTS (§20, §21)
   // =========================================================================
-  r.get('/invoices', ah(async (req, res) => {
+  r.get('/invoices', holder, ah(async (req, res) => {
     ok(res, { invoices: await c.clients.listInvoices(req.principal!) });
   }));
 
-  r.get('/invoices/:id', ah(async (req, res) => {
+  r.get('/invoices/:id', holder, ah(async (req, res) => {
     ok(res, await c.clients.getInvoice(req.principal!, String(req.params.id), ctxOf(req)));
   }));
 
@@ -184,7 +194,7 @@ export function clientRouter(c: Container): Router {
    * Creates an intent. It cannot mark anything paid — see PaymentService.
    * There is deliberately no PATCH/PUT/POST route that writes invoice state.
    */
-  r.post('/invoices/:id/payment', csrfGuard(), guard(), ah(async (req, res) => {
+  r.post('/invoices/:id/payment', holder, csrfGuard(), guard(), ah(async (req, res) => {
     const body = z
       .object({ provider: z.string().min(1).max(40).optional(), idempotencyKey: z.string().min(8).max(120).optional() })
       .safeParse(req.body ?? {});
@@ -192,7 +202,7 @@ export function clientRouter(c: Container): Router {
     ok(res, await c.clients.startPayment(req.principal!, String(req.params.id), body.data, ctxOf(req)));
   }));
 
-  r.get('/receipts', ah(async (req, res) => {
+  r.get('/receipts', holder, ah(async (req, res) => {
     ok(res, { receipts: await c.clients.listReceipts(req.principal!) });
   }));
 

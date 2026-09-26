@@ -97,10 +97,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const adopt = useCallback(
     (res: LoginResponse) => {
+      /*
+        The login response names the user but does NOT carry the portal role —
+        the role is a server-side fact about the account relationship, and this
+        optimistic step is only here to paint the frame before the authoritative
+        read below lands.
+
+        It used to assume `client_primary`. That was wrong in one direction that
+        matters: for the few hundred milliseconds before the session read
+        resolved, a contact saw a rail with Invoices in it — and a nav that
+        flickers a capability into existence teaches the wrong thing about what
+        a role means. The assumption is now the NARROW one, and the authoritative
+        role replaces it immediately. (The server refuses the money surfaces on
+        its own either way; this is about not lying in the meantime.)
+      */
       setSession({
         authenticated: true,
         user: res.user
-          ? { ...res.user, portalRole: 'client_primary' }
+          ? {
+              ...res.user,
+              portalRole: 'client_contact',
+              jobTitle: null,
+              clientName: null,
+              clientNameAr: null,
+            }
           : undefined,
         preferences: res.preferences,
       });

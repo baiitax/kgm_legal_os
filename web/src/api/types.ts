@@ -13,7 +13,21 @@ export interface SessionUser {
   email: string;
   displayName: string;
   displayNameAr: string | null;
+  /**
+   * The portal's ONLY role, and the portal's only privilege distinction:
+   * `client_primary` holds the account (its money and its administration),
+   * `client_contact` holds the work that account has shared with them.
+   */
   portalRole: 'client_primary' | 'client_contact';
+  jobTitle: string | null;
+  /**
+   * The client entity this session acts for — by NAME. `principal.clientIds`
+   * stays server-side; the shell renders the name so the reader knows whose
+   * behalf they are acting on, which is a question a portal serving corporate
+   * clients has to answer in its own header.
+   */
+  clientName: string | null;
+  clientNameAr: string | null;
 }
 
 export interface SessionResponse {

@@ -104,6 +104,9 @@ export function AppRail({ path, onNavigate }: AppRailProps) {
         </button>
       </div>
 
+      {/* ---- who, in what role, at which firm ---- */}
+      {!collapsed && <RailIdentity />}
+
       {/* ---- module tree ---- */}
       <div className="kgm-rail__scroll">
         {nav.groups.length === 0 ? (
@@ -148,6 +151,74 @@ export function AppRail({ path, onNavigate }: AppRailProps) {
 
 // ==========================================================================
 
+/**
+ * WHO IS SIGNED IN, AS WHAT, AT WHICH FIRM.
+ *
+ * The rail is the surface that decides what a member may reach, and until now
+ * it never said whose reach it was describing. That is a real question in this
+ * product, not a decoration:
+ *
+ *   - It is multi-tenant from day one. The same person holds a different role in
+ *     each firm, and switching firm changes both their permissions and — for a
+ *     lawyer — whether their ring is intact.
+ *   - Roles are plural and scoped. A managing partner who is also head of
+ *     litigation sees a union of two grants; the rail should not imply a single
+ *     job title.
+ *   - Departments decide the counterparty scope (§ partner scoping), so where
+ *     the member sits is part of reading the tree beneath this block.
+ *
+ * Everything here comes from the session payload the server resolved. Nothing is
+ * derived locally, and nothing is prettified into a capability — the chip says
+ * what the membership says, and the tree below it says what that reaches.
+ */
+function RailIdentity() {
+  const { t, lang } = useI18n();
+  const { session } = useFirmSession();
+  const member = session?.member;
+  if (!member) return null;
+
+  const name = lang === 'ar' ? (member.displayNameAr ?? member.displayName) : member.displayName;
+  const roles = member.roles.length
+    ? member.roles.map((r) => (lang === 'ar' ? (r.nameAr ?? r.name) : r.name))
+    : [t('nav.roleNone')];
+  /*
+    Two roles are shown as two, rather than a job title and then one of them: a
+    member who holds both finance and compliance holds both grants, and naming
+    one would misdescribe what the tree below contains. The job title is the
+    fallback for a membership with no role at all — free text, so it is only ever
+    a label, never a capability.
+  */
+  const jobTitle = member.jobTitle
+    ? (lang === 'ar' ? (member.jobTitleAr ?? member.jobTitle) : member.jobTitle)
+    : null;
+  const role = member.roles.length > 1
+    ? roles.slice(0, 3).join(' · ')
+    : [jobTitle, roles[0]].filter(Boolean).join(' · ');
+  const department = member.departments[0];
+  const deptName = department
+    ? (lang === 'ar' ? (department.nameAr ?? department.name) : department.name)
+    : null;
+  const firm = session?.tenants.find((x) => x.tenantId === session.activeTenantId);
+  const firmName = firm
+    ? (lang === 'ar' ? (firm.tenantNameAr ?? firm.tenantName) : firm.tenantName)
+    : null;
+
+  return (
+    <div className="kgm-rail__identity" role="group" aria-label={t('nav.identity')}>
+      <span className="kgm-rail__identityname">{name}</span>
+      <span className="kgm-rail__identityrole">{role}</span>
+      {firmName && (
+        <span className="kgm-rail__identityfirm">
+          {department && <>{deptName} · </>}
+          {t('nav.atFirm')} {firmName}
+        </span>
+      )}
+    </div>
+  );
+}
+
+// ==========================================================================
+
 interface RailGroupProps {
   readonly group: NavGroup;
   readonly leaves: readonly NavLeaf[];
@@ -160,6 +231,10 @@ interface RailGroupProps {
 function RailGroup({ group, leaves, collapsed, path, labelId, onNavigate }: RailGroupProps) {
   const { t } = useI18n();
   const Icon = group.icon;
+  // Split, not filtered: every leaf still renders, and within each half the
+  // tree's own order is preserved.
+  const built = leaves.filter((l) => !l.planned);
+  const planned = leaves.filter((l) => l.planned);
 
   // A group with no children routes directly.
   if (group.to) {
@@ -205,14 +280,41 @@ function RailGroup({ group, leaves, collapsed, path, labelId, onNavigate }: Rail
         )}
       </p>
 
+      /*
+        BUILT FIRST, THEN WHAT IS COMING.
+
+        Most of this tree is `planned` — Legal, Finance and Compliance are
+        entirely so — and interleaving them with the four modules that work made
+        the rail read as a product that is mostly broken. The split costs
+        nothing: nothing is hidden and nothing is re-ordered within either half,
+        so a member who knew where Audit was still finds it exactly there.
+      */
       <ul className="kgm-rail__list">
-        {leaves.map((leaf) => (
+        {built.map((leaf) => (
           <li key={leaf.id}>
             <RailLink
               to={leaf.to}
               label={t(leaf.labelKey)}
               icon={<leaf.icon size={18} />}
               active={isPathAllowed(new Set([leaf.to]), path)}
+              collapsed={collapsed}
+              planned={leaf.planned}
+              onNavigate={onNavigate}
+            />
+          </li>
+        ))}
+        {planned.length > 0 && !collapsed && (
+          <li className="kgm-rail__divider" aria-hidden="true">
+            <span>{t('nav.plannedSection')}</span>
+          </li>
+        )}
+        {planned.map((leaf) => (
+          <li key={leaf.id}>
+            <RailLink
+              to={leaf.to}
+              label={t(leaf.labelKey)}
+              icon={<leaf.icon size={18} />}
+              active={false}
               collapsed={collapsed}
               planned={leaf.planned}
               onNavigate={onNavigate}

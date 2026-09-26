@@ -242,6 +242,56 @@ export function requireClient(deps: MiddlewareDeps): RequestHandler {
 }
 
 /**
+ * Requires the ACCOUNT HOLDER (`client_primary`) — the portal's only role gate.
+ *
+ * The distinction the portal draws is authority over the account, not
+ * seniority: a contact may read the matters, the documents, the messages and
+ * the diary because a colleague shared the work with them, and may not read the
+ * invoices, the receipts or record a payment because those belong to whoever
+ * holds the account. (`web/src/nav.ts` states the same model for the menu, and
+ * that is the point — the menu is the second statement of this rule, never the
+ * only one.)
+ *
+ * It writes its own AUTHZ_DENIED row with `alreadyAudited`, so the refusal is
+ * recorded once, with the reason the guard knew, rather than twice with a
+ * generic code — the same discipline `requireClient` follows.
+ *
+ * The refusal is by NAME (403 `role_not_permitted`), not the
+ * indistinguishable not-found used for another client's resources: the caller's
+ * own client is not a secret from the caller, and a member of the account who
+ * sees only "not found" would reasonably report a broken portal.
+ */
+export function requireAccountHolder(deps: MiddlewareDeps): RequestHandler {
+  return async (req, _res, next) => {
+    try {
+      const p = req.principal;
+      if (!p) throw unauthorized('unauthenticated', 'authentication required');
+      if (p.clientUser.portalRole !== 'client_primary') {
+        await deps.audit.tryWrite(
+          {
+            action: 'AUTHZ_DENIED',
+            actor: { kind: 'client_user', userId: p.userId, tenantId: p.tenantId },
+            outcome: 'denied',
+            reasonCode: 'role_not_permitted',
+            // The entity is the SURFACE, not a row: there is no id to name,
+            // because the refusal happens before any billing record is read.
+            resourceType: 'portal_surface',
+            metadata: { portalRole: p.clientUser.portalRole, capability: 'billing' },
+          },
+          requestInfo(req, deps.trustProxy),
+        );
+        throw forbidden('role_not_permitted', 'this action belongs to the account holder', 'role_not_permitted', {
+          alreadyAudited: true,
+        });
+      }
+      next();
+    } catch (err) {
+      next(err);
+    }
+  };
+}
+
+/**
  * CSRF gate for state-changing requests (§7).
  * The token must be bound to the current session id.
  */

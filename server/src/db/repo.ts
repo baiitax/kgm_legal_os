@@ -146,6 +146,18 @@ export class Repo {
    * for a request — never a value from the request body, query or headers.
    */
   async getClientUsersForUser(userId: string) {
+    /*
+      NO JOIN TO `clients` HERE, and the reason is not style.
+
+      This query runs while the session is being RESOLVED — the AUTH phase, before
+      the request has a tenant or a client scope. `clients` has no policy for that
+      phase, so a join to it returns nothing: the name comes back null and the
+      shell silently renders without it. SQLite has no RLS, so the same join passes
+      the whole suite and fails on the deployed system, which is what happened.
+
+      The client's name is therefore read by the SESSION ROUTE, in the portal phase
+      the join was implicitly assuming it was in (`ClientService.getEntityName`).
+    */
     return this.q().all<Row>(
       `select cu.id, cu.user_id, cu.client_id, cu.tenant_id, cu.display_name,
               cu.display_name_ar, cu.job_title, cu.phone, cu.portal_role, cu.status
@@ -153,6 +165,23 @@ export class Repo {
         where cu.user_id = ? and cu.status = 'active'`,
       [userId],
     );
+  }
+
+  /**
+   * The client's own name, in the portal phase.
+   *
+   * Two columns, and nothing else: the shell needs a label, not a record. RLS
+   * narrows this to the caller's tenant and the exact set of client ids their
+   * `client_users` rows grant, so it cannot be turned into a read of another
+   * client — and a missing row returns undefined rather than throwing, because a
+   * blank entity line is a far better outcome than a portal that will not load.
+   */
+  async getClientEntityName(clientId: string, tenantId: string) {
+    const row = await this.q().get<Row>(
+      `select name, name_ar from clients where id = ? and tenant_id = ?`,
+      [clientId, tenantId],
+    );
+    return row ? { name: String(row.name), nameAr: (row.name_ar as string | null) ?? null } : null;
   }
 
   async getClient(clientId: string, tenantId: string) {

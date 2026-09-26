@@ -77,9 +77,16 @@ export function authRouter(c: Container): Router {
   // Session introspection — the SPA's single source of truth about identity.
   // Nothing here is trusted BY the server; it is a read-out of server state.
   // -------------------------------------------------------------------------
-  r.get('/session', ensureAnonymousCsrf, (req, res) => {
+  r.get('/session', ensureAnonymousCsrf, ah(async (req, res) => {
     const p = req.principal;
     if (!p) return ok(res, { authenticated: false });
+    /*
+      Read here, not in `resolve()`. By this line the scope has been switched to
+      the PORTAL phase — the principal's tenant and client ids are set — which is
+      the only phase in which `clients` has a policy. In the auth phase the same
+      query returns nothing at all.
+    */
+    const entity = await c.clients.getEntityName(p).catch(() => null);
     ok(res, {
       authenticated: true,
       user: {
@@ -88,6 +95,10 @@ export function authRouter(c: Container): Router {
         displayName: p.clientUser.displayName,
         displayNameAr: p.clientUser.displayNameAr,
         portalRole: p.clientUser.portalRole,
+        jobTitle: p.clientUser.jobTitle,
+        // Names only: the entity this session acts for, never its id.
+        clientName: entity?.name ?? null,
+        clientNameAr: entity?.nameAr ?? null,
       },
       // tenantId and clientIds are deliberately NOT exposed. The SPA renders
       // NAMES (firmName, matter titles), never identifiers, so there is no
@@ -103,7 +114,7 @@ export function authRouter(c: Container): Router {
         remembered: p.remembered,
       },
     });
-  });
+  }));
 
   // -------------------------------------------------------------------------
   // LOGIN

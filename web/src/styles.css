@@ -234,11 +234,19 @@ table {
   min-height: 100%;
 }
 
+/*
+  Above the sidebar breakpoint the header STAYS. It carries the section the
+  reader is in, the unread count, the language and the account — and until this
+  change it was `display: none` there, which is why the desktop portal had no
+  orientation and no visible notification count at all while the phone had both.
+*/
 @media (min-width: 1024px) {
   .app {
     grid-template-columns: 264px 1fr;
-    grid-template-rows: 1fr;
-    grid-template-areas: 'sidebar main';
+    grid-template-rows: var(--bar-h) 1fr;
+    grid-template-areas:
+      'sidebar topbar'
+      'sidebar main';
   }
 }
 
@@ -255,11 +263,9 @@ table {
   z-index: 20;
 }
 
-@media (min-width: 1024px) {
-  .topbar {
-    display: none;
-  }
-}
+/* The account control must never be hidden at any width: it is the only
+   sign-out on a phone, and the only identity read-out on a desktop. That is
+   asserted in a test, and this comment is here so the rule is not re-added. */
 
 .topbar__brand {
   display: flex;
@@ -274,6 +280,96 @@ table {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Where the reader is: the section on the first line, the client entity the
+   session acts for on the second. Two facts, one glance, every width. */
+.topbar__where {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+  min-width: 0;
+}
+
+.topbar__where b {
+  font-size: var(--step-0);
+}
+
+.topbar__where small {
+  color: var(--muted);
+  font-size: 0.6875rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The parent group, on desktop only, where there is room for the hierarchy. */
+.topbar__crumb {
+  display: none;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.6875rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+@media (min-width: 1024px) {
+  .topbar__crumb {
+    display: inline-block;
+  }
+  .topbar {
+    padding-inline: var(--space-6);
+  }
+}
+
+/* ------------------------------------------------------------- role chip -- */
+/* Who you are, as the server resolved it. Rendered in the sidebar head, the
+   account panel and the More sheet — one component, so the wording cannot
+   drift between the three places a person might look for it. */
+.role-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-block-start: 6px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.role-chip--primary {
+  background: rgba(200, 164, 92, 0.22);
+  color: var(--gold);
+  border: 1px solid rgba(200, 164, 92, 0.42);
+}
+
+.role-chip--contact {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(234, 241, 238, 0.86);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+}
+
+/* The chip also appears on light surfaces — the account panel and the sheet —
+   where the rail's translucent treatment would be invisible. */
+[role='menu'] .role-chip--contact,
+.sheet .role-chip--contact,
+.light .role-chip--contact {
+  background: var(--line);
+  color: var(--muted);
+  border-color: var(--line);
+}
+
+/* The entity this session acts for, under the reader's own name. */
+.sidebar__entity {
+  display: block;
+  margin-block-start: 4px;
+  color: var(--gold);
+  font-size: 0.6875rem;
+  letter-spacing: 0.02em;
 }
 
 .topbar__spacer {
@@ -442,7 +538,8 @@ html[dir='rtl'] .navlink[aria-current='page'] {
   }
 }
 
-.tabbar a {
+.tabbar a,
+.tabbar button {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -452,14 +549,22 @@ html[dir='rtl'] .navlink[aria-current='page'] {
   color: var(--muted);
   font-size: 0.6875rem;
   position: relative;
+  /* A button is a slot here, not a control with chrome: the bar's slots must be
+     indistinguishable whether they navigate or open the sheet. */
+  background: none;
+  border: 0;
+  font-family: inherit;
+  cursor: pointer;
 }
 
-.tabbar a[aria-current='page'] {
+.tabbar a[aria-current='page'],
+.tabbar button.tab--on {
   color: var(--brand-2);
   font-weight: 700;
 }
 
-.tabbar a[aria-current='page']::before {
+.tabbar a[aria-current='page']::before,
+.tabbar button.tab--on::before {
   content: '';
   position: absolute;
   inset-block-start: 0;
@@ -1661,6 +1766,7 @@ html[dir='dark'] .btn--primary,
 
 /* Print: an invoice or receipt should print cleanly on A4. */
 @media print {
+  .sheet,
   .sidebar,
   .topbar,
   .tabbar,
@@ -2438,3 +2544,164 @@ html[dir='dark'] .btn--primary,
 .acct__sep { block-size: 1px; margin-block: 8px; background: var(--line); }
 
 .acct__hint { margin: 6px 10px 0; font-size: var(--step--1); color: var(--muted); }
+
+/* ==========================================================================
+   THE MORE SHEET · §nav
+   ==========================================================================
+   The bar holds five slots and the portal has fourteen destinations, so the
+   rest live behind More — grouped, capped to a readable grid, and scrolling
+   independently of the page beneath.
+
+   It is the fix for the mobile layout's real defect rather than a flourish:
+   hearings, deadlines, messages, appointments, notifications, receipts, security
+   and privacy had NO route to them on a phone at all, and sign-out existed only
+   behind an unlabelled avatar.
+   ========================================================================== */
+
+.sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  /* Above 1024 px the sheet is not the only way to reach anything — but it is
+     still offered, because a pointer does not make a long menu shorter. */
+  animation: sheet-in 0.16s ease;
+}
+
+@keyframes sheet-in {
+  from { translate: 0 12px; opacity: 0; }
+  to { translate: 0 0; opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sheet { animation: none; }
+  .sheet__tile, .tabbar button { transition: none; }
+}
+
+.sheet__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  padding-block-end: var(--space-3);
+  border-block-end: 1px solid var(--line);
+  background: var(--card);
+  padding-block-start: calc(var(--space-4) + env(safe-area-inset-top, 0px));
+}
+
+.sheet__head b {
+  flex: 1;
+  font-size: var(--step-1);
+}
+
+.sheet__body {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-4);
+  padding-block-end: var(--space-6);
+  max-width: 1180px;
+  width: 100%;
+  margin-inline: auto;
+}
+
+.sheet__group + .sheet__group {
+  margin-block-start: var(--space-5);
+}
+
+.sheet__grouplabel {
+  margin: 0 0 var(--space-2);
+  font-size: 0.6875rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.sheet__tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  gap: var(--space-2);
+}
+
+.sheet__tile {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: var(--space-2);
+  min-block-size: 78px;
+  padding: var(--space-3);
+  border-radius: var(--radius-md, 12px);
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--ink);
+  font: inherit;
+  font-weight: 600;
+  text-align: start;
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease, translate 0.12s ease;
+}
+
+.sheet__tile svg { color: var(--brand-2); }
+
+.sheet__tile:hover {
+  border-color: var(--brand-2);
+  translate: 0 -1px;
+}
+
+.sheet__tile:focus-visible {
+  outline: 2px solid var(--brand-2);
+  outline-offset: 2px;
+}
+
+/* Where the reader is, in the sheet: the tile is lit, so the sheet answers the
+   same question the bar does. */
+.sheet__tile--on {
+  border-color: var(--brand-2);
+  background: var(--card-alt, var(--card));
+  box-shadow: inset 3px 0 0 var(--gold);
+}
+
+html[dir='rtl'] .sheet__tile--on { box-shadow: inset -3px 0 0 var(--gold); }
+
+/* What a contact may not open. Visible, inert, and explanatory — a destination
+   that vanishes reads as a defect; one that explains the rule reads as a rule. */
+.sheet__tile--locked {
+  color: var(--muted);
+  border-style: dashed;
+  cursor: default;
+  font-weight: 500;
+}
+
+.sheet__tile--locked svg { color: var(--muted); }
+
+.sheet__foot {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  padding-block-end: calc(var(--space-3) + env(safe-area-inset-bottom, 0px));
+  border-block-start: 1px solid var(--line);
+  background: var(--card);
+}
+
+.sheet__account { margin-inline-start: auto; }
+
+.sheet__signout {
+  flex: 0 1 auto;
+  width: auto;
+  min-inline-size: 132px;
+}
+
+/* The tab bar's More slot is a button; this keeps the two kinds of slot the
+   same size and removes the press styling a browser button would otherwise
+   bring. */
+.tabbar button:active { background: none; }
+
+/* Print: none of the three surfaces is part of a document, and the sheet — a
+   fixed overlay — would otherwise print as a full page of navigation over the
+   statement the reader actually wanted. */
+@media print {
+  .sheet { display: none !important; }
+}
