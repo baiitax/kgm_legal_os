@@ -2067,7 +2067,13 @@ create table if not exists judgments (
   check (amount_sar is null or amount_sar >= 0),
   check (stay_in_force = 0 or stay_ordered_at is not null),
   check (appeal_deadline_at is null or (appeal_rule_cited is not null and appeal_rule_days is not null)),
-  check (enforcement_status <> 'under_enforcement' or enforcement_opened_at is not null)
+  check (enforcement_status <> 'under_enforcement' or enforcement_opened_at is not null),
+  /* The twin of the line above, and it was missing until 0053 on the Postgres side: the
+     gate that opens enforcement RECORDS the finality that admits it, so an enforcement
+     under way cannot be a row that never learned when the judgment became final. Kept in
+     both dialects because a mirror that permits what the real schema forbids is a mirror
+     that teaches the wrong lesson — the entire reason this file carries foreign keys. */
+  check (enforcement_status <> 'under_enforcement' or final_at is not null)
 );
 create index if not exists judgments_matter_idx on judgments(matter_id, pronounced_at desc);
 create index if not exists judgments_client_idx on judgments(client_id, pronounced_at desc);

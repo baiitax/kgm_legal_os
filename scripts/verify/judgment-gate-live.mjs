@@ -483,6 +483,68 @@ record('every P0.4 table carries a portal_api refusal policy',
   new Set(policyRows.map((r) => r.tablename)).size === 4,
   policyRows.map((r) => `${r.tablename}`).sort().join(', '));
 
+/* ── 12 · the state carries its declaration (0053) ────────────────────────── */
+/*
+  THE ROW THAT WAS SITTING WRONG. 0052 repaired the function the gate calls, so every
+  admission since records the finality it declares. It could not repair the admissions made
+  before it, and it could not forbid the state: 0045 wrote a check saying enforcement which
+  never opened cannot be under way, and no twin saying enforcement under way cannot have
+  skipped the finality that admits it. One row was found in that state — opened in the
+  minutes before 0052 was applied — by reading the register rather than by any test.
+
+  0053 repaired the rows with the date the admission presupposed and added the twin. These
+  three checks hold it still, in the order the lesson was learned: ask the REGISTER, ask the
+  SCHEMA, and then try to break it.
+*/
+const orphaned = await db.query(
+  `select count(*)::int as n from public.judgments
+    where enforcement_status = 'under_enforcement' and final_at is null`);
+record('no judgment is under enforcement without the finality that admits it',
+  Number(orphaned.rows[0].n) === 0, `rows in that state: ${orphaned.rows[0].n}`);
+
+const carries = await db.query(
+  `select pg_get_constraintdef(oid) as def from pg_constraint
+    where conname = 'judgments_enforcement_carries_finality'
+      and conrelid = 'public.judgments'::regclass`);
+record('and the schema forbids it, not only the register',
+  Boolean(carries.rows[0]?.def), carries.rows[0]?.def ?? 'constraint missing');
+
+/* PROVEN BY BEING REFUSED. Take a real enforcement that has a finality and try to take it
+   away — the one write the state must not permit. Rolled back either way, so the probe
+   leaves nothing behind but the evidence that it was refused. */
+let refused = false;
+let answer = '';
+const breaker = new pg.Client({
+  connectionString:
+    `postgresql://postgres.sdpezbxwedvxqelpslfv:${encodeURIComponent(pw)}@` +
+    'aws-0-us-east-1.pooler.supabase.com:5432/postgres',
+  ssl: { rejectUnauthorized: false },
+});
+await breaker.connect();
+try {
+  await breaker.query('begin');
+  const { rows: targets } = await breaker.query(
+    `select id from public.judgments
+      where enforcement_status = 'under_enforcement' and final_at is not null limit 1`);
+  if (!targets[0]) {
+    answer = 'no enforcement to test against';
+  } else {
+    try {
+      await breaker.query(`update public.judgments set final_at = null where id = $1`,
+        [targets[0].id]);
+      answer = 'the write was accepted';
+    } catch (e) {
+      refused = /final_at|judgments_enforcement_carries_finality/i.test(String(e.message));
+      answer = String(e.message).split('\n')[0].slice(0, 110);
+    }
+  }
+  await breaker.query('rollback');
+} finally {
+  await breaker.end();
+}
+record('the database refuses to leave an enforcement standing without its finality',
+  refused, answer);
+
 await db.end();
 
 /* ── the verdict ──────────────────────────────────────────────────────────── */

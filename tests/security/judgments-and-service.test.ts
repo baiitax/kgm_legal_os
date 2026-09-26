@@ -814,9 +814,12 @@ describe('§P0.4-I · THE DATABASE REFUSES WHAT THE ROUTE WOULD NOT SEND', () =>
     });
     const id = (created.body.data as any).id as string;
 
-    /* `under_enforcement → enforceable` would be enforcement quietly un-happening. */
+    /* `under_enforcement → enforceable` would be enforcement quietly un-happening. The
+       hand-written row carries its finality, because the schema now refuses an enforcement
+       under way that never learned when the judgment became final — see §P0.4-N. */
     await s.db.run(`update judgments set enforcement_status = 'under_enforcement',
-                            enforcement_opened_at = ? where id = ?`, [now(), id] as never);
+                            enforcement_opened_at = ?, final_at = ? where id = ?`,
+      [now(), now(), id] as never);
     await expect(s.db.run(
       `update judgments set enforcement_status = 'enforceable' where id = ?`, [id] as never,
     )).rejects.toThrow(/enforcement_transition_invalid/);
@@ -1087,11 +1090,91 @@ describe('§P0.4-M · the matrix says the same thing in all three places', () =>
     });
     const id = (created.body.data as any).id as string;
     await s.db.run(
-      `update judgments set enforcement_status = 'under_enforcement', enforcement_opened_at = ?
-        where id = ?`, [now(), id] as never);
+      `update judgments set enforcement_status = 'under_enforcement', enforcement_opened_at = ?,
+              final_at = ?
+        where id = ?`, [now(), now(), id] as never);
     await expect(s.db.run(
       `update judgments set enforcement_status = 'enforceable' where id = ?`, [id] as never,
     )).rejects.toThrow(/enforcement_transition_invalid/);
   });
 });
 
+// ═══════════════════════════════════════════════════════════════════════════════
+/*
+  §P0.4-N · THE STATE CARRIES ITS DECLARATION
+
+  The gate opens enforcement and, in the same statement, records that the judgment became
+  final. 0052 made it do that. Nothing in the schema required it, though — 0045 wrote a
+  check beside the lifecycle saying that enforcement which never opened cannot be under
+  way, and no twin saying that enforcement under way cannot have skipped the finality that
+  admits it. So a row could sit in `under_enforcement` with `final_at` NULL, and one did:
+  it was admitted in the minutes before 0052 was applied, and it was found by reading the
+  live register rather than by any test.
+
+  0053 repaired that row with the date the admission presupposed, added the twin of 0045's
+  check, and this suite holds all of it still:
+
+    · the two dialects must state the same check, word for word;
+    · the database must refuse to take a finality away from an enforcement under way —
+      proven by trying, not by reading the constraint definition back.
+*/
+describe('§P0.4-N · an enforcement under way carries the finality that admits it', () => {
+  const { readFileSync } = require('node:fs') as typeof import('node:fs');
+  const SQLITE = readFileSync('server/src/db/schema.firm.sqlite.ts', 'utf8');
+  const POSTGRES = readFileSync(
+    'supabase/migrations/0053_the_enforcement_that_declares_itself_final.sql', 'utf8');
+
+  /** The check as written, with the whitespace of the two dialects flattened out. */
+  const flat = (s: string) => s.replace(/\s+/g, ' ').trim();
+  const CLAUSE = "check (enforcement_status <> 'under_enforcement' or final_at is not null)";
+
+  it('states the same rule in the mirror and in the migration', () => {
+    expect(flat(SQLITE)).toContain(flat(CLAUSE));
+    expect(flat(POSTGRES)).toContain(flat(CLAUSE));
+    /* And not only in a comment: the migration must ADD a constraint carrying that clause. */
+    expect(POSTGRES).toMatch(/add constraint judgments_enforcement_carries_finality/);
+  });
+
+  it('refuses to take the finality away from a judgment under enforcement', async () => {
+    const created = await noura.post(`/api/firm/matters/${COMMERCIAL}/judgments`, {
+      deedNumber: `KGM-FIN-${Math.floor(Math.random() * 9000 + 1000)}`,
+      court: 'Commercial Court', courtAr: 'المحكمة التجارية', judgmentKind: 'first_instance',
+      pronouncedAt: '2026-05-04T09:00:00.000Z', reliefKind: 'monetary', amountSar: 2_500,
+    });
+    const id = (created.body.data as any).id as string;
+
+    await s.db.run(
+      `update judgments set enforcement_status = 'under_enforcement', enforcement_opened_at = ?,
+              final_at = ? where id = ?`, [now(), now(), id] as never);
+
+    await expect(s.db.run(
+      `update judgments set final_at = null where id = ?`, [id] as never,
+    )).rejects.toThrow(/final_at|under_enforcement/i);
+
+    /* The row still says what it said: the refusal is not a silent partial write. */
+    const after = await rows<any>(`select final_at from judgments where id = ?`, [id]);
+    expect(after[0].final_at).toBeTruthy();
+  });
+
+  it('still lets enforcement end, and says when it was satisfied', async () => {
+    /* The check constrains the STATE, not the ability to leave it: a satisfied judgment
+       keeps the finality it was admitted with, and adds the date it was satisfied. */
+    const created = await noura.post(`/api/firm/matters/${COMMERCIAL}/judgments`, {
+      deedNumber: `KGM-FIN2-${Math.floor(Math.random() * 9000 + 1000)}`,
+      court: 'Commercial Court', courtAr: 'المحكمة التجارية', judgmentKind: 'first_instance',
+      pronouncedAt: '2026-05-05T09:00:00.000Z', reliefKind: 'monetary', amountSar: 3_500,
+    });
+    const id = (created.body.data as any).id as string;
+    await s.db.run(
+      `update judgments set enforcement_status = 'under_enforcement', enforcement_opened_at = ?,
+              final_at = ? where id = ?`, [now(), now(), id] as never);
+    await s.db.run(
+      `update judgments set enforcement_status = 'satisfied', satisfied_at = ? where id = ?`,
+      [now(), id] as never);
+    const after = await rows<any>(
+      `select enforcement_status, final_at, satisfied_at from judgments where id = ?`, [id]);
+    expect(after[0].enforcement_status).toBe('satisfied');
+    expect(after[0].final_at).toBeTruthy();
+    expect(after[0].satisfied_at).toBeTruthy();
+  });
+});
