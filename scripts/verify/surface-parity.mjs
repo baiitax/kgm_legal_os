@@ -221,7 +221,36 @@ const granted = new Set();
   for (const m of block.matchAll(/"([a-z][a-z0-9_.]*\.[a-z0-9_.]+)"/g)) granted.add(m[1]);
 }
 
-/* Who NAMES a permission: the server enforces, the UI checks. */
+/* Who NAMES a permission: the server enforces, the UI checks.
+ *
+ * ACCURACY, TAKE FOUR. The first version looked for a code as the literal
+ * argument of a known gate — `assertCan(p, 'billing.writeoff')`. That is one of
+ * the ways this server names a permission and not the only one: a route that
+ * branches on the direction of the money writes
+ *
+ *     assertCan(p, outgoing ? 'billing.writeoff' : 'billing.record_payment', …)
+ *
+ * and the pattern, requiring a quote right after the comma, matched neither — so
+ * two codes that ARE enforced were reported as names nothing. An audit that
+ * over-reports is worse than no audit, because the real findings drown.
+ *
+ * So the rule is now positional and module-aware: in a file that enforces
+ * permissions, any quoted `module.code` whose FIRST segment is a real catalogue
+ * module counts as named. Nothing else in these files wears that shape — error
+ * codes are snake_case with no dot, audit actions are UPPER_SNAKE, and a filename
+ * like 'scan.pdf' can only be mistaken for a permission if `scan` were a module.
+ */
+const modules = new Set([...catalogue].map((c) => c.split('.')[0]));
+const codeShape = new RegExp(`'((?:${[...modules].join('|')})\\.[a-z0-9_.]+)'`, 'g');
+/*
+ * …and the wide shape is for the SERVER only. The firm app's i18n dictionary is
+ * keyed `module.word` — `clients.title`, `users.col.name`, `audit.outcome.success`
+ * — so the same rule there matches hundreds of translation keys and drowns the
+ * section. In the UI a permission is only a permission when it is inside a gate:
+ * `can(…)`, `canAny([…])`, `has(…)`, or a nav entry's `permissions: [ … ]`.
+ */
+const gateShape = /(?:can\(|canAny\(\s*\[\s*|has\(|permissions:\s*\[\s*)'([a-z][a-z0-9_.]*\.[a-z0-9_.]+)'/g;
+
 const enforced = new Map();
 const uiChecks = new Map();
 const add = (bag, code, where) => {
@@ -231,15 +260,11 @@ const add = (bag, code, where) => {
 for (const f of ['server/src/api/firm.routes.ts', 'server/src/api/client.routes.ts', 'server/src/domain/permissions.ts',
   'server/src/auth/firm-middleware.ts', 'server/src/domain/firm-documents.ts']) {
   const src = stripComments(read(f));
-  for (const m of src.matchAll(/(?:assertCan\([^,]+,\s*|has\(|can\(|require[A-Za-z]*\(\s*|holds\([^,]+,\s*)'([a-z][a-z0-9_.]*\.[a-z0-9_.]+)'/g)) {
-    add(enforced, m[1], f.split('/').pop());
-  }
+  for (const m of src.matchAll(codeShape)) add(enforced, m[1], f.split('/').pop());
 }
 for (const f of walk('firm/src', ['.ts', '.tsx'])) {
   const src = stripComments(read(f));
-  for (const m of src.matchAll(/(?:can\(|canAny\(\s*\[\s*|has\(|permissions:\s*\[\s*)'([a-z][a-z0-9_.]*\.[a-z0-9_.]+)'/g)) {
-    add(uiChecks, m[1], f.replace('firm/src/', ''));
-  }
+  for (const m of src.matchAll(gateShape)) add(uiChecks, m[1], f.replace('firm/src/', ''));
 }
 
 /* ══ 5 · THE NAV ═══════════════════════════════════════════════════════════ */

@@ -2842,3 +2842,57 @@
 }
 .firm-doc__filename { color: var(--text-dim); font-size: var(--fs-body-sm); overflow-wrap: anywhere; }
 .firm-doc__confirm { margin: 0 0 var(--sp-2); }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   THE MATTER'S LIFE · gap analysis III §2.3
+   ═══════════════════════════════════════════════════════════════════════════
+   The header controls that move a matter, restrict it and open it to a member.
+
+   THE BAR WRAPS RATHER THAN SCROLLS. The header is sticky, and a horizontal scroller
+   inside a sticky header on a phone is a control the thumb cannot reach without
+   moving the page — so the controls wrap onto a second line and the header grows by
+   one row on a narrow screen. `min-width: 0` on the state chip stops a long Arabic
+   state label from pushing the buttons off the edge.
+   ═══════════════════════════════════════════════════════════════════════════ */
+.firm-life {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.firm-life__state {
+  display: inline-flex;
+  min-width: 0;
+}
+
+/* The dialogs' bodies: one column, and nothing stretches past a readable measure. */
+.firm-life__form {
+  display: grid;
+  gap: var(--sp-4);
+  max-width: 46ch;
+}
+
+/*
+  A NOTE INSIDE A DIALOG — the two advance warnings (the CDD gate before `active`, the
+  Rule 11 hold in `conflict_check`) and the eligibility note on the access dialog.
+
+  It sits on the panel's NESTED surface, not on a glass tint: inside `.kgm-overlay__panel`
+  the glass tokens are re-based, and a note that reaches for the page's own surface
+  variables would render as a lighter patch that reads like a selected row.
+*/
+.firm-life__note {
+  display: block;
+  margin: 0;
+  padding: var(--sp-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-nested-1);
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+  font-size: var(--step--1);
+  line-height: 1.6;
+}
+
+@media (max-width: 420px) {
+  /* The state chip takes its own line so the three controls sit together beneath it. */
+  .firm-life__state { flex-basis: 100%; }
+}

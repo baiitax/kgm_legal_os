@@ -58,6 +58,9 @@ import {
   MATTER_READ, MATTER_WRITE, MATTER_MANAGE, MATTER_FINANCIAL, MATTER_OPERATE,
   ACCESS_LEVELS, type AccessLevel,
 } from '../domain/permissions.js';
+import {
+  canTransition, isClosing, isReopen, nextStates, type MatterStatus,
+} from '../domain/matter-lifecycle.js';
 import { projectMatter, projectMatterList } from '../domain/classification.js';
 import {
   DISCLOSURE_GROUND_CODES, DISCLOSURE_RECIPIENTS, groundOf, groundPermits,
@@ -1459,6 +1462,20 @@ export function firmRouter(c: Container): Router {
         they cannot interpret. Nothing here decides access — the server already did.
       */
       privilege: { inRing: p.ring.inRing, reason: p.ring.reason },
+      /*
+        THE MOVES THIS MATTER CAN MAKE, FROM WHERE IT IS.
+
+        The state machine lives on the server (`domain/matter-lifecycle.ts`) and the
+        screen is told its options rather than keeping a second copy of the map. A copy
+        would drift, and the direction it drifts in is the dangerous one: a client
+        offering a move the server refuses looks like a broken button, and a client
+        hiding a move the server allows makes the workflow narrower than the firm's own
+        rules — which is how people learn to route around a system.
+
+        It is a HINT, not a gate. The route re-derives the map and refuses an illegal
+        move with `invalid_transition`. This list only saves the member a refusal.
+      */
+      allowedTransitions: nextStates(String(row.internal_status ?? '') as MatterStatus),
     });
   }));
 
@@ -2859,19 +2876,91 @@ export function firmRouter(c: Container): Router {
       caller's claim into the write. It recomputes and writes its own answer, so the
       column cannot be used to launder a clearance.
     */
+    /* The state the caller is asking for, named once. Three gates below read it. */
+    const to = body.internalStatus as MatterStatus;
+
     const state = await c.firm.conflictStateFor(p.tenantId, matterId);
 
-    if (from === 'conflict_check' && body.internalStatus !== 'conflict_check'
-        && body.internalStatus !== 'archived' && !state.cleared) {
+    if (from === 'conflict_check' && to !== 'conflict_check'
+        && to !== 'archived' && !state.cleared) {
       await c.audit.tryWrite({
         action: 'MATTER_SCOPE_DENIED',
         actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
         resourceType: 'matter', resourceId: matterId, outcome: 'denied',
         reasonCode: 'conflict_gate',
-        metadata: { membershipId: p.membershipId, from, to: body.internalStatus, reasons: state.reasons },
+        metadata: { membershipId: p.membershipId, from, to, reasons: state.reasons },
       }, requestInfo(req, c.trustProxy));
       throw badRequest('conflict_gate',
         `Rule 11: this matter cannot leave conflict_check — ${state.reasons.join('; ')}`);
+    }
+
+    /*
+      ═══ THE STATE MACHINE · WHICH MOVES EXIST AT ALL ═══
+
+      Asked AFTER the Rule 11 gate and BEFORE the customer-due-diligence gate, which is
+      the order of specificity. A member asking to close a matter that Rule 11 is holding
+      should be told about the conflict — that is the obstacle with a register behind it
+      and a way to clear it — not that the move does not exist. The state machine is the
+      last of the three questions because it is the most general one.
+
+      WHAT IT FIXES. `internal_status` has carried eleven values since migration 0002 and
+      this route accepted ALL of them from ALL of them: a caller could move a matter from
+      `archived` straight to `active` in one write, and the record — which is the firm's
+      own account of how the file got where it is — would show a jump with no path behind
+      it. The map in `domain/matter-lifecycle.ts` says which moves are real moves.
+
+      The refusal names what WOULD have been accepted. A machine that says "no" without
+      saying "but these" is learned by trial, and a member who cannot see the shape of the
+      workflow asks a colleague to make the change through the API instead — which is how
+      a workflow acquires a shadow path and stops being a record.
+    */
+    /*
+      A WRITE OF THE STATE THE MATTER IS ALREADY IN IS A NO-OP, NOT A MOVE.
+
+      P0.3's contract, asserted by `client-due-diligence.test.ts`: asking for `active`
+      on an already-active matter succeeds and does NOT re-run the CDD gate. Callers
+      rely on it — a screen that saves a form performs the write whether or not the
+      state changed — and re-gating an active matter would block a firm mid-file the
+      day a client record lapses into needing review.
+
+      `canTransition` stays strict (a move to itself is not a move, and the UI's picker
+      derives its options from `nextStates`), so the exemption lives here, named.
+    */
+    if (to !== from && !canTransition(from as MatterStatus, to)) {
+      const allowed = nextStates(from as MatterStatus);
+      await c.audit.tryWrite({
+        action: 'MATTER_SCOPE_DENIED',
+        actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+        resourceType: 'matter', resourceId: matterId, outcome: 'denied',
+        reasonCode: 'invalid_transition',
+        metadata: { membershipId: p.membershipId, from, to, allowed: [...allowed] },
+      }, requestInfo(req, c.trustProxy));
+      throw badRequest('invalid_transition',
+        `a matter in ${from} cannot move to ${to}${allowed.length
+          ? ` — allowed from here: ${allowed.join(', ')}`
+          : ' — an archived matter is final'}`,
+        { from, to, allowed: [...allowed] });
+    }
+
+    /*
+      ═══ CLOSING AND REOPENING CARRY THEIR OWN PERMISSIONS ═══
+
+      `matters.close` and `matters.reopen` have been in the catalogue and granted to the
+      right roles since P0.6, and until now NOTHING consulted either one: a member holding
+      `matters.status` could close a file for the firm without the catalogue being asked at
+      all. Closing a matter is the act that stops the clock on every obligation attached to
+      it, which is why it is separated from "may advance a matter" — and reopening one is
+      the act that starts it again.
+
+      Asked only where the transition exists and is permitted: a member who cannot make the
+      move at all is told so by the check above, not refused for a permission they would
+      not have needed.
+    */
+    if (isClosing(from as MatterStatus, to)) {
+      c.permissions.assertCan(p, 'matters.close', { type: 'matter', id: matterId });
+    }
+    if (isReopen(from as MatterStatus, to)) {
+      c.permissions.assertCan(p, 'matters.reopen', { type: 'matter', id: matterId });
     }
 
     /*
@@ -2893,7 +2982,7 @@ export function firmRouter(c: Container): Router {
       gate; the manual's prohibition bites when the firm acts, and the firm acts through
       matters.
     */
-    if (body.internalStatus === 'active' && from !== 'active') {
+    if (to === 'active' && from !== 'active') {
       await assertCddAdmits(req, p, String(row.client_id), matterId);
     }
 

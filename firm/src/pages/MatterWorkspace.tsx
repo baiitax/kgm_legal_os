@@ -60,6 +60,7 @@ import {
   MatterBillingPanel, MatterConflictsPanel, MatterJudgmentsPanel, MatterPartiesPanel,
 } from './matter/Registers.js';
 import { ReportEditor } from './matter/ReportEditor.js';
+import { MatterLifecycleBar } from './matter/Lifecycle.js';
 import type { MatterTimelineRow } from '../api/firm.js';
 import '../shell/shell.css';
 
@@ -222,6 +223,16 @@ export function MatterWorkspace({ matterId, onNavigate }: MatterWorkspaceProps) 
         </div>
 
         <div className="firm-matterhead__actions">
+          {/*
+            THE LIFE OF THE MATTER, ON THE HEADER (§22, gap analysis III §2.3).
+
+            Moving a matter through its states, restricting it, and opening it to the
+            people who will work it are the three writes a firm performs most often on a
+            live file — and until now none of them had a control. They live here, beside
+            the facts they change, and each one is shown only to a member holding the
+            code the ROUTE asks for (§50).
+          */}
+          <MatterLifecycleBar matter={matter} onChanged={load} />
           {/*
             UPDATE THE CASE REPORT.
 

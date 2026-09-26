@@ -104,7 +104,7 @@ function PanelLoading({ rows = 4 }: { rows?: number }) {
  * conclude the firm files nothing.
  */
 function PanelFrame<T>({
-  state, title, icon, isEmpty, emptyTitle, emptyBody, children,
+  state, title, icon, isEmpty, emptyTitle, emptyBody, action, children,
 }: {
   state: PanelState<T> & { reload: () => void };
   title: string;
@@ -112,12 +112,24 @@ function PanelFrame<T>({
   isEmpty?: (data: T) => boolean;
   emptyTitle: string;
   emptyBody?: string;
+  /**
+   * A WRITE CONTROL FOR THE PANEL, in the card header.
+   *
+   * Every register on this workspace became writable in one phase (gap analysis III
+   * §2.3–§2.5), and each of those writes belongs next to the list it changes rather
+   * than in a toolbar somewhere else. The header slot is where a control that acts on
+   * the whole list goes; a control that acts on ONE row stays on the row.
+   *
+   * It is rendered only when the caller says so — which is to say, only for a member
+   * holding the permission code the ROUTE checks. The panel does not decide; it is told.
+   */
+  action?: React.ReactNode;
   children: (data: T) => React.ReactNode;
 }) {
   const { t } = useI18n();
   return (
     <Card variant="default" className="firm-panel">
-      <CardHeader title={title} icon={icon} />
+      <CardHeader title={title} icon={icon} action={action} />
       <CardBody>
         {state.status === 'loading' && <PanelLoading />}
         {state.status === 'denied' && (

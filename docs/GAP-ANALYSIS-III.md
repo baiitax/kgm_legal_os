@@ -36,11 +36,11 @@ The four empty sections are therefore empty *because they were tested*, not beca
 ## 1 · THE SHAPE OF THE GAP
 
 ```
-firm routes      113   screens reach 37      →  76 never requested  (§1)
+firm routes      113   screens reach 47      →  65 never requested  (§1)  ← was 76
 portal routes     36   screens reach 36      →   0                (§2)  ✓
 firm client       38 methods                  →   2 never called  (§4)
 portal client     43 call sites               →   0 dangling      (§3)  ✓
-permission codes  75                          →  29 name nothing  (§7)
+permission codes  75                          →  23 name nothing  (§7)  ← was 25
 ```
 
 Read the first two lines together, because they are the finding:
@@ -187,34 +187,30 @@ Both are tree-shaken out of the shipped bundle. They are the UI half of `PATCH c
 
 ---
 
-## 4 · §7 — 29 OF 75 PERMISSION CODES NAME NOTHING
+## 4 · §7 — 25 OF 75 PERMISSION CODES NAME NOTHING
 
 ```
-clients.archive           clients.read_sensitive       matters.close
-matters.reopen            documents.approve            documents.templates
-tasks.read                tasks.manage                 hearings.manage
-deadlines.manage          contracts.read               poa.read
-poa.manage                billing.create               billing.send
-billing.record_payment    billing.writeoff             billing.discount
-compliance.licences       compliance.training          compliance.complaints
-users.invite              users.update                 users.revoke_session
-roles.read                roles.manage                 departments.manage
-audit.export              analytics.read
+clients.archive           clients.read_sensitive      matters.close
+matters.reopen            documents.approve           documents.templates
+tasks.read                tasks.manage                hearings.manage
+deadlines.manage          contracts.read              poa.read
+poa.manage                billing.create              billing.send
+compliance.training       compliance.complaints       users.invite
+users.update              users.revoke_session        roles.read
+roles.manage              departments.manage          audit.export
+analytics.read
 ```
 
-**A code that is granted but consults nothing is worse than a missing code**, because a permission review reads the catalogue and believes it. `users.invite` is granted by a role template and no route ever asks for it: role administration is happening under a broader gate, and the catalogue says otherwise. Same for `roles.read`/`roles.manage`/`departments.manage` against a working Users page.
+**A code that is granted but consults nothing is worse than a missing code**, because a permission review reads the catalogue and believes it. `users.invite` is granted by a role template and no route ever asks for it: membership administration is happening under a broader gate while the catalogue claims otherwise. Same for `roles.read` / `roles.manage` / `departments.manage` against a working Users page, and `users.update` against a working member editor.
 
-19 + 10 = 29. Sorting them by cause:
+9 + 16 = 25. Sorting them by cause:
 
 | Cause | Codes | Verdict |
 |---|---|---|
-| **The table does not exist** (§6): tasks ×2, contracts, PoA ×2, licences, training, complaints, analytics, document templates — ten codes over eight phase-less features | 10 | **INHERITED** — the code is the placeholder for a phase not yet built. Correct to exist; nothing to enforce yet. |
-| **The feature exists but has no UI or no gate**: billing ×5, matters.close/reopen, clients.archive, clients.read_sensitive, hearings/deadlines.manage, documents.approve, audit.export | 13 | **REAL** — the code is real and its enforcement is missing, which is why the rating matrix reads finer-grained than the system is. |
-| **Account administration**: users.invite/update/revoke_session, roles.read/manage, departments.manage | 6 | **REAL** — a governance gap in the catalogue's own reading of the Users page. |
-
-`clients.read_sensitive` deserves its own line: it exists to distinguish reading a client from reading their sensitive data, and no route consults it — so every holder of `clients.read` sees everything the client record contains. That is the one entry in this section with a security reading, and it should be closed with the eligibility work rather than the UI work.
-
----
+| **The table does not exist** (§6): `documents.templates`, `tasks.read`/`tasks.manage`, `contracts.read`, `poa.read`/`poa.manage`, `compliance.training`, `compliance.complaints`, `analytics.read` — nine codes over seven phase-less features | 9 | **INHERITED** — the code is the placeholder for a phase not yet built. Correct to exist; nothing to enforce yet. |
+| **The feature exists but the gate does not**: `billing.create` (no invoice-create route), `billing.send` (no send route), `clients.archive` (no archive route), `documents.approve`, `hearings.manage`, `deadlines.manage`, `users.invite`, `users.update`, `users.revoke_session` | 9 | **REAL** — the act is performed under a broader gate or under none. This is the rating matrix reading finer-grained than the system is. |
+| **Route and feature both exist, nothing consults the code**: `matters.close`, `matters.reopen` (the state transition is unreachable), `roles.read`, `roles.manage`, `departments.manage`, `audit.export` | 6 | **REAL** — governance gap in the catalogue's own description of the product. |
+| **`clients.read_sensitive`** — reading a client versus reading their sensitive data | 1 | **REAL, and the only one with a security reading**: no route consults it, so every holder of `clients.read` sees everything the client record contains. Close it with the eligibility work, not with the UI work. |
 
 ## 5 · §8b — TWELVE UNGATED ROUTES, ALL DELIBERATE
 
@@ -231,27 +227,109 @@ Recorded so that the next reader does not "fix" them. The three auth routes that
 
 ---
 
-## 6 · THE DEEPEST GAP — FIFTEEN TABLES THAT DO NOT EXIST
+## 6 · FIFTEEN TABLES THAT DO NOT EXIST — WITH THE CLAIM CORRECTED
 
-A live probe (`information_schema.tables`, 87 tables in `public`) against the schema the code expects:
+A live probe (`information_schema.tables`, 87 tables in `public`) answers a narrower
+question than this section first claimed. **The code does not expect these fifteen tables.**
+Twelve of them appear nowhere in `server/src` or in any migration; they were inferred from
+feature names, permission codes and phase titles. Only three have any presence in code at
+all — `tasks`, `contracts`, `licences`/`complaints` — and there they appear as permission
+codes and seeded grants rather than as schema.
 
-| Missing table | Announced by | Blocks |
-|---|---|---|
-| `invoice_number_sequences` | billing module | gapless invoice numbering — a fiscal requirement |
-| `notification_outbox` | P1.6 | durable escalation; P0.4's escalation is in-memory today |
-| `legal_holds` · `retention_schedules` | P1.5 | retention and hold — the 10-year AML retention duty |
-| `powers_of_attorney` | `poa.read`/`poa.manage` | P2.4 |
-| `document_templates` | `documents.templates` | templated drafting |
-| `tasks` | `tasks.read`/`tasks.manage` | work allocation |
-| `contracts` | `contracts.read` | the other half of Rule 12 |
-| `licences` · `training_records` · `complaints` | `compliance.*` | eligibility (Analysis II §4) and the compliance register |
-| `analytics_snapshots` | `analytics.read` | firm reporting |
-| `data_breaches` · `data_classification` | PDPL work | breach register, classification |
-| `portal_audit_exports` | portal audit | exportable evidence of what a client was shown |
+The honest statement is therefore:
 
-Seven of these are already in the standing sequence (P1.6, P1.5, P2.4) — the table is the first artifact of each phase, which is why the sequence has stayed honest: nothing was declared done whose table was missing. The remaining eight (`tasks`, `contracts`, `analytics`, the three `compliance` registers, `data_*`, `document_templates`, `invoice_number_sequences`) have **no phase yet**, and each one is a module the product implies. `invoice_number_sequences` is the one to promote: it is small, it is a fiscal obligation, and P2.3 (invoice creation) lands on top of it.
+> **Fifteen registers the product implies, ordered by what each one blocks — not fifteen
+> tables the code is waiting for.** A missing table that nothing references breaks nothing
+> today. It breaks the *phase* that will need it, and the permission code that already
+> promises it.
 
----
+| Table | Implied by | Blocks | Verdict |
+|---|---|---|---|
+| `notification_outbox` | P1.6 | durable escalation; P0.4's escalation is in-memory today | **scheduled** |
+| `legal_holds` · `retention_schedules` | P1.5, Analysis I | retention and hold — the 10-year AML retention duty | **scheduled** |
+| `powers_of_attorney` | `poa.read`/`poa.manage` | P2.4 | **scheduled** |
+| `invoice_number_sequences` | this document (§9 ④) | gapless numbering — a fiscal obligation — and P2.3 | **proposed, not expected** |
+| `document_templates` | `documents.templates` | templated drafting | code-less feature |
+| `tasks` | `tasks.read`/`tasks.manage`, granted to five roles | work allocation | code-less feature |
+| `contracts` | `contracts.read` | the other half of Rule 12 | code-less feature |
+| `licences` · `training_records` · `complaints` | `compliance.*`, Analysis II §4 | the compliance register and eligibility evidence | code-less feature |
+| `analytics_snapshots` | `analytics.read` | firm reporting | code-less feature |
+| `data_breaches` · `data_classification` | PDPL work | breach register, classification | code-less feature |
+| `portal_audit_exports` | portal audit | exportable evidence of what a client was shown | code-less feature |
+
+`invoice_number_sequences` is marked **proposed** rather than implied: invoice numbering in
+this system does not come from a sequence table at all. The number is written at ISSUE time
+in the same statement as the UUID and the hash (migration 0034/0038), and the caller supplies
+it. Gaplessness is therefore a property of the issue path, not of a counter — and a counter
+table would be a second source of truth for a value the fiscal guard already freezes. If P2.3
+needs sequential numbering, the honest place to put it is the issue path, and this row is
+withdrawn as a table request.
+
+Nothing in this correction changes the work: the seven **scheduled** rows are the first
+artifact of phases that are already ordered, and the eight code-less ones are modules the
+product implies but has never announced.
+
+## 6b · WHAT CLOSING THEM LOOKS LIKE — THE FIRST WAVE
+
+The audit's value is only realised when findings close, so here is the first wave, with the
+numbers before and after. **78 → 65 findings.** The route count moved because screens were
+written; the catalogue count moved because two codes stopped being decorative.
+
+### The matter state machine (⑥) — and the two permissions that were granted but never asked
+
+`internal_status` has carried eleven values since migration 0002 and the status route
+accepted **all of them from all of them**: a matter could go from `archived` to `active` in
+one write, and the record — the firm's own account of how the file got where it is — would
+show a jump with no path behind it. The vocabulary was not a machine.
+
+`server/src/domain/matter-lifecycle.ts` is the machine. It is deliberately **generous in the
+middle and strict at the ends**: real files move backwards (a partner review that raises a
+question sends a matter back; an appeal pulls an `execution` matter back to `judgment`), and a
+workflow people route around is worse than no workflow. So every state in the working set
+reaches every other, and the constraints live at the edges — `archived` is terminal, nothing
+enters the working set from it, `intake` moves forward only, and a no-op write stays a no-op
+(P0.3's contract, which the tests caught the moment the machine was switched on).
+
+Three gates now answer three different questions, in the order that puts the most specific
+obstacle first:
+
+| Order | Gate | Refusal | Why there |
+|---|---|---|---|
+| 1 | **Rule 11** — the conflict engine | `conflict_gate` | A held matter is refused for the conflict, because that is the obstacle with a register behind it and a way to clear it: the member can act on it. |
+| 2 | **The state machine** | `invalid_transition` | The most general question. The refusal carries `details.allowed` — a machine that says "no" without saying "but these" is learned by trial, and a member who cannot see the workflow asks a colleague to use the API. |
+| 3 | **CDD**, then **enforcement** | `cdd_incomplete` | Unchanged from P0.3/P0.4. |
+
+**And `matters.close` / `matters.reopen` are no longer decorative.** Both codes have been in
+the catalogue and granted to the right roles since P0.6, and nothing consulted either: a
+member holding only `matters.status` could close a file for the firm. Closing is the act that
+stops the clock on every obligation attached to the matter, so it now carries its own code —
+and the test proves the coupling with a control: the same member moves the same matter one
+step (200) and is refused the step that ends it (`403 permission_denied:matters.close`).
+
+### The registers become reachable (§2.3–§2.5)
+
+Eleven matter routes, five judgment routes, four party routes and five conflict routes were
+reachable only with curl. Now:
+
+- **Parties** — add a party to a matter in the role it holds *on that file*, either from the
+  firm register or created in the same call (`createIfMissing`, which is what intake needs
+  when the other side is a name and nothing more).
+- **Conflicts** — run a check, disposition a finding (`same_party` + severity, or
+  `different_party`), record the client's **written consent** with its own signing date and
+  scope, and conclude the check — the write that lets Rule 11 release the matter.
+- **Judgments** — record the decision (the pronouncement date the appeal window runs from),
+  record **service of process** with its evidence, file an appeal, and record or lift a
+  **stay**, which is the fact that turns an enforceable judgment into one the firm may not
+  collect on.
+
+### What the wave did NOT do
+
+The screens are new; the *breadth* is not. Billing (12 routes), trust (5), STR reports (5),
+eligibility (4), due diligence (4), time and expenses (6), rate cards (2) and the court
+calendar (3) are untouched — that is the money console and the compliance console, and they
+are the next two waves. `GET/POST matters/:id/privilege-releases`, billing terms and
+engagement letters also remain: they belong to the money block, which is where the fee
+arrangement and the P2.1 release ground meet.
 
 ## 7 · THE REAL DEFECT THIS AUDIT FOUND — AND IT WAS NOT A ROUTE
 
@@ -307,7 +385,7 @@ The 78 findings collapse into work already sequenced plus three new items. Nothi
 | **⑦ NEW · Money console** | time entry, expense, trust posting + reconciliation, rate cards, engagement letters, fiscal console | 20 real |
 | **⑧ NEW · Compliance console** | CDD lifecycle, UBO owners, screening dispositions, STR pipeline, licences, risk countries | 16 real |
 | **⑨ NEW · Client administration** | `PATCH clients/:x`, invitations, party links, plus `clients.read_sensitive` enforcement | 5 real + 1 catalogue code with a security reading |
-| ⑩ **Catalogue honesty pass** | 19 codes that name a feature which exists: enforce them, or fold them into the code that already does the work | 19 codes |
+| ⑩ **Catalogue honesty pass** | 16 codes that name a feature which exists: enforce them on the route that performs the act, or fold them into the code that already does the work | 16 codes |
 
 **Sequence note:** ⑦ is the largest unscheduled block and the one with the clearest commercial reading — the firm cannot bill from its own system, so the money is being tracked elsewhere. ⑧ is the largest *regulatory* exposure. Both are bigger than anything currently in the queue; neither is a rewrite, because the API, the tables and the permission codes already exist for most of ⑦.
 

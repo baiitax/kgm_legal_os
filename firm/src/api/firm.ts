@@ -357,6 +357,139 @@ export const firmApi = {
   },
 
   /*
+    ── THE LIFECYCLE WRITES ──────────────────────────────────────────────────
+    Gap analysis III, §2.3: eleven matter routes and no screen. These are four of
+    them, and they are the four a firm uses every week — a matter moves through
+    its states, gets restricted when a conflict surfaces, and gets opened to the
+    people who will work it.
+
+    Each of these can refuse with a REASON the server computed, not a validation
+    message: `conflict_gate` (Rule 11 — the matter may not leave conflict_check),
+    `cdd_incomplete` (the client has not been identified) and `eligibility` (the
+    member's licence is suspended) all arrive as `FirmApiError` with a code, and
+    the dialogs render the code rather than a shrug. A refusal that does not say
+    which gate it was teaches the member to ask a colleague instead of the system.
+  */
+
+  /** Advance the state machine. The server recomputes `conflict_cleared` itself. */
+  async setMatterStatus(id: string, body: {
+    internalStatus: MatterInternalStatus;
+    reason?: string | null;
+  }): Promise<{ id: string; internalStatus?: string; from?: string }> {
+    return request(`/matters/${encodeURIComponent(id)}/status`, { method: 'POST', body });
+  },
+
+  /** Restrict a matter (P0.5). The reason is mandatory in the server, so it is here. */
+  async setMatterRestriction(id: string, body: {
+    restricted: boolean;
+    reason?: string | null;
+    reasonAr?: string | null;
+  }): Promise<{ id: string; restricted: boolean }> {
+    return request(`/matters/${encodeURIComponent(id)}/restrict`, { method: 'POST', body });
+  },
+
+  /** Grant or revoke a member's explicit access to a matter. Gated by eligibility. */
+  async setMatterAccess(id: string, body: {
+    membershipId: string;
+    accessLevel: MatterAccessLevel | 'none';
+    reason?: string | null;
+  }): Promise<{ id: string; membershipId: string; accessLevel: string }> {
+    return request(`/matters/${encodeURIComponent(id)}/access`, { method: 'POST', body });
+  },
+
+  /* ── PARTIES ─────────────────────────────────────────────────────────────── */
+
+  async parties(query?: string): Promise<{ count: number; parties: PartyRow[] }> {
+    const qs = query?.trim() ? `?q=${encodeURIComponent(query.trim())}` : '';
+    return request<{ count: number; parties: PartyRow[] }>(`/parties${qs}`);
+  },
+
+
+  /**
+   * Put a party on a matter, in the role they hold ON THIS FILE.
+   *
+   * `createIfMissing` is the server's own convenience and is used as such: intake often
+   * knows the other side as a NAME and nothing else, and a two-call sequence would leave
+   * a party in the register with no matter on it when the second call failed. `partyId`
+   * must still be a uuid-shaped value — the route validates it before consulting
+   * `createIfMissing` — so a caller creating on the fly sends a fresh one.
+   */
+  async attachParty(matterId: string, body: {
+    partyId: string;
+    role: MatterPartyRole;
+    note?: string | null;
+    createIfMissing?: {
+      kind: 'individual' | 'company' | 'government' | 'nonprofit' | 'other';
+      name: string;
+      nameAr?: string | null;
+    } | null;
+  }): Promise<{ partyId: string; partyCreated?: boolean; conflictCleared?: boolean }> {
+    return request(`/matters/${encodeURIComponent(matterId)}/parties`, { method: 'POST', body });
+  },
+
+  /* ── CONFLICTS ───────────────────────────────────────────────────────────── */
+
+  async runConflictCheck(
+    matterId: string,
+    kind: 'intake' | 'adverse_check' | 'periodic' | 'recheck' = 'intake',
+  ): Promise<Record<string, unknown> & { id?: string; checkId?: string }> {
+    return request(`/matters/${encodeURIComponent(matterId)}/conflict-check`, { method: 'POST', body: { kind } });
+  },
+
+  async dispositionHit(hitId: string, body: {
+    disposition: 'different_party' | 'same_party';
+    /** Required when confirming a hit: a legal judgement on a confirmed identity. */
+    severity?: 'actual' | 'potential' | 'none' | null;
+    affectedPartyId?: string | null;
+    reason: string;
+  }): Promise<{ id: string; disposition: string }> {
+    return request(`/conflicts/hits/${encodeURIComponent(hitId)}/disposition`, { method: 'POST', body });
+  },
+
+  /**
+   * The client's WRITTEN CONSENT — the thing that cures a conflict Rule 8 would
+   * otherwise prohibit. The server wants the consent's own date and scope, not a
+   * summary of it: a waiver is evidence, and evidence is the document's terms.
+   */
+  async waiveHit(hitId: string, body: {
+    consentSignedOn: string;
+    scope: string;
+    consentReference?: string | null;
+    consentDocumentId?: string | null;
+  }): Promise<{ id: string }> {
+    return request(`/conflicts/hits/${encodeURIComponent(hitId)}/waiver`, { method: 'POST', body });
+  },
+
+  async concludeConflicts(matterId: string, body: {
+    checkId: string;
+    decision: 'clear' | 'not_accepted' | 'abandoned';
+    conclusion: string;
+  }): Promise<{ id: string; state: string }> {
+    return request(`/matters/${encodeURIComponent(matterId)}/conflict-conclusion`, { method: 'POST', body });
+  },
+
+  /* ── JUDGMENTS ───────────────────────────────────────────────────────────── */
+
+
+  async recordJudgment(matterId: string, body: Record<string, unknown>): Promise<{ id: string }> {
+    return request(`/matters/${encodeURIComponent(matterId)}/judgments`, { method: 'POST', body });
+  },
+
+
+  /** Service of process — the act that starts the appeal clock (Art. 187). */
+  async recordJudgmentService(id: string, body: Record<string, unknown>): Promise<{ id: string }> {
+    return request(`/judgments/${encodeURIComponent(id)}/service`, { method: 'POST', body });
+  },
+
+  async recordAppeal(id: string, body: Record<string, unknown>): Promise<{ id: string }> {
+    return request(`/judgments/${encodeURIComponent(id)}/appeals`, { method: 'POST', body });
+  },
+
+  async recordStay(id: string, body: { inForce: boolean; reason?: string | null }): Promise<{ id: string }> {
+    return request(`/judgments/${encodeURIComponent(id)}/stays`, { method: 'POST', body });
+  },
+
+  /*
     ── THE WORKSPACE'S TAB BODIES ────────────────────────────────────────────
 
     One call per tab, fetched when the tab is opened. Deliberately not one call
@@ -678,6 +811,19 @@ export const firmApi = {
 export type MatterAccessLevel =
   | 'full' | 'edit' | 'operational' | 'view' | 'financial' | 'compliance';
 
+/**
+ * THE STATES A MATTER MOVES THROUGH — the wire's own vocabulary, in the order the
+ * server validates them (migration 0002's CHECK, `r.post('/matters/:id/status')`).
+ *
+ * `restricted` is here and is NOT reached by the status route: it is set by
+ * `/matters/:id/restrict`, which carries its own permission and its own mandatory
+ * reason. A screen that offered it as a state transition would be offering a write
+ * the server will refuse, so the picker omits it and says why.
+ */
+export type MatterInternalStatus =
+  | 'intake' | 'conflict_check' | 'restricted' | 'internal_review' | 'partner_review'
+  | 'active' | 'on_hold' | 'judgment' | 'execution' | 'closed' | 'archived';
+
 export interface MatterSummary {
   id: string;
   matterNumber: string | null;
@@ -745,6 +891,16 @@ export interface MatterDetail {
 
   /** Wire names withheld by classification. Drives the §57 field locks. */
   withheld: string[];
+
+  /**
+   * THE MOVES THIS MATTER CAN MAKE, AS THE SERVER SEES THEM.
+   *
+   * Sent by `GET /matters/:id` from the domain's own map, so the screen never keeps a
+   * second copy of the state machine. Absent on a response from an older server, so the
+   * dialog that uses it treats `undefined` as "no moves to offer" rather than as an
+   * empty list — the difference between a hidden control and a broken one.
+   */
+  allowedTransitions?: MatterInternalStatus[];
 }
 
 /**
@@ -1109,6 +1265,35 @@ export interface MatterPartyRow {
   nameAr: string | null;
   kind: string;
   status: string;
+}
+
+/**
+ * THE ROLE A PARTY HOLDS ON A MATTER — the wire's enum, verbatim.
+ *
+ * `our_client` is absent on purpose: the client is on the matter as its CLIENT, not as
+ * a party, and the conflict engine is built on that distinction. Offering it here would
+ * let a screen record the firm's own client as its counterparty.
+ */
+export type MatterPartyRole =
+  | 'counterparty' | 'adverse_party' | 'related_entity' | 'guarantor'
+  | 'witness' | 'expert' | 'interested_party' | 'other';
+
+/** A party in the firm's register, as `/parties` projects it. */
+export interface PartyRow {
+  id: string;
+  kind: string;
+  name: string;
+  nameAr: string | null;
+  status: string;
+  note?: string | null;
+  [key: string]: unknown;
+}
+
+/** A judgment row, loosely typed: the register returns far more than the list shows. */
+export interface JudgmentRow {
+  id: string;
+  operative?: boolean;
+  [key: string]: unknown;
 }
 
 export interface MatterConflictHitRow {

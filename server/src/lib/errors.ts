@@ -138,6 +138,17 @@ export type ErrorCode =
    * wording of it.
    */
   | 'already_concluded'
+  /**
+   * THE MATTER STATE MACHINE REFUSES A TELEPORT · phase P0.6-adjacent.
+   *
+   * Until now the status route accepted any of the eleven states from any other,
+   * so a matter could go from `archived` straight to `active` in one call and the
+   * record would show a single write with no path behind it. A state machine is
+   * only a state machine if it says which moves are legal: this code is the
+   * refusal, and the refusal carries the list of what WOULD have been accepted
+   * (`details.allowed`) so the caller is never left guessing.
+   */
+  | 'invalid_transition'
   /*
     ── 0034–0036 · the fiscal document, client money and the fee ─────────────────
 
