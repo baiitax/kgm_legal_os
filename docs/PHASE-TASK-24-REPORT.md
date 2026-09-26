@@ -214,3 +214,42 @@ a plain query and would read 1 whether or not 0057 works; on Postgres it is a
 * **The portal was not re-styled.** Its navigation and glass pass landed in task 23 and
   its suite is untouched; the screenshot in the brief was the firm app. Say the word
   and the same panel treatment goes across.
+
+
+---
+
+## 5 · The deployed origin
+
+| | |
+|---|---|
+| Commit | `7957dc3` (task 24) |
+| Deployment | `dpl_FAKn1mkgorxPfNrAMNEJ68YhZHkK` — **READY** 26 Sep 2026 12:47:30Z |
+| URL | `https://kgmlegal.vercel.app` (build `kgmlegal-qku4h14k0-…`) |
+| Firm CSS served | `firm/assets/index-DXoskADD.css` (was `index-DyW-LUif.css`) |
+| Portal CSS served | `assets/index-BFlqVxPx.js` / portal CSS unchanged from task 23 |
+
+Three harnesses against the live site, in this order:
+
+| Harness | Result | What it settles |
+|---|---|---|
+| `scripts/verify/deploy-check.mjs https://kgmlegal.vercel.app` | **22/22** | the served bytes are the new build — `data-planned`, the rail divider and the planned dot are **absent** from the deployed stylesheet, and the twelve-tab dictionary keys, the panel rules and the responsive breakpoints are present |
+| `scripts/verify/firm-matter-tabs-live.mjs https://kgmlegal.vercel.app` | **43/43** | every tab answers on the production database; the ring withholds the document's title from a paralegal while still telling her **one** is withheld (the number only 0057 can produce); the oracle check; the dashboard's per-permission numbers |
+| `scripts/verify/portal-roles-live.mjs https://kgmlegal.vercel.app` | **26/26** | task 23's contract still holds after the nav rewrite: holder 200, contact 403 `role_not_permitted` on the four billing surfaces, one audit row per attempt naming the capability |
+
+### 5.1 One defect the deployed-bytes check caught, after the code looked finished
+
+`deploy-check` failing on *"the rail no longer ships an inert state"* was not a
+stale-cache artefact. The served firm **JS** still contained `data-planned`, and the
+source of it was `firm/src/shell/Topbar.tsx`: the topbar's More sheet rendered a
+**Users** tile for every member, marked `aria-disabled` and `data-planned` when they
+lacked `users.read`.
+
+That is the user's complaint verbatim — an entry a member cannot open, shown greyed —
+surviving in the one surface the rail audit had not touched. The tile is now rendered
+only for members who hold `users.read`, so the sheet cannot offer a destination the
+route guard would then refuse.
+
+It was found by checking what is *served* rather than what is *written*, which is the
+only check that can distinguish "the change did not work" from "the change is not
+deployed". Every unit test passed before it, and would have passed with the tile still
+there.
