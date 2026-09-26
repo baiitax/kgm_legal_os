@@ -966,6 +966,26 @@
   -webkit-backdrop-filter: blur(6px);
 }
 
+/*
+  THE PANEL IS A SURFACE, NOT A TINT.
+
+  `.kgm-overlay__panel` used to carry `glass glass-strong` from base.css and no
+  background of its own — which made every dialog, drawer and bottom sheet in the
+  Firm OS a translucent wash over the blurred page. Two consequences, and the
+  second is the one users reported:
+
+    · the panel had no body: the page showed through it at 91.5% strength, so a
+      dialog read as text floating on the screen rather than as a layer;
+    · anything NESTED in it was invisible. A tile or card uses `--surface-glass`
+      (5.5% white); the panel was `--surface-glass-strong` (8.5% white). A card
+      less opaque than the surface behind it is not a card. That is why the More
+      sheet's modules appeared "listed without background".
+
+  So: an opaque panel, and inside it the glass family is RE-BASED onto tints of
+  the panel. Every nested surface in every overlay is repaired by this one remap —
+  no component changes, and any component added later inherits the correct
+  behaviour by using the tokens.
+*/
 .kgm-overlay__panel {
   position: relative;
   display: flex;
@@ -974,6 +994,17 @@
   inline-size: 100%;
   border-radius: var(--r-xl);
   overflow: hidden;
+  background: var(--surface-panel);
+  border: 1px solid var(--border-soft);
+  box-shadow: var(--shadow-xl);
+  /*  RE-BASE THE SURFACES FOR THIS SUBTREE.
+      Custom properties inherit, so this remap applies to everything inside the
+      panel and to nothing outside it. A component cannot "forget" it: it either
+      uses the tokens, or it styles itself with literals, which the system
+      already forbids. */
+  --surface-glass:        var(--surface-nested-1);
+  --surface-glass-strong: var(--surface-nested-2);
+  --surface-glass-raised: var(--surface-nested-3);
   animation: kgm-pop var(--dur-slow) var(--ease-out) both;
 }
 
@@ -994,6 +1025,9 @@
   gap: var(--sp-4);
   padding: var(--sp-5) var(--sp-5) var(--sp-4);
   border-block-end: 1px solid var(--border-subtle);
+  /* The same nested tint the footer takes, so the two bars bracket the body
+     instead of one being a band and the other a hole. */
+  background: var(--surface-nested-1);
   flex: 0 0 auto;
 }
 .kgm-overlay__headtext { flex: 1 1 auto; min-inline-size: 0; }

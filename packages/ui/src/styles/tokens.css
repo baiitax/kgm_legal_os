@@ -163,6 +163,25 @@
   --surface-solid:        #0a1f19;
   --surface-overlay:      rgba(4, 18, 14, 0.72);
 
+  /* --- Overlay panels, and the surfaces NESTED inside them ----------------
+     THE BUG THESE THREE TOKENS EXIST TO FIX, because it is subtle and it was
+     live: `.glass` and friends are TRANSLUCENT WHITE, which is exactly right
+     over the atmospheric page — a card at 5.5% white over a dark canvas reads
+     as glass. A dialog panel is not over the page. It is over a blurred scrim,
+     and its own container is another translucent white, so a card inside it was
+     5.5% white on an 8.5% white panel: LESS opaque than its own background, and
+     therefore invisible. The More sheet's tiles were "listed without background"
+     for exactly this reason.
+
+     So a panel is OPAQUE — content sits on it and must be readable — and inside
+     it the glass family is RE-BASED onto a tint of the panel rather than a wash
+     over the page. One remap in `.kgm-overlay__panel` fixes every nested
+     surface in every dialog, drawer and sheet without touching a component. */
+  --surface-panel:        #0a1f19;
+  --surface-nested-1:     rgba(255, 255, 255, 0.06);
+  --surface-nested-2:     rgba(255, 255, 255, 0.10);
+  --surface-nested-3:     rgba(255, 255, 255, 0.14);
+
   /* A document canvas stays WHITE even in dark mode (§27). Working on a legal
      document should feel like working on paper. */
   --surface-document:     #ffffff;
@@ -237,6 +256,14 @@
   --surface-glass-raised: rgba(255, 255, 255, 0.94);
   --surface-solid:        #ffffff;
   --surface-overlay:      rgba(20, 45, 36, 0.34);
+
+  /* See the dark block: a panel is opaque, and nested surfaces are a TINT of it.
+     In light mode the tint has to be GREEN, not white — white on white is the
+     same invisibility the dark theme had, with the polarity reversed. */
+  --surface-panel:        #ffffff;
+  --surface-nested-1:     rgba(11, 58, 47, 0.045);
+  --surface-nested-2:     rgba(11, 58, 47, 0.07);
+  --surface-nested-3:     rgba(11, 58, 47, 0.10);
 
   --surface-document:     #ffffff;
   --surface-document-ink: var(--kgm-gray-900);
@@ -462,6 +489,8 @@
   --glass-1:        var(--surface-glass);
   --canvas:         var(--bg-base);
   --card-bg-solid:  var(--surface-solid);
+  --surface-panel-1:  var(--surface-nested-1);
+  --surface-panel-2:  var(--surface-nested-2);
 
   /* --- Shell chrome -------------------------------------------------------
      The `*-edge` tokens are full border shorthands because the call sites use

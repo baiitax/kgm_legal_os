@@ -754,7 +754,41 @@
   text-transform: uppercase;
 }
 
-.kgm-morelist__grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: var(--sp-2); }
+/*
+  THE GRID, MADE TO ACTUALLY BE RESPONSIVE.
+
+  It was `minmax(140px, 1fr)` with no viewport rules anywhere in this file — a
+  desktop measurement applied to what is overwhelmingly a PHONE surface (the More
+  button only appears below 900px). Two things follow from `min()` here:
+
+    · `minmax(min(140px, 100%), 1fr)` cannot overflow on any screen. A bare
+      140px track overflows a 280px column of tiles on a small phone, and the
+      overflow is invisible until a 320px device is held; the `min()` cap is the
+      standard guard and it costs nothing on a wide screen.
+    · the tile padding and the gap tighten below 420px so two columns stay
+      readable rather than collapsing to a single twelve-item column, which is
+      what a phone user meant by "not responsive".
+*/
+.kgm-morelist__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(140px, 100%), 1fr));
+  gap: var(--sp-2);
+}
+
+/* A phone: two columns, tighter chrome. Below 420px this is the whole layout. */
+@media (max-width: 420px) {
+  .kgm-morelist__grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-1); }
+  .kgm-morelist__item { padding: var(--sp-2); gap: var(--sp-2); font-size: var(--fs-caption); }
+  .kgm-morelist__item .kgm-morelist__icon svg { inline-size: 18px; block-size: 18px; }
+  .kgm-morelist__group { margin-block-end: var(--sp-2); }
+}
+
+/* A short viewport — a phone in landscape is the case this exists for. The sheet
+   is capped at 88vh, so without a floor the body is a two-line scroll window. */
+@media (max-height: 520px) {
+  .kgm-overlay--sheet .kgm-overlay__panel { max-block-size: 96vh; }
+  .kgm-morelist__grid { grid-template-columns: repeat(auto-fill, minmax(min(120px, 100%), 1fr)); }
+}
 
 .kgm-morelist__item {
   display: flex;
@@ -776,6 +810,11 @@
 .kgm-morelist__item:focus-visible { outline: none; border-color: var(--focus-ring-color); box-shadow: var(--focus-ring-glow); }
 
 .kgm-morelist__icon { display: inline-grid; place-items: center; flex: none; color: var(--kgm-green-300); }
+
+/* A module name is a word, not a line: in Arabic the labels run longer than the
+   English they were designed against, and a tile that grows past its column
+   breaks the grid for every row beneath it. */
+.kgm-morelist__item > :last-child { min-inline-size: 0; overflow-wrap: anywhere; }
 
 /* --------------------------------------------------------------------------
    7 · PRELOADER · §32, §33

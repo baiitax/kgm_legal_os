@@ -2564,7 +2564,17 @@ html[dir='dark'] .btn--primary,
   z-index: 60;
   display: flex;
   flex-direction: column;
-  background: var(--bg);
+  /*
+    THE SHEET'S OWN SURFACE, AND IT WAS `var(--bg)`, WHICH NOTHING DEFINES.
+    `--bg` appears exactly once in this stylesheet — here. An undefined custom
+    property is not an error: the declaration is dropped, the sheet becomes a
+    full-screen fixed layer with NO background, and the page shows through it
+    everywhere the head and footer do not cover. The head and the footer carry
+    `var(--card)` and the tiles carry `var(--card)`, so it read as "mostly fine"
+    on a phone and as a translucent mess over a long page.
+    The page's own surface token is `--surface`; a sheet is a page-sized surface.
+  */
+  background: var(--surface);
   /* Above 1024 px the sheet is not the only way to reach anything — but it is
      still offered, because a pointer does not make a long menu shorter. */
   animation: sheet-in 0.16s ease;
