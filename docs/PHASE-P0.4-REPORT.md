@@ -1,8 +1,8 @@
 # PHASE P0.4 — JUDGMENTS, SERVICE AND ENFORCEMENT
 
-**Status:** complete and verified against the live PostgreSQL. Two commits (`2da7009`,
-`3fa8be0`), nine migrations (0045–0052 plus the regenerated 0047), 54 new tests, 536 in the
-suite, and **35/35 checks passing in the live harness**.
+**Status:** complete and verified against the live PostgreSQL. Four commits (`2da7009`,
+`3fa8be0`, `bb48712`, `22e817b`), ten migrations (0045–0053 plus the regenerated 0047), 57 new
+tests, **539 in the suite**, and **38/38 checks passing in the live harness**.
 
 ---
 
@@ -93,6 +93,7 @@ The database holds the same line as one equivalence:
 | `0050_the_browser_facing_roles_get_nothing.sql` | **the serious one — see §4** |
 | `0051_the_procedure_the_firm_diarises.sql` | `deadlines` had a column grant and no policy: the firm's own procedural deadline was `new row violates row-level security policy` |
 | `0052_the_function_the_trigger_calls.sql` | the trigger is `matter_execution_gate`; the function it calls is `matter_execution_guard`. 0049 replaced a function named after the *trigger* — which did not exist, so `create or replace` made one — and its verification asked the catalogue for the name it had just written. Both the replacement and the check were satisfied by the same mistake |
+| `0053_the_enforcement_that_declares_itself_final.sql` | what 0052 left behind: the rows admitted while the old body was running, and the check 0045 forgot to write beside its sibling — see §3a |
 
 Two more found by the harness, in code rather than schema:
 
@@ -104,6 +105,50 @@ Two more found by the harness, in code rather than schema:
   demo engine never caught it because the SQLite mirror declared that column *without* the
   foreign key that Postgres has — so the mirror now carries it (`on delete set null`), and the
   same class of mistake fails locally from here on.
+
+### 3a · The row that was sitting wrong — found by reading the register
+
+0052 repaired the function the gate **calls**, so every admission since records the finality it
+declares. It could not repair the admissions made before it, because those rows already
+existed. Reading the live register afterwards:
+
+```
+enforcement_status  final_at    rows
+awaiting_finality   NULL         5
+under_enforcement   NULL         1   ← opened while the old body was running
+under_enforcement   set          2   ← opened after 0052            ✓
+```
+
+One row is not the point. **Nothing in the schema forbade it.** 0045 wrote this beside the
+lifecycle:
+
+```sql
+check (enforcement_status <> 'under_enforcement' or enforcement_opened_at is not null)
+```
+
+— enforcement that never opened cannot be under way — and wrote **no twin** saying that
+enforcement under way cannot have skipped the finality that admits it. So a judgment could sit
+in `under_enforcement` with no `final_at`: a file that cannot answer the first question a court
+asks about an enforcement, which is when the judgment became final.
+
+**0053** does two things. It repairs the rows the old body left, deriving the date the
+admission presupposed — the appeal deadline that had passed, or, for a judgment no appeal lies
+from, the day it was served — rather than writing `now()`, which would have said a judgment
+became final today when it became final a month ago. And it adds the check 0045 forgot, in the
+same shape as its sibling, so the state can never be entered without its declaration again: not
+by the gate, not by a route, not by an operator at a psql prompt at two in the morning.
+
+The mirror carries the same check. A mirror that permits what the real schema forbids is a
+mirror that teaches the wrong lesson — which is the whole reason it now carries the foreign key
+from §3.
+
+**Verified by being refused, not by reading the constraint back.** The migration's own
+verification takes a real row that is under enforcement and attempts to remove its finality
+inside a handled block, failing if the database accepts it. §P0.4-N does the same on SQLite
+(three tests, including that enforcement can still be *satisfied* and keeps its finality). The
+live harness now asks the register, asks the schema, and then tries to break it:
+`new row for relation "judgments" violates check constraint
+"judgments_enforcement_carries_finality"`.
 
 ---
 
@@ -139,7 +184,7 @@ just wrote answers your question and not the important one.
 
 ## 5 · What was verified, and how
 
-**Suite — 536 tests, 15 files, green.** The P0.4 file is 54 of them, in thirteen suites:
+**Suite — 539 tests, 15 files, green.** The P0.4 file is 57 of them, in fourteen suites:
 
 - §A · the arithmetic asserted **against dates**, not against itself: the day after delivery,
   the last day pushed off a Friday, pushed again by a declared closure, and the window closing
@@ -154,14 +199,18 @@ just wrote answers your question and not the important one.
 - §K · the register as a screen reads it.
 - §L · the portal is shown none of the firm's posture.
 - §M · **the drift gate** — the matrix read out of all three copies and diffed.
+- §N · **the state carries its declaration** — both dialects state the same check, the
+  database refuses to take a finality away from an enforcement under way, and enforcement can
+  still be satisfied without losing it.
 
-**Live harness — `scripts/verify/judgment-gate-live.mjs`, 35 checks, all passing** against real
+**Live harness — `scripts/verify/judgment-gate-live.mjs`, 38 checks, all passing** against real
 PostgreSQL through the real routes, plus raw SQL as `postgres` where the question is about the
 trigger rather than the route. It walked a probe matter through every refusal in order,
 recorded a judgment, served it 70 days ago, checked the computed deadline against its own
 arithmetic, watched the procedural deadline appear with `client_visible = false`, watched the
 judgment reach the client timeline, opened enforcement, and then tried every illegal move
-underneath the route. It found four of the six defects in §3 and the exposure in §4.
+underneath the route. It found four of the six defects in §3, the exposure in §4, and — by reading the register
+rather than by asserting anything — the row in §3a.
 
 **Schema parity** — all 17 new statements pinned against the live grants
 (`scripts/verify/schema-parity.ts`), statement-versus-grant, which is how 0048 was found before
@@ -231,9 +280,42 @@ Three lines carry the design:
 
 ---
 
-## 9 · The live deployment
+## 9 · The live deployment, and what the register looks like now
 
-Migrations 0045–0052 are **applied to the production database** (86 tables, 274 policies), and
-the local server runs P0.4 against it. The two commits are local; the push needs the GitHub
-credential, which does not survive between sessions — the portable bundle and patches in
-`/home/user/github-push/` carry the history until it is supplied.
+Migrations 0045–0053 are **applied to the production database** (86 tables, 274 policies). The
+local server runs P0.4 against it, and the register, read directly:
+
+```
+the register — the operative judgment, and where the matter stands
+  PROBE-JDG-MUHJJZGE  verdict_for=client  state=under_enforcement  final=2026-09-25  satisfied=∅
+  PROBE-JDG-MUHJ82Q8  verdict_for=client  state=under_enforcement  final=2026-09-25  satisfied=∅
+  PROBE-JDG-MUHJ5H9E  verdict_for=client  state=under_enforcement  final=2026-09-25  satisfied=∅
+  PROBE-JDG-MUHJ4BA3  verdict_for=client  state=awaiting_finality  final=∅
+  PROBE-JDG-MUHIWKZF  verdict_for=client  state=awaiting_finality  final=∅
+
+the appeal period, stored rather than recomputed
+  article=نظام المرافعات الشرعية — المادة ١٨٧   days=30   served=2026-07-17
+  closes=2026-08-16 20:59:59 UTC   (23:59:59.999+03:00, on a Sunday — the 16th, not the 15th)
+
+the service tracker
+  personal          → served        effective 2026-07-17  diarised=true
+  registered_mail   → untraceable   effective ∅           diarised=false
+
+the diary the service created
+  kind=appeal  due=2026-08-16  client_visible=false
+  title=مدة الاعتراض — الصك PROBE-JDG-…
+
+the gate's refusals, in the order it asks them
+  service_defective ×13 · judgment_missing ×8 · judgment_not_served ×8
+```
+
+Two things are visible in that output and are worth saying plainly. The judgments left in
+`awaiting_finality` are the harness's own probes, each served seventy days ago with the appeal
+filed afterwards — a challenge is filed, so the gate keeps refusing; that is the system working.
+And the matters read `closed` while their judgments are `under_enforcement`, which is the
+honest illustration of §8's first item: a matter's status is a permission, not a shape, and the
+harness tidies up by closing its probe matters directly.
+
+**The four commits are local.** The push needs the GitHub credential, which does not survive
+between sessions; the portable bundle and patches in `/home/user/github-push/` carry the history
+until it is supplied.
