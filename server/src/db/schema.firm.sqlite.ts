@@ -2351,3 +2351,117 @@ create trigger if not exists matter_execution_gate
   end;
 
 `;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// P0.5 · THE PRIVILEGE RING — the demo engine's copy
+// ═══════════════════════════════════════════════════════════════════════════════
+/*
+  WHAT LIVES IN POSTGRES AND CANNOT LIVE HERE, AND WHAT IS THEREFORE HERE INSTEAD.
+
+  Migration 0054 protects `matters.internal_notes` and `matters.risk_rating` with a
+  COLUMN PRIVILEGE: the application role has no SELECT on them and the values come back
+  through a `security definer` function. SQLite has neither roles nor column grants, so
+  that mechanism cannot be mirrored — which is not a gap in the demo, it is the reason
+  the demo cannot be the only place a rule is tested. The suite asserts the DOMAIN
+  refuses (the projector withholds the field), the live harness asserts the DATABASE
+  refuses (the grant is absent, the function raises), and this literal carries the part
+  that is a property of the SCHEMA rather than of a role:
+
+    · `documents.privilege_class`, and the rule that a privileged document is internal —
+      a rule Postgres states as a CHECK, and which is stated here as a TRIGGER because
+      SQLite cannot add a CHECK to a table that already exists;
+    · `privilege_releases`, the ledger of deliberate exits, with the two legal rules the
+      grounds carry: the client's consent is a WRITING (so it names a document), and a
+      suspicion of money laundering goes to the REGULATOR (so it cannot name the other
+      side). Those are CHECKs here and in 0054, and a drift check compares the two lists.
+*/
+export const PRIVILEGE_RING_SCHEMA = `
+-- A privileged document is internal. Postgres says so with a CHECK —
+-- check (privilege_class = 'none' or client_visibility = 'internal') — and SQLite cannot
+-- add a CHECK to an existing table, so it is said with triggers, which also cover rows
+-- written by a route that never consulted the registry.
+create trigger if not exists document_privilege_internal_ins
+  before insert on documents
+  when new.privilege_class <> 'none' and new.client_visibility <> 'internal'
+  begin select raise(ABORT, 'privilege_class_internal: a privileged document is internal — the advice the client receives is a document issued to the client, and a release is what moves material across'); end;
+
+create trigger if not exists document_privilege_internal_upd
+  before update on documents
+  when new.privilege_class <> 'none' and new.client_visibility <> 'internal'
+  begin select raise(ABORT, 'privilege_class_internal: a privileged document is internal'); end;
+
+-- A privileged document cannot become client-visible by an update of one column either.
+create trigger if not exists document_privilege_visibility_upd
+  before update of client_visibility on documents
+  when new.client_visibility <> 'internal' and old.privilege_class <> 'none'
+  begin select raise(ABORT, 'privilege_class_internal: a privileged document cannot be made client-visible'); end;
+
+/*
+  THE DOOR'S LEDGER.
+
+  Append-only in Postgres by privilege (no UPDATE or DELETE granted to anyone but the
+  owner). SQLite has no grants, so it is append-only by trigger — the same rule, stated
+  in the dialect that has to state it differently.
+*/
+create table if not exists privilege_releases (
+  id                text primary key,
+  tenant_id         text not null references tenants(id),
+  matter_id         text not null references matters(id),
+  document_id       text references documents(id),
+  subject_kind      text not null check (subject_kind in ('matter_note','document','assessment')),
+  -- القاعدة الحادية والعشرون: the four grounds, and no fifth.
+  ground            text not null check (ground in
+                      ('crime_prevention','aml_suspicion','self_defence','client_written_consent')),
+  recipient_kind    text not null check (recipient_kind in
+                      ('court','authority','regulator','third_party','client')),
+  recipient_name    text not null,
+  consent_document_id text references documents(id),
+  released_by_membership_id text not null references firm_memberships(id),
+  -- Postgres has a now() default (0054). The application writes this value explicitly in
+  -- both dialects, but the default is mirrored so that a row inserted by hand means the same
+  -- thing in the demo as in production.
+  released_at       text not null default (datetime('now')),
+  note              text,
+  /* A document release must say which document. */
+  check (subject_kind <> 'document' or document_id is not null),
+  /* The client's consent is WRITTEN: name the writing, not a flag saying it happened. */
+  check (ground <> 'client_written_consent' or consent_document_id is not null),
+  /* A suspicion of money laundering is reported to the regulator — never to the other side. */
+  check (ground <> 'aml_suspicion' or recipient_kind = 'regulator')
+);
+create index if not exists privilege_releases_matter_idx
+  on privilege_releases(tenant_id, matter_id, released_at desc);
+
+-- 0056 · WHERE THE RELEASE'S TWO DOCUMENTS ACTUALLY LIVE.
+--
+-- A foreign key proves only that a document EXISTS. The document being released must be a
+-- document OF THIS MATTER; the writing that carries the client's consent must belong to the
+-- CLIENT this matter is for. Same two rules, same token, same sentences as
+-- privilege_release_guard() in 0056 and as the release route — defect (o) is what happens
+-- when one copy of a rule is written differently from the others.
+create trigger if not exists privilege_release_document_scope_ins
+  before insert on privilege_releases
+  when new.document_id is not null
+   and not exists (
+     select 1 from documents d
+      where d.id = new.document_id and d.tenant_id = new.tenant_id
+        and d.matter_id = new.matter_id)
+  begin select raise(ABORT, 'privilege_document_mismatch: documentId — the document being released is not a document of this matter'); end;
+
+create trigger if not exists privilege_release_consent_scope_ins
+  before insert on privilege_releases
+  when new.consent_document_id is not null
+   and not exists (
+     select 1 from documents d
+      where d.id = new.consent_document_id and d.tenant_id = new.tenant_id
+        and d.client_id = (select m.client_id from matters m where m.id = new.matter_id))
+  begin select raise(ABORT, 'privilege_document_mismatch: consentDocumentId — the document named as the client''s written consent is not a document of this client'); end;
+
+create trigger if not exists privilege_releases_append_only_upd
+  before update on privilege_releases
+  begin select raise(ABORT, 'privilege_release_immutable: a release that can be edited afterwards is not a record of a release'); end;
+
+create trigger if not exists privilege_releases_append_only_del
+  before delete on privilege_releases
+  begin select raise(ABORT, 'privilege_release_immutable: a release that can be deleted is not a record of a release'); end;
+`;

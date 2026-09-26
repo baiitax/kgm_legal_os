@@ -446,6 +446,11 @@ create table if not exists documents (
   scanned_at text,
   status text not null default 'processing',
   client_visibility text not null default 'visible',
+  /* P0.5 · none · advice · work_product · litigation. A privileged document is internal
+     (0054, and the trigger in the sixth literal) — the advice the client receives is a
+     document issued to the client, and a release is what moves material across. */
+  privilege_class text not null default 'none'
+                  check (privilege_class in ('none','advice','work_product','litigation')),
   requested integer not null default 0,
   request_note text,
   request_note_ar text,

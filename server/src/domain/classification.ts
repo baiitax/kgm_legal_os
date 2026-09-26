@@ -44,6 +44,7 @@ import {
   MATTER_WRITE,
   type AccessLevel, type FirmPrincipal,
 } from './permissions.js';
+import { NO_RING, type LawyerRing } from './privilege.js';
 
 // ============================================================================
 // CLASSIFICATION TIERS
@@ -53,6 +54,8 @@ export type Classification =
   | 'public'
   | 'internal'
   | 'confidential'
+  /** P0.5 — the lawyer ring. Level is not enough; the licence decides. */
+  | 'privileged'
   | 'financial'
   | 'compliance'
   | 'restricted'
@@ -74,6 +77,15 @@ export const CLASSIFICATION_ACCEPTS: Readonly<Record<Classification, readonly Ac
   // `operational` is deliberately outside this set: a paralegal does the work,
   // the risk assessment is not theirs to read.
   confidential: MATTER_WRITE,
+  /*
+    PRIVILEGED (§P0.5). The level half of the ring: whoever writes the substance of
+    the matter — `confidential` already stops a paralegal. The other half is not a
+    level at all and is checked separately, because the duty under المادة الثالثة
+    والعشرون attaches to the LICENSE, not to the file: a partner whose licence is
+    suspended this morning must lose this field this morning, and an associate who
+    has never been admitted holds nothing for it to cover.
+  */
+  privileged: MATTER_WRITE,
   financial: MATTER_FINANCIAL,
   compliance: MATTER_COMPLIANCE,
   // Stricter than `confidential` on purpose. The reason a matter was restricted
@@ -116,12 +128,22 @@ export interface FieldRule {
   readonly out?: string;
   readonly level: Classification;
   /**
-   * An additional permission the caller must hold ON TOP of the access level.
+   * An additional permission the caller must hold ON TOP OF the access level.
    * Used where a classification is not enough — e.g. the restriction reason is
    * `restricted` AND requires `matters.restrict`, so a partner with `full`
    * access who cannot manage restrictions still does not learn why.
    */
   readonly permission?: string;
+  /**
+   * P0.5 — the field is inside the lawyer ring, and the membership must be in it.
+   *
+   * A flag rather than a fourth kind of check inside `visible()`, because the ring
+   * is not a property of the field: `restrictionReason` is withheld from a partner
+   * without `matters.restrict`, and `internalNotes` is withheld from the firm's own
+   * managing partner if his licence is not current. Stating it per rule keeps the
+   * two reasons separable in the withheld list, which is what the member sees.
+   */
+  readonly requiresLawyerRing?: boolean;
   /** Applied to the value before it is emitted. Masking lives here, not in handlers. */
   readonly mask?: (value: unknown) => unknown;
 }
@@ -142,6 +164,16 @@ export interface ProjectionContext {
   readonly principal: FirmPrincipal;
   /** The access level already resolved for THIS resource. Never re-derived here. */
   readonly accessLevel: AccessLevel;
+  /**
+   * The lawyer ring, already resolved for this member. Never re-derived here.
+   *
+   * Optional so that the many call sites that project nothing privileged do not
+   * have to know the ring exists; a rule that requires it and a context that omits
+   * it resolves to NO_RING, which is the refusing direction. Default-deny is the
+   * module's first property, and an omitted fact must fail the same way an
+   * unlisted field does.
+   */
+  readonly ring?: LawyerRing;
 }
 
 export interface Projection<T> {
@@ -202,6 +234,10 @@ export function visible(rule: FieldRule, ctx: ProjectionContext): boolean {
   if (rule.level === 'never') return false;
   if (!levelAccepts(rule.level, ctx.accessLevel)) return false;
   if (rule.permission && !ctx.principal.permissions.has(rule.permission)) return false;
+  /* The ring is checked LAST and is independent of the level: a `full` partner who
+     is not in the ring is refused, and an `edit` associate who is in it is admitted.
+     An omitted context ring is NO_RING — the refusing direction. */
+  if (rule.requiresLawyerRing && !(ctx.ring ?? NO_RING).inRing) return false;
   return true;
 }
 
@@ -280,9 +316,16 @@ export const MATTER_FIELDS: readonly FieldRule[] = [
   { source: 'summary_ar', out: 'summaryAr', level: 'internal' },
   { source: 'closed_at', out: 'closedAt', level: 'internal' },
 
-  // Lateral domains: money and compliance each see their own slice.
-  { source: 'risk_rating', out: 'riskRating', level: 'confidential' },
-  { source: 'internal_notes', out: 'internalNotes', level: 'confidential' },
+  /*
+    THE RING (§P0.5). Both of these were `confidential`, which meant any member with
+    write access — and the gap analysis found `internal_notes` reachable by a
+    paralegal, a finance officer and a compliance officer. They are not the same
+    question as `client_due_diligence.risk_rating`, which is the AML assessment of
+    the CLIENT and stays readable by compliance: this one is the firm's assessment of
+    its own exposure, which is advice, which is what المادة الثالثة والعشرون covers.
+  */
+  { source: 'risk_rating', out: 'riskRating', level: 'privileged', requiresLawyerRing: true },
+  { source: 'internal_notes', out: 'internalNotes', level: 'privileged', requiresLawyerRing: true },
   { source: 'conflict_cleared', out: 'conflictCleared', level: 'compliance' },
   { source: 'restriction_reason', out: 'restrictionReason', level: 'restricted', permission: 'matters.restrict' },
   { source: 'restriction_reason_ar', out: 'restrictionReasonAr', level: 'restricted', permission: 'matters.restrict' },

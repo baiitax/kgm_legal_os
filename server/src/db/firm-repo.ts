@@ -521,10 +521,18 @@ export class FirmRepo {
       // gate is about the client behind the matter, and a projection that omitted the
       // column would not fail — it would pass `undefined` into the assessment and clear
       // every matter. A gate column that is not selected is a gate that is not there.
+      /*
+        `m.risk_rating` and `m.internal_notes` are NOT selected here, and it is not a
+        preference. Migration 0054 revoked `firm_api`'s SELECT privilege on both — they
+        are the lawyer ring, and a repository bug that selects them must fail rather than
+        leak. They arrive through `readMatterPrivilege()` below, which is the only door,
+        and a projection that omits them cannot be written by accident because there is
+        nothing to omit.
+      */
       `select m.id, m.matter_number, m.case_number, m.title, m.title_ar, m.client_id,
               m.practice_area, m.practice_area_ar, m.court, m.court_ar,
               m.internal_status, m.client_status, m.summary, m.summary_ar,
-              m.opened_at, m.closed_at, m.risk_rating, m.internal_notes, m.conflict_cleared,
+              m.opened_at, m.closed_at, m.conflict_cleared,
               c.name as client_name, c.name_ar as client_name_ar,
               mc.restriction_reason, mc.restriction_reason_ar
          from matters m
@@ -534,6 +542,146 @@ export class FirmRepo {
       [matterId, tenantId],
     );
     return r ?? null;
+  }
+
+  /**
+   * P0.5 · THE PRIVILEGED FIELDS, THROUGH THE ONLY DOOR THERE IS.
+   *
+   * On PostgreSQL the two columns are not readable by the application role at all —
+   * 0054 revoked the privilege — so this method does not read them: it calls
+   * `firm_read_matter_privilege()`, which is `security definer`, checks the ring
+   * against the same `kgm.*` settings every policy reads, and refuses with a named
+   * reason. The refusal arrives here as a driver error whose message starts
+   * `privilege_ring_refused:`, which `toPortalError` turns into a 403 with the reason
+   * attached rather than a 500.
+   *
+   * On the demo engine there is no such function and no column privilege, so the read
+   * is a plain one — which is exactly why the CALLER must resolve the ring first
+   * (it does: `p.ring` is resolved with the principal) and why the suite asserts the
+   * refusal the database will make in production. The asymmetry is the same one every
+   * other layer in this project carries, and it is written down rather than assumed.
+   */
+  async readMatterPrivilege(
+    tenantId: string,
+    matterId: string,
+  ): Promise<{ internalNotes: string | null; riskRating: string | null } | null> {
+    if (this.db.driver === 'postgres') {
+      const r = await this.q().get<Row>(
+        `select internal_notes, risk_rating from public.firm_read_matter_privilege(?)`,
+        [matterId],
+      );
+      if (!r) return null;
+      return { internalNotes: toStr(r.internal_notes), riskRating: toStr(r.risk_rating) };
+    }
+    const r = await this.q().get<Row>(
+      `select internal_notes, risk_rating from matters where id = ? and tenant_id = ?`,
+      [matterId, tenantId],
+    );
+    if (!r) return null;
+    return { internalNotes: toStr(r.internal_notes), riskRating: toStr(r.risk_rating) };
+  }
+
+  /**
+   * P0.5 · WHERE A DOCUMENT ACTUALLY LIVES.
+   *
+   * The release ledger has two document references and a foreign key proves only that
+   * each one EXISTS. It does not prove that the document is the one the release claims to
+   * rest on — and a ledger that can name any document in the database as the writing that
+   * authorised a disclosure cannot be read by the regulator it was written for.
+   *
+   * Two scopes, because the two references answer two different questions:
+   *
+   *   · the SUBJECT document (`documentId`) is the material being released, so it must be
+   *     a document of THIS matter — `matterId` must match;
+   *   · the CONSENT document (`consentDocumentId`) is the CLIENT's writing, and a client's
+   *     consent is the client's wherever in their file it sits — the same client, which
+   *     the matter names, and the same firm.
+   *
+   * Deliberately NOT filtered by tenant in the WHERE clause. The caller compares, so that
+   * "a document in another firm" and "no such document" produce the same refusal at the
+   * edge rather than two refusals that differ in a way an outsider can count.
+   */
+  async documentScope(documentId: string): Promise<{
+    tenantId: string; clientId: string; matterId: string | null; privilegeClass: string;
+  } | null> {
+    const r = await this.q().get<Row>(
+      `select tenant_id, client_id, matter_id, privilege_class from documents where id = ?`,
+      [documentId],
+    );
+    if (!r) return null;
+    return {
+      tenantId: toStr(r.tenant_id)!,
+      clientId: toStr(r.client_id)!,
+      matterId: toStr(r.matter_id),
+      privilegeClass: toStr(r.privilege_class) ?? 'none',
+    };
+  }
+
+  /**
+   * P0.5 · THE DOOR'S LEDGER.
+   *
+   * Append-only by privilege: nothing grants UPDATE or DELETE on `privilege_releases`,
+   * so a release cannot be edited into a different release afterwards. The row names
+   * which of القاعدة الحادية والعشرون's four grounds was relied on, who received the
+   * material, and — where the ground is the client's written consent — which document
+   * carries the writing. The database enforces the last two as CHECKs (an AML suspicion
+   * cannot name a counterparty; consent must point at a document) and the ring as a
+   * trigger, so the refusal is available even to somebody with a psql prompt.
+   */
+  async insertPrivilegeRelease(input: {
+    id: string;
+    tenantId: string;
+    matterId: string;
+    documentId?: string | null;
+    subjectKind: string;
+    ground: string;
+    recipientKind: string;
+    recipientName: string;
+    consentDocumentId?: string | null;
+    membershipId: string;
+    note?: string | null;
+  }): Promise<string> {
+    await this.q().run(
+      `insert into privilege_releases
+         (id, tenant_id, matter_id, document_id, subject_kind, ground, recipient_kind,
+          recipient_name, consent_document_id, released_by_membership_id, released_at, note)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [input.id, input.tenantId, input.matterId, input.documentId ?? null, input.subjectKind,
+        input.ground, input.recipientKind, input.recipientName,
+        input.consentDocumentId ?? null, input.membershipId,
+        /* WRITTEN BY THE APPLICATION, not left to the column's default. Postgres has
+           `default now()` (0054) and the SQLite mirror now carries the same default — but a
+           ledger entry is the one timestamp a firm will be asked to account for, and two
+           dialects answering "when" from two clocks is how the two records come to differ.
+           The demo driver had no default at all, and the row failed to insert: a 500 on the
+           only lawful path out of the ring, found by the suite rather than by a firm. */
+        new Date().toISOString(), input.note ?? null],
+    );
+    return input.id;
+  }
+
+  /** The releases recorded on one matter, newest first. Readable by anyone who can see it. */
+  async listPrivilegeReleases(tenantId: string, matterId: string) {
+    const rows = await this.q().all<Row>(
+      `select id, document_id, subject_kind, ground, recipient_kind, recipient_name,
+              consent_document_id, released_by_membership_id, released_at, note
+         from privilege_releases
+        where tenant_id = ? and matter_id = ?
+        order by released_at desc limit 100`,
+      [tenantId, matterId],
+    );
+    return rows.map((r) => ({
+      id: toStr(r.id),
+      documentId: toStr(r.document_id),
+      subjectKind: toStr(r.subject_kind),
+      ground: toStr(r.ground),
+      recipientKind: toStr(r.recipient_kind),
+      recipientName: toStr(r.recipient_name),
+      consentDocumentId: toStr(r.consent_document_id),
+      releasedByMembershipId: toStr(r.released_by_membership_id),
+      releasedAt: toIso(r.released_at),
+      note: toStr(r.note),
+    }));
   }
 
   /**
@@ -584,9 +732,12 @@ export class FirmRepo {
     ];
 
     const rows = await this.q().all<Row>(
+      /* No `m.risk_rating`: 0054 revoked the privilege, and the list projection never
+         emitted it anyway — a column selected and then dropped by the registry is a
+         column somebody will one day forget to drop. */
       `select m.id, m.tenant_id, m.matter_number, m.title, m.title_ar,
               m.practice_area, m.practice_area_ar, m.internal_status, m.client_status,
-              m.risk_rating, m.opened_at, m.last_client_update_at,
+              m.opened_at, m.last_client_update_at,
               c.name as client_name, c.name_ar as client_name_ar,
               coalesce(mc.is_restricted, false) as is_restricted,
               (select mp.access_level from matter_permissions mp
@@ -632,7 +783,6 @@ export class FirmRepo {
         practiceAreaAr: toStr(r.practice_area_ar),
         internalStatus: toStr(r.internal_status),
         clientStatus: toStr(r.client_status),
-        riskRating: toStr(r.risk_rating),
         clientName: toStr(r.client_name),
         clientNameAr: toStr(r.client_name_ar),
         openedAt: toIso(r.opened_at),

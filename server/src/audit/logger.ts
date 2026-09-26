@@ -170,7 +170,17 @@ export type AuditAction =
   | 'JUDGMENT_RECORDED' | 'JUDGMENT_AMENDED' | 'JUDGMENT_SERVICE_RECORDED'
   | 'APPEAL_PERIOD_COMPUTED' | 'APPEAL_FILED' | 'EXECUTION_GATE_DENIED'
   | 'EXECUTION_STAYED' | 'EXECUTION_STAY_LIFTED'
-  | 'COURT_CALENDAR_RECORDED' | 'COURT_CALENDAR_REMOVED';
+  | 'COURT_CALENDAR_RECORDED' | 'COURT_CALENDAR_REMOVED'
+  /*
+    P0.5 · the privilege ring. A READ, recorded because the question asked in a
+    disqualification motion is who read the firm's privileged material and when — the
+    same reasoning as MATTER_VIEWED, one level down. Outcome 'denied' carries the ring's
+    own reason, so the record separates a paralegal from a suspended lawyer.
+  */
+  | 'PRIVILEGED_READ'
+  /* A deliberate exit from the ring: which of القاعدة الحادية والعشرون's four grounds,
+     to whom, and on whose instruction. Written whether it succeeded or was refused. */
+  | 'PRIVILEGE_RELEASED';
 
 export interface AuditActor {
   /**

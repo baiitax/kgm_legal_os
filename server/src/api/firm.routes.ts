@@ -27,7 +27,9 @@ import { z } from 'zod';
 import type { Container } from '../container.js';
 import { config } from '../config.js';
 import { ok } from '../lib/http.js';
-import { badRequest, conflict, forbidden, notFoundOrForbidden } from '../lib/errors.js';
+import {
+  badRequest, conflict, forbidden, notFoundOrForbidden, toPortalError,
+} from '../lib/errors.js';
 import { normalizeArabicName, normalizeIdentifier } from '../domain/arabic-names.js';
 import { evaluateConflicts } from '../domain/conflict-engine.js';
 import { keyedHash, maskNationalId } from '../lib/crypto.js';
@@ -41,6 +43,9 @@ import {
   type AccessLevel,
 } from '../domain/permissions.js';
 import { projectMatter, projectMatterList } from '../domain/classification.js';
+import {
+  DISCLOSURE_GROUND_CODES, DISCLOSURE_RECIPIENTS, groundOf, groundPermits,
+} from '../domain/privilege.js';
 import {
   SERVICE_TAKING_OUTCOMES,
   COURT_WEEKEND_DAYS,
@@ -283,7 +288,7 @@ export function firmRouter(c: Container): Router {
       matters: matters.map((m) => {
         const projected = projectMatterList<Record<string, unknown>>(
           m as unknown as Record<string, unknown>,
-          { principal: p, accessLevel: m.accessLevel },
+          { principal: p, accessLevel: m.accessLevel, ring: p.ring },
         );
         return {
           ...projected.data,
@@ -325,9 +330,71 @@ export function firmRouter(c: Container): Router {
     const row = await c.firm.getMatterRow(p.tenantId, facts.matterId);
     if (!row) throw notFoundOrForbidden();
 
+    /*
+      ── P0.5 · THE PRIVILEGED FIELDS ────────────────────────────────────────────
+
+      `getMatterRow` does not select them: 0054 revoked the application role's SELECT
+      privilege on `matters.internal_notes` and `matters.risk_rating`, so there is no
+      version of this query that could leak them. They are fetched through
+      `readMatterPrivilege()` — a security-definer function that checks the ring and
+      names its refusal — and fetched ONLY when the member is in the ring AND the
+      projection would emit them anyway.
+
+      THE ORDER MATTERS. The ring is consulted before the database is asked, so an
+      ordinary paralegal viewing a matter does not generate a database refusal on every
+      page load; the withheld list is the signal for that case, and it is already
+      correct. The refusal path below exists for the case where the database DISAGREES
+      with the application — a principal resolved a moment before a suspension landed,
+      or a bug in the ring — and that disagreement must not be swallowed: it is recorded,
+      with the reason, and the fields stay withheld.
+    */
+    let privileged: { internalNotes: string | null; riskRating: string | null } | null = null;
+    const wouldEmitPrivileged =
+      MATTER_WRITE.includes(level as AccessLevel) && p.ring.inRing;
+    if (wouldEmitPrivileged) {
+      try {
+        privileged = await c.firm.readMatterPrivilege(p.tenantId, facts.matterId);
+        if (privileged) {
+          row.internal_notes = privileged.internalNotes;
+          row.risk_rating = privileged.riskRating;
+          /*
+            RECORDED, because the question asked in a disqualification motion is not
+            "was the screen clean" but "who read the firm's privileged material, and
+            when" — the same reasoning as MATTER_VIEWED, one level down. Fire-and-
+            forget, like every read: a lost audit must not fail a permitted read.
+          */
+          await c.audit.tryWrite({
+            action: 'PRIVILEGED_READ',
+            actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+            resourceType: 'matter', resourceId: facts.matterId, outcome: 'success',
+            reasonCode: 'in_ring',
+            metadata: {
+              membershipId: p.membershipId,
+              matterNumber: facts.matterNumber,
+              fields: ['internalNotes', 'riskRating'],
+            },
+          }, requestInfo(req, c.trustProxy));
+        }
+      } catch (err) {
+        /* The database refused a member the application believed was in the ring. The
+           fields are withheld — the projection emits nothing for a null row value — and
+           the disagreement is recorded rather than raised: the member's view of the
+           matter is not wrong, it is narrower than they expected, and the operator
+           reading the log is the one who needs to see it. */
+        await c.audit.tryWrite({
+          action: 'PRIVILEGED_READ',
+          actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+          resourceType: 'matter', resourceId: facts.matterId, outcome: 'denied',
+          reasonCode: String((err as Error)?.message ?? 'unknown').slice(0, 120),
+          metadata: { membershipId: p.membershipId, matterNumber: facts.matterNumber },
+        }, requestInfo(req, c.trustProxy));
+      }
+    }
+
     const projected = projectMatter<Record<string, unknown>>(row, {
       principal: p,
       accessLevel: level,
+      ring: p.ring,
     });
 
     /*
@@ -376,6 +443,13 @@ export function firmRouter(c: Container): Router {
       teamRole: facts.teamRole,
       department: facts.departmentCode,
       withheld: projected.withheld,
+      /*
+        THE RING, AS A FACT THE SCREEN MAY RENDER AND MAY NOT OVERRIDE (§50). A member
+        whose licence is suspended will see `privileged` fields locked and no value; the
+        screen is told WHY so it can say "يحتاج ترخيصاً سارياً" instead of showing a blank
+        they cannot interpret. Nothing here decides access — the server already did.
+      */
+      privilege: { inRing: p.ring.inRing, reason: p.ring.reason },
     });
   }));
 
@@ -4874,6 +4948,200 @@ export function firmRouter(c: Container): Router {
     ok(res, { id, stayInForce: body.inForce, enforcementStatus: next });
   }));
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // P0.5 · THE PRIVILEGE RING — THE DOOR
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * The releases recorded on a matter.
+   *
+   * Readable by anyone who can see the matter, deliberately: the member who may not
+   * read the firm's strategy IS entitled to know that a document left the file and on
+   * whose instruction — that is the difference between a ring and a secret, and it is
+   * the answer the firm gives when the client asks who has seen their file.
+   */
+  /**
+   * The disclosures recorded on one matter.
+   *
+   * READING THE LEDGER IS A PRIVILEGED READ. The entries are metadata about privileged
+   * material — that the firm's own notes went to the Public Prosecution on a
+   * crime-prevention ground is a fact a client would pay to know, and a fact an adverse
+   * party would like to have — so the ring gates the read as well as the write. Opening it
+   * to every member who can see the matter would have left the door locked and the doorway
+   * made of glass.
+   */
+  r.get('/matters/:id/privilege-releases', ah(async (req, res) => {
+    const p = principal(req);
+    c.permissions.assertCan(p, 'matters.read', { type: 'matter', id: req.params.id });
+    const { facts } = await c.permissions.requireMatter(p, String(req.params.id), MATTER_READ);
+    if (!p.ring.inRing) {
+      await c.audit.write({
+        action: 'PRIVILEGED_READ',
+        actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+        outcome: 'denied', resourceType: 'matter', resourceId: facts.matterId,
+        reasonCode: p.ring.reason,
+        metadata: { membershipId: p.membershipId, surface: 'privilege_releases' },
+      }, requestInfo(req, c.trustProxy));
+      throw forbidden('privilege_ring_refused',
+        `the privilege ring excludes this member: ${p.ring.reason}`,
+        p.ring.reason, { alreadyAudited: true });
+    }
+    const releases = await c.firm.listPrivilegeReleases(p.tenantId, facts.matterId);
+    ok(res, { count: releases.length, releases });
+  }));
+
+  /**
+   * Release privileged material, naming the ground القاعدة الحادية والعشرون provides.
+   *
+   * THIS ROUTE HAS NO "just share it" FORM, and that is the design. A lawyer who must
+   * disclose — to a court, to the regulator, in his own defence, or because the client
+   * instructed it in writing — has exactly four grounds, and the record says which one
+   * was relied on, to whom the material went, and which document carries the client's
+   * consent. A member outside the ring cannot open the door; the database's trigger
+   * enforces that as well, because the ledger is what a court will read.
+   */
+  r.post('/matters/:id/privilege-releases', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const body = strictBody(
+      z.object({
+        subjectKind: z.enum(['matter_note', 'document', 'assessment']),
+        documentId: z.string().uuid().optional().nullable(),
+        ground: z.enum(DISCLOSURE_GROUND_CODES as unknown as [string, ...string[]]),
+        recipientKind: z.enum(DISCLOSURE_RECIPIENTS as unknown as [string, ...string[]]),
+        recipientName: z.string().trim().min(2).max(200),
+        consentDocumentId: z.string().uuid().optional().nullable(),
+        note: z.string().trim().max(1000).optional().nullable(),
+      }).strict(),
+      req, c, '/api/firm/matters/:id/privilege-releases',
+    );
+
+    c.permissions.assertCan(p, 'matters.read', { type: 'matter', id: req.params.id });
+    const { facts, level } = await c.permissions.requireMatter(p, String(req.params.id), MATTER_WRITE);
+
+    /*
+      THE RING, CHECKED BEFORE THE DATABASE IS ASKED.
+
+      A named refusal beats a driver error, and this is one of the few refusals in the
+      system that is genuinely a 403 rather than a 409: the record is not in a bad state,
+      the caller is not in the ring. The database refuses the same thing underneath
+      (0054's trigger), which is where the rule lives for anybody who reaches the ledger
+      without this route.
+    */
+    if (!p.ring.inRing) {
+      await c.audit.write({
+        action: 'PRIVILEGE_RELEASED',
+        actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+        outcome: 'denied', resourceType: 'matter', resourceId: facts.matterId,
+        reasonCode: p.ring.reason,
+        metadata: {
+          membershipId: p.membershipId, ground: body.ground,
+          recipientKind: body.recipientKind, refusal: p.ring.reason,
+        },
+      }, requestInfo(req, c.trustProxy));
+      /* `alreadyAudited` — the denial was written above, and with the reason recorded as
+         the audit's reasonCode. A second, generic row for the same refusal would be
+         noise in the one place a reviewer looks for signal. */
+      throw forbidden('privilege_ring_refused',
+        `the privilege ring excludes this member: ${p.ring.reason}`,
+        'privilege_ring_refused', { alreadyAudited: true });
+    }
+
+    /* THE GROUND'S OWN RULE, stated here so the member is told what is permitted rather
+       than merely that the request failed. A suspicion of money laundering is reported
+       to the regulator; a client's consent is a writing, not a flag. */
+    if (!groundPermits(body.ground, body.recipientKind)) {
+      const g = groundOf(body.ground);
+      throw badRequest('privilege_ground_recipient_mismatch',
+        `the ground "${body.ground}" does not permit disclosure to "${body.recipientKind}"`,
+        /* `badRequest(code, message, details)` — the third argument IS the details object.
+           Wrapping it in another `{ details: … }` nests it one level down, which type-checks
+           and ships `error.details.details`. The screen then cannot find the list of
+           recipients the ground does allow, and the refusal reads as merely negative. */
+        { ground: body.ground, permittedRecipients: g ? [...g.recipients] : [] });
+    }
+    const ground = groundOf(body.ground)!;
+    if (ground.requiresDocument && !body.consentDocumentId) {
+      throw badRequest('privilege_consent_document_required',
+        'disclosure on the client’s consent must name the document that carries the consent',
+        { ground: body.ground });
+    }
+    if (body.subjectKind === 'document' && !body.documentId) {
+      throw badRequest('validation_failed',
+        'a document release must name the document', { fields: ['documentId'] });
+    }
+
+    /*
+      ── WHERE THOSE DOCUMENTS ACTUALLY LIVE ────────────────────────────────────────
+
+      A foreign key proves a document EXISTS. It does not prove it is the document this
+      release claims to rest on, and the two references here answer two different
+      questions:
+
+        · `documentId` is the material being released, so it must be a document OF THIS
+          MATTER. A ledger entry disclosing a document that belongs to another file — or to
+          another firm on the same SaaS — is a record of a disclosure that did not happen.
+        · `consentDocumentId` is the CLIENT's writing. Consent is the client's, so the
+          document must belong to the same client as the matter: the client may sign it on
+          any of their files, and none of them may be somebody else's.
+
+      Checked here AND in `privilege_release_guard()`, because the ledger's reader is a
+      regulator with a psql prompt as often as it is this screen. Both refusals carry the
+      same token so the two dialects cannot drift into saying different things — defect (o).
+    */
+    if (body.documentId) {
+      const scope = await c.firm.documentScope(body.documentId);
+      if (!scope || scope.tenantId !== p.tenantId || scope.matterId !== facts.matterId) {
+        throw badRequest('privilege_document_mismatch',
+          'the document being released is not a document of this matter',
+          { field: 'documentId' });
+      }
+    }
+    if (body.consentDocumentId) {
+      const scope = await c.firm.documentScope(body.consentDocumentId);
+      if (!scope || scope.tenantId !== p.tenantId || scope.clientId !== facts.clientId) {
+        throw badRequest('privilege_document_mismatch',
+          'the document named as the client’s written consent is not a document of this client',
+          { field: 'consentDocumentId' });
+      }
+    }
+
+    const id = newId();
+    try {
+      await c.firm.insertPrivilegeRelease({
+        id, tenantId: p.tenantId, matterId: facts.matterId,
+        documentId: body.documentId ?? null,
+        subjectKind: body.subjectKind,
+        ground: body.ground,
+        recipientKind: body.recipientKind,
+        recipientName: body.recipientName,
+        consentDocumentId: body.consentDocumentId ?? null,
+        membershipId: p.membershipId,
+        note: body.note ?? null,
+      });
+    } catch (err) {
+      /* The database's own CHECKs and trigger, surfaced as refusals rather than 500s —
+         the same discipline the P0.4 engine applies to its guards. */
+      throw toPortalError(err);
+    }
+
+    await c.audit.write({
+      action: 'PRIVILEGE_RELEASED',
+      actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+      outcome: 'success', resourceType: 'matter', resourceId: facts.matterId,
+      metadata: {
+        releaseId: id, membershipId: p.membershipId, accessLevel: level,
+        subjectKind: body.subjectKind, ground: body.ground,
+        recipientKind: body.recipientKind, recipientName: body.recipientName,
+        consentDocumentId: body.consentDocumentId ?? null,
+      },
+    }, requestInfo(req, c.trustProxy));
+
+    ok(res, {
+      id, matterId: facts.matterId, ground: body.ground,
+      recipientKind: body.recipientKind, recipientName: body.recipientName,
+    }, 201);
+  }));
+
   return r;
 }
 
@@ -4897,6 +5165,13 @@ function sessionPayload(s: import('../auth/firm-session.js').FirmSession) {
       jobTitle: p.jobTitle,
       jobTitleAr: p.jobTitleAr,
       roles: p.roles.map((r) => ({ code: r.code, name: r.name, nameAr: r.nameAr })),
+      /*
+        P0.5 · the ring, resolved with the principal. Sent so the SPA can explain a lock
+        ("يحتاج ترخيصاً سارياً") rather than render a blank — and for no other reason:
+        every privileged field is decided server-side, and §50 is the rule that the
+        screen has nothing to override.
+      */
+      privilege: { inRing: p.ring.inRing, reason: p.ring.reason },
       departments: p.departments.map((d) => ({ code: d.code, name: d.name, nameAr: d.nameAr, isLead: d.isLead })),
       practiceAreas: [...p.practiceAreas],
       firmWideScope: p.practiceAreas.has('*') || p.permissions.has('matters.read_all'),

@@ -28,6 +28,7 @@ import type { FirmRepo, MatterAuthFacts, MembershipRow } from '../db/firm-repo.j
 import { teamRoleToLevel } from '../db/firm-repo.js';
 import { PortalError } from '../lib/errors.js';
 import { PERMISSIONS } from './firm-catalogue.js';
+import { lawyerRingFrom, type LawyerRing } from './privilege.js';
 
 // ============================================================================
 // TYPES
@@ -121,6 +122,16 @@ export interface FirmPrincipal {
   readonly mfaEnabled: boolean;
   /** Session state, set by the session layer after resolution. */
   readonly mfaVerified: boolean;
+  /**
+   * §P0.5 — the lawyer ring, resolved WITH the principal and carried on it.
+   *
+   * Resolution happens here rather than at the point of projection for the same
+   * reason the access level does: two places answering "is this person a lawyer"
+   * is two answers, and the second one is the one that leaks. It is also why a
+   * suspension takes effect on the member's NEXT request — the ring is not cached
+   * beyond the principal's own life, and the principal is rebuilt per request.
+   */
+  readonly ring: LawyerRing;
 }
 
 /** Which numeric ceiling a financial action draws on. */
@@ -186,11 +197,19 @@ export class PermissionEngine {
   }
 
   private async fromMembership(m: MembershipRow): Promise<FirmPrincipal> {
-    const [roles, codes, departments, areas] = await Promise.all([
+    const [roles, codes, departments, areas, eligibility] = await Promise.all([
       this.firm.getRoles(m.id),
       this.firm.getPermissionCodes(m.id),
       this.firm.getDepartments(m.id),
       this.firm.getPracticeAreas(m.id),
+      /*
+        THE RING COMES FROM P-1'S VERDICT, NOT FROM A SECOND RULE. `eligibilityFor`
+        already answers "may this member lawfully practise": which roles the firm
+        declares as practising (`roles.requires_practising_licence`), and whether the
+        licence behind one is good — absence is not permission, and a suspension
+        outranks an expiry. The ring is that verdict, and nothing here re-derives it.
+      */
+      this.firm.eligibilityFor(m.tenantId, m.id),
     ]);
     return {
       kind: 'firm_member',
@@ -217,6 +236,7 @@ export class PermissionEngine {
       calendar: m.calendar,
       mfaEnabled: m.mfaEnabled,
       mfaVerified: false,
+      ring: lawyerRingFrom(eligibility),
     };
   }
 

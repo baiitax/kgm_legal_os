@@ -7,7 +7,7 @@ import type {
 } from './types.js';
 import { SQLITE_SCHEMA } from './schema.sqlite.js';
 import { FIRM_RBAC_SCHEMA, FISCAL_TRUST_BILLING_SCHEMA,
-  CLIENT_DUE_DILIGENCE_SCHEMA, JUDGMENTS_SERVICE_SCHEMA,
+  CLIENT_DUE_DILIGENCE_SCHEMA, JUDGMENTS_SERVICE_SCHEMA, PRIVILEGE_RING_SCHEMA,
 } from './schema.firm.sqlite.js';
 
 /**
@@ -110,6 +110,15 @@ export class SqliteDb implements Db {
       the PORTAL literal owns.
     */
     this.db.exec(JUDGMENTS_SERVICE_SCHEMA);
+    /*
+      P0.5 · the privilege ring. A sixth literal, run last for the same reason the fifth is:
+      its triggers read `documents.privilege_class`, a column `ensureColumns()` has just
+      added to a database that predates P0.5, and SQLite resolves a trigger's columns when
+      the trigger is created — so a literal run one line early would fail on an old volume
+      and pass on a fresh one. `privilege_releases` also references `matters` and
+      `documents`, both of which earlier literals own.
+    */
+    this.db.exec(PRIVILEGE_RING_SCHEMA);
   }
 
   /**
@@ -140,6 +149,14 @@ export class SqliteDb implements Db {
     // practising law, so the licence requirement is data rather than a hardcoded
     // list of role codes in a function.
     add('roles', 'requires_practising_licence', 'integer not null default 0');
+    /*
+      0054 · the privilege class on a document. Declared here as well as in the schema
+      literal for the reason this method exists at all: a database created before P0.5
+      keeps its old column set unless the column is added explicitly — and the trigger in
+      the sixth literal that enforces "privileged implies internal" reads this column, so
+      a missing column would fail the literal rather than a query, hours later.
+    */
+    add('documents', 'privilege_class', "text not null default 'none'");
     // 0029 · the party link and the relationship end date, both on the PORTAL
     // schema's clients table — the conflict engine reads them, but the portal owns
     // the table, which is exactly the kind of split that gets missed.

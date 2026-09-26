@@ -101,6 +101,16 @@ export type ErrorCode =
   | 'appeal_window_uncomputed'
   | 'judgment_finality_contradiction'
   | 'judgment_retention'
+  /* P0.5 — the privilege ring. `privilege_ring_refused` is the one DB refusal that IS an
+     authorization decision, so it is the one that maps to a 403: the record is fine, the
+     caller is not in the ring, and the reason travels with it. */
+  | 'privilege_ring_refused'
+  | 'privilege_ground_recipient_mismatch'
+  | 'privilege_consent_document_required'
+  /* The release ledger's two document references must be documents of THIS matter (the
+     subject) and of the CLIENT (the consent). An FK proves a document exists somewhere;
+     it does not prove it is the document the release claims to rest on. */
+  | 'privilege_document_mismatch'
   | 'service_retention'
   | 'procedural_deadline_lane'
   | 'written_consent_required'
@@ -453,4 +463,19 @@ const REFUSAL_STATUS: Record<string, number> = {
   sanctions_match: 400,
   str_narrative_incomplete: 400,
   str_narrative_not_arabic: 400,
+
+  /*
+    P0.5, AND THE ONE EXCEPTION TO THE RULE ABOVE. Everything else in this table is a
+    guard refusing a well-formed request: the record's state is wrong, or the request
+    does not meet a rule the firm wrote. This one is different — the record is fine and
+    the REQUESTER is outside the privilege ring. That is an authorization decision, and
+    it is the only refusal in the system whose answer changes with WHO ASKED rather than
+    with what was asked, so it is the only one that returns 403. Naming it 400 would
+    hide the distinction the member needs: "you may not" and "you may not *yet*" are
+    different sentences.
+  */
+  privilege_ring_refused: 403,
+  privilege_ground_recipient_mismatch: 400,
+  privilege_consent_document_required: 400,
+  privilege_document_mismatch: 400,
 };
