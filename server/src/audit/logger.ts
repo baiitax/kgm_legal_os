@@ -27,6 +27,24 @@ export type AuditAction =
   | 'DEVICE_TRUSTED' | 'DEVICE_UNTRUSTED'
   | 'DOCUMENT_VIEWED' | 'DOCUMENT_DOWNLOADED' | 'DOCUMENT_UPLOADED'
   | 'DOCUMENT_UPLOAD_REJECTED' | 'SIGNED_URL_ISSUED' | 'DOCUMENT_ACCESS_DENIED'
+  /*
+    P2.1 · THE FIRM'S SIDE OF THE DOCUMENT RECORD.
+
+    The portal has had five of these since §19 and the firm had none, because the firm
+    could not write a document. These are the acts that can now happen: a document is
+    FILED by the firm, RELEASED to the client or RESTRICTED from them, REFILED when its
+    description was wrong, ARCHIVED, and VERSION_ADDED when a new version replaces an
+    older one. Every one of them is a fact a firm may one day be asked to account for —
+    "when did the client receive this" is the first question in a fee dispute, and
+    "what did we send them in March" is the first question in a professional-negligence
+    claim.
+  */
+  | 'DOCUMENT_FILED' | 'DOCUMENT_RELEASED' | 'DOCUMENT_RESTRICTED'
+  | 'DOCUMENT_REFILED' | 'DOCUMENT_ARCHIVED' | 'DOCUMENT_VERSION_ADDED'
+  /* Filing something INTO the ring, attempted by somebody outside it. The read
+     attempt has had a vocabulary word since P0.5; the write attempt is new with the
+     write route, and it is the one that tells a reviewer somebody tried. */
+  | 'PRIVILEGED_WRITE'
   | 'INVOICE_VIEWED' | 'PAYMENT_STARTED' | 'PAYMENT_COMPLETED' | 'PAYMENT_FAILED'
   | 'RECEIPT_VIEWED' | 'WEBHOOK_RECEIVED' | 'WEBHOOK_SIGNATURE_INVALID'
   | 'MESSAGE_SENT' | 'MESSAGE_READ' | 'APPOINTMENT_REQUESTED' | 'APPOINTMENT_CANCELLED'

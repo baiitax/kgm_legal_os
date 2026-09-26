@@ -1960,6 +1960,225 @@ export class FirmRepo {
     return toNumber(r?.n);
   }
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // P2.1 · THE FIRM'S DOCUMENT WRITES
+  //
+  //  Until 0061 the firm could read `documents` and never write one, which made the
+  //  documents tab a list with nothing that could be put in it and left the conflict
+  //  waiver (Rule 8) and the engagement letter (Rule 12) as values in columns rather
+  //  than writings on a file. These four methods are the whole write surface: file,
+  //  change, read the chain, log the access. There is no delete anywhere.
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * One document, as the write paths need it — scoped to its matter and tenant.
+   *
+   * `supersededBy` is resolved in the same query rather than by a second round trip,
+   * because the only two callers both need it (the version check, and the panel's
+   * "superseded" badge) and a second query is a second chance to forget the tenant.
+   */
+  async getMatterDocument(tenantId: string, matterId: string, documentId: string) {
+    const r = await this.q().get<Row>(
+      `select d.id, d.client_id, d.matter_id, d.storage_bucket, d.storage_key,
+              d.original_filename, d.stored_filename, d.title, d.title_ar,
+              d.document_type, d.category, d.origin, d.version, d.mime_type,
+              d.size_bytes, d.sha256, d.scan_status, d.status, d.client_visibility,
+              d.privilege_class, d.requested, d.request_note, d.request_note_ar,
+              d.uploaded_by_staff_id, d.supersedes_document_id, d.created_at, d.updated_at,
+              (select n.id from documents n
+                where n.supersedes_document_id = d.id
+                  and n.tenant_id = d.tenant_id limit 1) as superseded_by
+         from documents d
+        where d.id = ? and d.tenant_id = ? and d.matter_id = ?`,
+      [documentId, tenantId, matterId],
+    );
+    if (!r) return null;
+    return {
+      id: String(r.id),
+      clientId: String(r.client_id),
+      matterId: String(r.matter_id),
+      storageBucket: String(r.storage_bucket),
+      storageKey: String(r.storage_key),
+      originalFilename: String(r.original_filename),
+      storedFilename: String(r.stored_filename),
+      title: String(r.title),
+      titleAr: strOrNull(r.title_ar),
+      documentType: String(r.document_type),
+      category: String(r.category),
+      origin: String(r.origin),
+      version: Number(r.version),
+      mimeType: String(r.mime_type),
+      sizeBytes: Number(r.size_bytes),
+      sha256: String(r.sha256),
+      scanStatus: String(r.scan_status),
+      status: String(r.status),
+      clientVisibility: String(r.client_visibility),
+      privilegeClass: String(r.privilege_class ?? 'none'),
+      requested: toBool(r.requested),
+      requestNote: strOrNull(r.request_note),
+      uploadedByStaffId: strOrNull(r.uploaded_by_staff_id),
+      supersedesDocumentId: strOrNull(r.supersedes_document_id),
+      supersededBy: strOrNull(r.superseded_by),
+      createdAt: toIso(r.created_at),
+      updatedAt: toIso(r.updated_at),
+    };
+  }
+
+  /**
+   * FILE IT.
+   *
+   * `status = 'available'` and `scan_status = 'clean'` are written together, and they
+   * have to be: `assert_document_readable` refuses the pair the other way round, so a
+   * row that claims to be available after a failed scan is rejected by the database
+   * rather than by convention. The scanner has already run by the time this is called —
+   * the portal's pipeline and this one both scan BEFORE the row exists, so an infected
+   * file is never describable.
+   */
+  async insertFirmDocument(row: {
+    id: string; tenantId: string; clientId: string; matterId: string;
+    storageBucket: string; storageKey: string; originalFilename: string;
+    storedFilename: string; title: string; titleAr: string | null;
+    documentType: string; category: string; version: number; mimeType: string;
+    sizeBytes: number; sha256: string; scanResult: string | null; scannedAt: string;
+    clientVisibility: string; privilegeClass: string; uploadedByStaffId: string | null;
+    supersedesDocumentId: string | null; createdAt: string;
+  }): Promise<void> {
+    await this.q().run(
+      `insert into documents
+         (id, tenant_id, client_id, matter_id, storage_bucket, storage_key,
+          original_filename, stored_filename, title, title_ar, document_type, category,
+          origin, version, mime_type, size_bytes, sha256, scan_status, scan_result,
+          scanned_at, status, client_visibility, privilege_class, requested,
+          uploaded_by_staff_id, supersedes_document_id, created_at, updated_at)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'firm', ?, ?, ?, ?, 'clean', ?, ?,
+               'available', ?, ?, false, ?, ?, ?, ?)`,
+      [row.id, row.tenantId, row.clientId, row.matterId, row.storageBucket, row.storageKey,
+        row.originalFilename, row.storedFilename, row.title, row.titleAr, row.documentType,
+        row.category, row.version, row.mimeType, row.sizeBytes, row.sha256, row.scanResult,
+        row.scannedAt, row.clientVisibility, row.privilegeClass, row.uploadedByStaffId,
+        row.supersedesDocumentId, row.createdAt, row.createdAt],
+    );
+  }
+
+  /**
+   * CHANGE IT — release, restrict, re-file, archive — as ONE validated patch.
+   *
+   * The column list is closed, and that is the security property rather than tidiness:
+   * `storage_key`, `sha256`, `origin` and `version` describe bytes that have already
+   * been written, and a caller that could pass them would be able to point a row at
+   * another tenant's object or declare a different file to be this one. The list is
+   * the SQL twin of 0061's column grants; the two exist so that neither alone is the
+   * control.
+   *
+   * Returns the number of rows changed, so a caller can tell "refused" from
+   * "accepted and identical" — a distinction the panel needs and `void` cannot make.
+   */
+  async updateFirmDocument(patch: {
+    tenantId: string; matterId: string; documentId: string; updatedAt: string;
+    title?: string; titleAr?: string | null; documentType?: string; category?: string;
+    clientVisibility?: string; privilegeClass?: string; status?: string;
+  }): Promise<number> {
+    const sets: string[] = [];
+    const params: Param[] = [];
+    const put = (col: string, val: Param) => { sets.push(`${col} = ?`); params.push(val); };
+
+    if (patch.title !== undefined) put('title', patch.title);
+    if (patch.titleAr !== undefined) put('title_ar', patch.titleAr);
+    if (patch.documentType !== undefined) put('document_type', patch.documentType);
+    if (patch.category !== undefined) put('category', patch.category);
+    if (patch.clientVisibility !== undefined) put('client_visibility', patch.clientVisibility);
+    if (patch.privilegeClass !== undefined) put('privilege_class', patch.privilegeClass);
+    if (patch.status !== undefined) put('status', patch.status);
+    if (!sets.length) return 0;
+    put('updated_at', patch.updatedAt);
+
+    const res = await this.q().run(
+      `update documents set ${sets.join(', ')}
+        where id = ? and tenant_id = ? and matter_id = ?`,
+      [...params, patch.documentId, patch.tenantId, patch.matterId],
+    );
+    return Number((res as { changes?: number })?.changes ?? 0);
+  }
+
+  /**
+   * THE WHOLE CHAIN, OLDEST FIRST — P2.6.
+   *
+   * Walked in the application rather than in a recursive CTE, deliberately: chains are
+   * a handful of rows, and the walk carries a visited set, so a cycle (which the schema
+   * does not prevent — `supersedes_document_id` is a plain self-reference) terminates
+   * instead of hanging a request. A recursive CTE with a cycle is a runaway query.
+   *
+   * The chain is what makes "the current signed contract" answerable: the head is the
+   * live document, and every earlier version stays readable with its own hash.
+   */
+  async listDocumentChain(tenantId: string, matterId: string, documentId: string) {
+    const visited = new Set<string>();
+    const byId = new Map<string, Awaited<ReturnType<FirmRepo['getMatterDocument']>>>();
+
+    /* Up to the root. */
+    let cursor: string | null = documentId;
+    let guard = 0;
+    while (cursor && guard++ < 50) {
+      if (visited.has(cursor)) break;
+      visited.add(cursor);
+      const row: NonNullable<Awaited<ReturnType<FirmRepo['getMatterDocument']>>> | null =
+        await this.getMatterDocument(tenantId, matterId, cursor);
+      if (!row) break;
+      byId.set(row.id, row);
+      cursor = row.supersedesDocumentId;
+    }
+
+    /* Down to the head. At most one successor per row — a linear chain, not a tree. */
+    let frontier = [...byId.keys()];
+    guard = 0;
+    while (frontier.length && guard++ < 50) {
+      const placeholders = frontier.map(() => '?').join(',');
+      const next = await this.q().all<Row>(
+        `select id from documents
+          where tenant_id = ? and matter_id = ? and supersedes_document_id in (${placeholders})`,
+        [tenantId, matterId, ...frontier],
+      );
+      frontier = [];
+      for (const r of next ?? []) {
+        const id = String(r.id);
+        if (visited.has(id)) continue;
+        visited.add(id);
+        const row = await this.getMatterDocument(tenantId, matterId, id);
+        if (row) { byId.set(row.id, row); frontier.push(id); }
+      }
+    }
+
+    const chain = [...byId.values()].filter((r) => r !== null) as NonNullable<
+      Awaited<ReturnType<FirmRepo['getMatterDocument']>>
+    >[];
+    /* Ordered by version, then by creation time as the tie-break. `createdAt` is typed
+       nullable by the row mapper, so the comparison is done on the strings it holds. */
+    chain.sort((a, b) => (a.version - b.version)
+      || String(a.createdAt ?? '').localeCompare(String(b.createdAt ?? '')));
+    return chain.map((r) => ({
+      id: r.id, version: r.version, title: r.title, titleAr: r.titleAr,
+      status: r.status, clientVisibility: r.clientVisibility,
+      privilegeClass: r.privilegeClass, supersedesDocumentId: r.supersedesDocumentId,
+      supersededBy: r.supersededBy, createdAt: r.createdAt, sha256: r.sha256,
+      sizeBytes: r.sizeBytes, mimeType: r.mimeType, documentType: r.documentType,
+      isHead: r.supersededBy === null,
+    }));
+  }
+
+  /** WHO OPENED IT. The portal writes the same table; the firm's reads belong in it too. */
+  async logDocumentAccess(row: {
+    tenantId: string; documentId: string; accessorKind: string;
+    accessorId: string | null; action: string; ipHash?: string | null; createdAt: string;
+  }): Promise<void> {
+    await this.q().run(
+      `insert into document_access_log
+         (document_id, tenant_id, accessor_kind, accessor_id, action, ip_hash, created_at)
+       values (?, ?, ?, ?, ?, ?, ?)`,
+      [row.documentId, row.tenantId, row.accessorKind, row.accessorId, row.action,
+        row.ipHash ?? null, row.createdAt],
+    );
+  }
+
   /** The matter's hearings, soonest first. */
   async listMatterHearings(tenantId: string, matterId: string) {
     const rows = await this.q().all<Row>(

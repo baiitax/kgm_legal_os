@@ -23,6 +23,7 @@
  *   recorded in the audit row, where the reviewer can see it.
  */
 import { Router } from 'express';
+import multer from 'multer';
 import { z } from 'zod';
 import type { Container } from '../container.js';
 import { config } from '../config.js';
@@ -34,10 +35,25 @@ import { normalizeArabicName, normalizeIdentifier } from '../domain/arabic-names
 import { evaluateConflicts } from '../domain/conflict-engine.js';
 import { keyedHash, maskNationalId, maskRegistration } from '../lib/crypto.js';
 import { ah } from '../auth/middleware.js';
+import { firmUploadRateLimit } from '../auth/firm-middleware.js';
+import {
+  FIRM_DOCUMENT_TYPES, PRIVILEGE_CLASSES,
+} from '../domain/firm-documents.js';
 import { requestInfo } from '../audit/logger.js';
 import {
   attachFirmPrincipal, requireFirm, firmCsrfGuard, ensureFirmCsrf, requireFirmMfa,
 } from '../auth/firm-middleware.js';
+/*
+  THE UPLOAD BODY LIMIT IS ENFORCED BY MULTER, BEFORE THE HANDLER RUNS.
+  A 25 MB body that only fails inside the handler has already been buffered, and the
+  portal learned this the expensive way: the limit is a property of the transport, not
+  of the business rule that mentions it.
+*/
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: config.uploads.maxBytes, files: 1 },
+});
+
 import {
   MATTER_READ, MATTER_WRITE, MATTER_MANAGE, MATTER_FINANCIAL, MATTER_OPERATE,
   ACCESS_LEVELS, type AccessLevel,
@@ -1549,6 +1565,314 @@ export function firmRouter(c: Container): Router {
       privilege: { inRing: p.ring.inRing, reason: p.ring.reason },
       documents,
     });
+  }));
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // P2.1 · THE FIRM'S OWN DOCUMENTS · P2.6 · THE VERSION CHAIN
+  //
+  // The firm could read this tab and never write one, which is why the conflict
+  // waiver had no attachment, the engagement letter had nowhere to live, and "the
+  // current signed contract" was unanswerable. These five routes are the whole write
+  // surface, and the permission split they use is the firm's own catalogue rather
+  // than a rule invented here:
+  //
+  //   documents.create   file a document and file a new version   (paralegal, associate, lawyer, partner)
+  //   documents.release  release to the client, restrict from them (partner, managing partner)
+  //   documents.edit     re-file: correct the title or the class
+  //   documents.read     open it, read the chain
+  //
+  // A paralegal can therefore put a document on a file and cannot show it to the
+  // client. That is the sentence the split exists to make true, and `§25`'s rule
+  // applies here too: the route states it, and the database enforces its half.
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /** FILE A DOCUMENT. Multipart, through the same pipeline the portal uses. */
+  r.post('/matters/:id/documents', firmCsrfGuard(), firmUploadRateLimit(c), upload.single('file'),
+    ah(async (req, res) => {
+      const p = principal(req);
+      const matterId = String(req.params.id);
+      /*
+        MATTER_OPERATE, NOT MATTER_WRITE. A paralegal's access level is 'operational'
+        (§13: "matter preparation and operations"), and filing the papers is exactly
+        that. Requiring 'edit' here would mean the person whose job is assembling the
+        file is the one person who cannot put anything in it — and the temptation that
+        follows is to keep the papers on a desktop instead. What a paralegal still
+        cannot do is RELEASE it: that is `documents.release`, checked below and again
+        on the PATCH.
+      */
+      c.permissions.assertCan(p, 'documents.create', { type: 'matter', id: matterId });
+      const { facts } = await c.permissions.requireMatter(p, matterId, MATTER_OPERATE);
+
+      const meta = z.object({
+        documentType: z.enum(FIRM_DOCUMENT_TYPES as unknown as [string, ...string[]]),
+        title: z.string().trim().min(1).max(200).optional(),
+        titleAr: z.string().trim().min(1).max(200).optional(),
+        category: z.string().trim().max(40).optional(),
+        privilegeClass: z.enum(PRIVILEGE_CLASSES as unknown as [string, ...string[]]).default('none'),
+        /**
+         * FILE IT STRAIGHT TO THE CLIENT, or hold it internally.
+         *
+         * `release` is opt-in and is checked against `documents.release` rather than
+         * against `documents.create`: a member who may file a document is not thereby
+         * a member who may show it to the client. Filing is one act, release is
+         * another, and the two are audited separately because they answer different
+         * questions ("do we have it" and "does the client have it").
+         */
+        release: z.boolean().default(false),
+      }).strict().safeParse(req.body ?? {});
+      if (!meta.success) {
+        throw badRequest('validation_failed', 'invalid upload metadata', {
+          fields: meta.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`),
+        });
+      }
+
+      const file = req.file;
+      if (!file) throw badRequest('upload_rejected', 'no file was provided');
+
+      /*
+        A PRIVILEGED FILING NEEDS THE RING. The database refuses this anyway — the
+        restricting policy `documents_firm_privileged_ring` is ANDed with everything
+        else — but a 403 that names the ground is a better answer than a 500 from a
+        policy, and the refusal is audited either way.
+      */
+      if (meta.data.privilegeClass !== 'none' && !p.ring.inRing) {
+        await c.audit.write({
+          action: 'PRIVILEGED_WRITE', actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+          outcome: 'denied', resourceType: 'matter', resourceId: matterId,
+          reasonCode: p.ring.reason,
+          metadata: { surface: 'document_filing', privilegeClass: meta.data.privilegeClass },
+        }, requestInfo(req, c.trustProxy));
+        throw forbidden('privilege_ring_refused',
+          `the privilege ring excludes this member: ${p.ring.reason}`, p.ring.reason,
+          { alreadyAudited: true });
+      }
+
+      if (meta.data.release && !p.permissions.has('documents.release')) {
+        throw forbidden('forbidden',
+          'releasing a document to the client needs documents.release',
+          'documents.release');
+      }
+
+      const filed = await c.firmDocuments.file(
+        {
+          tenantId: p.tenantId, userId: p.userId, membershipId: p.membershipId,
+          staffId: p.staffId ?? null,
+        },
+        {
+          matterId,
+          clientId: String(facts.clientId),
+          documentType: meta.data.documentType,
+          title: meta.data.title ?? null,
+          titleAr: meta.data.titleAr ?? null,
+          category: meta.data.category,
+          privilegeClass: meta.data.privilegeClass,
+          supersedesDocumentId: null,
+        },
+        { buffer: file.buffer, originalName: file.originalname, declaredMime: file.mimetype },
+        requestInfo(req, c.trustProxy),
+      );
+
+      /* Release, when asked for, is a SECOND audited act rather than a flag on the
+         first: the audit trail must be able to show that a document was filed on
+         Tuesday and released on Thursday by a different member. */
+      if (meta.data.release) {
+        await c.firmDocuments.setClientVisibility(
+          { tenantId: p.tenantId, userId: p.userId, membershipId: p.membershipId, staffId: p.staffId ?? null },
+          { matterId, documentId: filed.id, clientVisibility: 'visible' },
+          requestInfo(req, c.trustProxy),
+        );
+        filed.clientVisibility = 'visible';
+        filed.releaseReason = 'released';
+      }
+
+      ok(res, filed, 201);
+    }));
+
+  /** FILE A NEW VERSION of a document that already exists (P2.6). */
+  r.post('/matters/:id/documents/:docId/versions', firmCsrfGuard(), firmUploadRateLimit(c),
+    upload.single('file'), ah(async (req, res) => {
+      const p = principal(req);
+      const matterId = String(req.params.id);
+      const documentId = String(req.params.docId);
+      /*
+        MATTER_OPERATE, NOT MATTER_WRITE. A paralegal's access level is 'operational'
+        (§13: "matter preparation and operations"), and filing the papers is exactly
+        that. Requiring 'edit' here would mean the person whose job is assembling the
+        file is the one person who cannot put anything in it — and the temptation that
+        follows is to keep the papers on a desktop instead. What a paralegal still
+        cannot do is RELEASE it: that is `documents.release`, checked below and again
+        on the PATCH.
+      */
+      c.permissions.assertCan(p, 'documents.create', { type: 'matter', id: matterId });
+      const { facts } = await c.permissions.requireMatter(p, matterId, MATTER_OPERATE);
+
+      const prior = await c.firm.getMatterDocument(p.tenantId, matterId, documentId);
+      if (!prior) throw notFoundOrForbidden('document', documentId);
+
+      /* THE NEW VERSION INHERITS THE PRIVILEGE CLASS, and cannot be talked out of it.
+         A privileged document whose "v2" is filed as `none` would be a way to move
+         the same advice out of the ring with one upload — the classification travels
+         with the chain. */
+      const meta = z.object({
+        title: z.string().trim().min(1).max(200).optional(),
+        titleAr: z.string().trim().min(1).max(200).optional(),
+      }).strict().safeParse(req.body ?? {});
+      if (!meta.success) throw badRequest('validation_failed', 'invalid upload metadata');
+
+      const file = req.file;
+      if (!file) throw badRequest('upload_rejected', 'no file was provided');
+
+      const filed = await c.firmDocuments.file(
+        {
+          tenantId: p.tenantId, userId: p.userId, membershipId: p.membershipId,
+          staffId: p.staffId ?? null,
+        },
+        {
+          matterId,
+          clientId: String(facts.clientId),
+          documentType: prior.documentType,
+          title: meta.data.title ?? prior.title,
+          titleAr: meta.data.titleAr ?? prior.titleAr,
+          category: prior.category,
+          privilegeClass: prior.privilegeClass,
+          supersedesDocumentId: prior.id,
+        },
+        { buffer: file.buffer, originalName: file.originalname, declaredMime: file.mimetype },
+        requestInfo(req, c.trustProxy),
+      );
+
+      /* A released document's replacement starts INTERNAL. The client is holding the
+         version they were sent; publishing v2 silently would tell them nothing about
+         it and would change what they were given without a decision. The old version
+         stays released and readable, which is exactly why the chain is rows and not
+         an edit. */
+      ok(res, { ...filed, previousVersion: prior.version, previousStillReleased: prior.clientVisibility === 'visible' }, 201);
+    }));
+
+  /** THE CHAIN (P2.6): every version of this document, oldest first. */
+  r.get('/matters/:id/documents/:docId/versions', ah(async (req, res) => {
+    const p = principal(req);
+    const matterId = String(req.params.id);
+    c.permissions.assertCan(p, 'documents.read', { type: 'matter', id: matterId });
+    await c.permissions.requireMatter(p, matterId, MATTER_OPERATE);
+
+    const chain = await c.firm.listDocumentChain(p.tenantId, matterId, String(req.params.docId));
+    if (!chain.length) throw notFoundOrForbidden('document', String(req.params.docId));
+
+    /* A member outside the ring is told the chain EXISTS and not what is in it — the
+       same rule the document list follows, applied one level down: the count is a
+       number they are entitled to, the titles are not. */
+    const visible = p.ring.inRing ? chain : chain.filter((v) => v.privilegeClass === 'none');
+    ok(res, {
+      documentId: String(req.params.docId),
+      count: chain.length,
+      withheldCount: chain.length - visible.length,
+      headId: chain.find((v) => v.isHead)?.id ?? chain[chain.length - 1].id,
+      versions: visible,
+    });
+  }));
+
+  /** RELEASE IT TO THE CLIENT, OR TAKE IT BACK. */
+  r.patch('/matters/:id/documents/:docId', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const matterId = String(req.params.id);
+    const documentId = String(req.params.docId);
+    const body = z.object({
+      clientVisibility: z.enum(['visible', 'restricted', 'internal']).optional(),
+      title: z.string().trim().min(1).max(200).optional(),
+      titleAr: z.string().trim().max(200).nullable().optional(),
+      documentType: z.enum(FIRM_DOCUMENT_TYPES as unknown as [string, ...string[]]).optional(),
+      category: z.string().trim().max(40).optional(),
+      status: z.literal('archived').optional(),
+      note: z.string().trim().max(200).optional(),
+    }).strict().safeParse(req.body ?? {});
+    if (!body.success) throw badRequest('validation_failed', 'invalid document update');
+
+    /* THREE DIFFERENT AUTHORITIES, because they are three different acts. Showing the
+       client something is `documents.release`; renaming it is `documents.edit`;
+       archiving it is `documents.delete` — the permission the catalogue gives to
+       removal, used here for the state that replaces removal. */
+    if (body.data.clientVisibility !== undefined) {
+      c.permissions.assertCan(p, 'documents.release', { type: 'document', id: documentId });
+    }
+    if (body.data.title !== undefined || body.data.titleAr !== undefined
+      || body.data.documentType !== undefined || body.data.category !== undefined) {
+      c.permissions.assertCan(p, 'documents.edit', { type: 'document', id: documentId });
+    }
+    if (body.data.status === 'archived') {
+      c.permissions.assertCan(p, 'documents.delete', { type: 'document', id: documentId });
+    }
+    await c.permissions.requireMatter(p, matterId, MATTER_WRITE);
+
+    const me = { tenantId: p.tenantId, userId: p.userId, membershipId: p.membershipId, staffId: p.staffId ?? null };
+    const info = requestInfo(req, c.trustProxy);
+    const out: Record<string, unknown> = { id: documentId, changed: true };
+
+    if (body.data.clientVisibility !== undefined) {
+      out.visibility = await c.firmDocuments.setClientVisibility(me, {
+        matterId, documentId, clientVisibility: body.data.clientVisibility, note: body.data.note ?? null,
+      }, info);
+    }
+    if (body.data.title !== undefined || body.data.titleAr !== undefined
+      || body.data.documentType !== undefined || body.data.category !== undefined) {
+      out.refiled = await c.firmDocuments.refile(me, {
+        matterId, documentId,
+        title: body.data.title ?? null, titleAr: body.data.titleAr,
+        documentType: body.data.documentType ?? null, category: body.data.category ?? null,
+      }, info);
+    }
+    if (body.data.status === 'archived') {
+      out.archived = await c.firmDocuments.archive(me, {
+        matterId, documentId, reason: body.data.note ?? null,
+      }, info);
+    }
+    if (body.data.clientVisibility === undefined && body.data.title === undefined
+      && body.data.titleAr === undefined && body.data.documentType === undefined
+      && body.data.category === undefined && body.data.status === undefined) {
+      throw badRequest('nothing_to_update', 'no document fields were supplied');
+    }
+
+    ok(res, out);
+  }));
+
+  /**
+   * OPEN IT. The firm could describe a document and never read one.
+   *
+   * Served inline by default so the panel can preview a PDF in place, and always with
+   * the same headers the portal's download uses: no-index, no sniffing, and a CSP
+   * sandbox for the inline case so a document cannot script the firm's origin.
+   */
+  r.get('/matters/:id/documents/:docId/content', ah(async (req, res) => {
+    const p = principal(req);
+    const matterId = String(req.params.id);
+    const documentId = String(req.params.docId);
+    c.permissions.assertCan(p, 'documents.read', { type: 'matter', id: matterId });
+    await c.permissions.requireMatter(p, matterId, MATTER_OPERATE);
+
+    const disposition = req.query.disposition === 'attachment' ? 'attachment' : 'inline';
+    const out = await c.firmDocuments.read(
+      { tenantId: p.tenantId, userId: p.userId, membershipId: p.membershipId, staffId: p.staffId ?? null },
+      { matterId, documentId, disposition },
+      requestInfo(req, c.trustProxy),
+    );
+
+    await c.audit.tryWrite({
+      action: disposition === 'inline' ? 'DOCUMENT_VIEWED' : 'DOCUMENT_DOWNLOADED',
+      actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+      resourceType: 'document', resourceId: documentId,
+      metadata: { matterId, bytes: out.body.length, surface: 'firm' },
+    }, requestInfo(req, c.trustProxy));
+
+    res.setHeader('content-type', out.mimeType);
+    res.setHeader('content-length', String(out.body.length));
+    res.setHeader('content-disposition',
+      `${out.disposition}; filename="${out.fileName.replace(/[\r\n"]/g, '')}"`);
+    res.setHeader('x-robots-tag', 'noindex, nofollow, noarchive');
+    res.setHeader('etag', `"${out.sha256}"`);
+    if (out.disposition === 'inline' && out.mimeType === 'application/pdf') {
+      res.setHeader('content-security-policy', "sandbox; default-src 'none'");
+    }
+    res.status(200).end(out.body);
   }));
 
   /** The matter's hearings, with the court's own calendar weekend in force. */

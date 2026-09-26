@@ -28,6 +28,7 @@ import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import type { Container } from '../container.js';
 import { config } from '../config.js';
 import { PortalError, unauthorized } from '../lib/errors.js';
+import { limit, keys } from './ratelimit.js';
 import { fail } from '../lib/http.js';
 import { requestInfo } from '../audit/logger.js';
 import { setContextInStore } from '../db/context.js';
@@ -194,3 +195,47 @@ export function requireFirmMfa(): RequestHandler {
 
 /** Uniform JSON failure for firm routes. Mirrors the portal's `fail`. */
 export { fail };
+
+/**
+ * THE FIRM'S UPLOAD BUDGET (P2.1).
+ *
+ * The portal has had one since §19 and the firm's new document route needs the same
+ * ceiling: an upload is the most expensive thing a member can ask the server to do —
+ * a body in memory, a scan, an object write and a transaction — and a member whose
+ * client is retrying a 25 MB file is a member about to take the database down for
+ * everybody else.
+ *
+ * It reuses the portal's counter namespace deliberately. `keys.upload` is keyed by
+ * SESSION, and a session belongs to exactly one audience, so the two can share the
+ * budget without either being able to spend the other's. A separate namespace would
+ * have meant two ceilings to reason about and two places for the next upload route to
+ * forget one.
+ */
+export function firmUploadRateLimit(c: Container): RequestHandler {
+  return async (req, res, next) => {
+    try {
+      const sessionId = req.firm?.sessionId;
+      if (!sessionId) throw unauthorized('unauthenticated', 'authentication required');
+      const r = limit(keys.upload(sessionId), config.rateLimit.uploadMaxPerSession,
+        config.rateLimit.uploadWindowSeconds);
+      if (r.limited) {
+        res.setHeader('retry-after', String(r.retryAfterSeconds));
+        await c.audit.tryWrite(
+          {
+            action: 'RATE_LIMITED',
+            actor: { kind: 'firm_member', userId: req.firm!.principal.userId, tenantId: req.firm!.principal.tenantId },
+            outcome: 'denied', reasonCode: 'upload_budget',
+          },
+          requestInfo(req, c.trustProxy),
+        );
+        throw new PortalError(429, 'rate_limited', 'upload limit reached', {
+          details: { retryAfterSeconds: r.retryAfterSeconds },
+        });
+      }
+      res.setHeader('x-ratelimit-remaining', String(r.remaining));
+      next();
+    } catch (err) {
+      next(err);
+    }
+  };
+}

@@ -128,7 +128,14 @@ async function request<T>(path: string, opts: RequestOptions = {}, isRetry = fal
   const method = opts.method ?? 'GET';
   const headers: Record<string, string> = { accept: 'application/json' };
 
-  if (opts.body !== undefined) headers['content-type'] = 'application/json';
+  /*
+    A FORM BODY SETS ITS OWN CONTENT-TYPE. `multipart/form-data` is only valid with the
+    boundary the browser generates, so setting the header here would produce a body the
+    server cannot parse — the failure looks like "no file was provided" on a request that
+    plainly had one. Everything else is JSON, which is what the rest of the API speaks.
+  */
+  const multipart = typeof FormData !== 'undefined' && opts.body instanceof FormData;
+  if (opts.body !== undefined && !multipart) headers['content-type'] = 'application/json';
 
   // CSRF is required on every state-changing method. Attaching it to GET too is
   // harmless and means no code path has to decide whether a route is "safe".
@@ -141,7 +148,8 @@ async function request<T>(path: string, opts: RequestOptions = {}, isRetry = fal
       method,
       headers,
       credentials: 'same-origin',
-      body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+      body: opts.body === undefined ? undefined
+        : (multipart ? (opts.body as FormData) : JSON.stringify(opts.body)),
       signal: opts.signal,
       // The browser must not cache an authorization-bearing response. A cached
       // matter list could outlive a restriction placed on one of its rows.
@@ -363,6 +371,81 @@ export const firmApi = {
 
   async matterDocuments(id: string): Promise<MatterDocumentsResponse> {
     return request(`/matters/${encodeURIComponent(id)}/documents`);
+  },
+
+  /**
+   * FILE A DOCUMENT (P2.1).
+   *
+   * The metadata goes in the same multipart body as the file rather than in a JSON call
+   * followed by an upload. Two calls would mean a document row that exists for a few
+   * seconds with no bytes behind it, and a failure between them would leave it there —
+   * a filing that half-happened, which for the attachment a conflict waiver rests on is
+   * not a state the firm should ever be able to reach.
+   */
+  async fileMatterDocument(matterId: string, file: File, fields: FilingFields): Promise<FiledDocument> {
+    const form = new FormData();
+    for (const [k, v] of Object.entries(fields)) {
+      if (v !== undefined && v !== null && v !== '') form.set(k, String(v));
+    }
+    form.append('file', file, file.name);
+    return request(`/matters/${encodeURIComponent(matterId)}/documents`, { method: 'POST', body: form });
+  },
+
+  /** A NEW VERSION of a document that already exists (P2.6). */
+  async fileMatterDocumentVersion(
+    matterId: string, documentId: string, file: File, fields: { title?: string; titleAr?: string } = {},
+  ): Promise<FiledDocument> {
+    const form = new FormData();
+    for (const [k, v] of Object.entries(fields)) {
+      if (v !== undefined && v !== null && v !== '') form.set(k, String(v));
+    }
+    form.append('file', file, file.name);
+    return request(
+      `/matters/${encodeURIComponent(matterId)}/documents/${encodeURIComponent(documentId)}/versions`,
+      { method: 'POST', body: form },
+    );
+  },
+
+  /** The chain, oldest first. */
+  async matterDocumentVersions(matterId: string, documentId: string): Promise<DocumentChainResponse> {
+    return request(`/matters/${encodeURIComponent(matterId)}/documents/${encodeURIComponent(documentId)}/versions`);
+  },
+
+  /**
+   * RELEASE, RESTRICT, RE-FILE, ARCHIVE — one route, because they are one object.
+   *
+   * The server checks a DIFFERENT permission for each field in this patch, so the UI must
+   * gate each control separately: a partner who may release a document is not thereby a
+   * member who may rename it, and the button that fails for the wrong reason is the
+   * failure this split exists to prevent.
+   */
+  async updateMatterDocument(
+    matterId: string, documentId: string,
+    patch: {
+      clientVisibility?: 'visible' | 'restricted' | 'internal';
+      title?: string; titleAr?: string | null;
+      documentType?: string; category?: string;
+      status?: 'archived'; note?: string;
+    },
+  ): Promise<Record<string, unknown>> {
+    return request(
+      `/matters/${encodeURIComponent(matterId)}/documents/${encodeURIComponent(documentId)}`,
+      { method: 'PATCH', body: patch },
+    );
+  },
+
+  /**
+   * A URL FOR THE BYTES, NOT A FETCH.
+   *
+   * The content route is a plain authenticated GET: the session cookie is httpOnly and
+   * same-origin, so the browser carries it on a navigation and on a download without any
+   * of this file's request plumbing. Fetching the bytes into JavaScript to then re-build
+   * a blob URL would mean a file whose whole size sits in memory before the user sees it,
+   * for no gain.
+   */
+  matterDocumentContentUrl(matterId: string, documentId: string, disposition: 'inline' | 'attachment' = 'inline'): string {
+    return `${API_BASE}/matters/${encodeURIComponent(matterId)}/documents/${encodeURIComponent(documentId)}`
+      + `/content?disposition=${disposition}`;
   },
 
   async matterHearings(id: string): Promise<MatterHearingsResponse> {
@@ -838,6 +921,66 @@ export interface MatterDocumentRow {
   requested: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * WHAT A FILING RETURNS.
+ *
+ * `releaseReason` is not decoration: it is the server's answer to "why is this not with
+ * the client", and it distinguishes three cases the UI must not blur — `not_released_yet`
+ * (a decision nobody has made), `privileged` (a decision the law made) and a released row.
+ * A single grey "internal" badge would say the first two were the same thing.
+ */
+export interface FiledDocument {
+  id: string;
+  matterId: string;
+  title: string;
+  titleAr: string | null;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  version: number;
+  documentType: string;
+  privilegeClass: string;
+  clientVisibility: string;
+  supersedesDocumentId: string | null;
+  createdAt: string;
+  releaseReason?: string;
+  previousVersion?: number;
+  previousStillReleased?: boolean;
+}
+
+/** One link in the version chain (P2.6). */
+export interface DocumentVersionRow {
+  id: string;
+  version: number;
+  title: string;
+  titleAr: string | null;
+  status: string;
+  clientVisibility: string;
+  privilegeClass: string;
+  supersededBy: string | null;
+  isHead: boolean;
+  createdAt: string;
+  createdByStaffId: string | null;
+}
+
+export interface DocumentChainResponse {
+  documentId: string;
+  count: number;
+  withheldCount: number;
+  headId: string;
+  versions: DocumentVersionRow[];
+}
+
+/** The metadata a filing carries. The file itself is appended separately. */
+export interface FilingFields {
+  documentType: string;
+  title?: string;
+  titleAr?: string;
+  category?: string;
+  privilegeClass?: string;
+  release?: boolean;
 }
 
 export interface MatterDocumentsResponse {

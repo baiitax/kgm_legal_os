@@ -26,11 +26,16 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Badge, Button, Card, CardBody, CardHeader, Checkbox, EmptyState, IconLock,
-  SelectField, Skeleton, StatusChip, Table, useFmt, useI18n, useToast,
+  Badge, Button, Card, CardBody, CardHeader, Checkbox, EmptyState, IconLock, Modal,
+  SelectField, Skeleton, StatusChip, Table, TextField, useFmt, useI18n, useToast,
   type Column,
 } from '@kgm/ui';
-import { firmApi, FirmApiError, type MatterDeadlineRow, type MatterDocumentRow, type MatterHearingRow, type MatterTimelineRow, type MatterTeamRow } from '../../api/firm.js';
+import { useCan } from '../../auth/FirmSession.js';
+import {
+  firmApi, FirmApiError,
+  type DocumentChainResponse, type MatterDeadlineRow, type MatterDocumentRow,
+  type MatterHearingRow, type MatterTeamRow, type MatterTimelineRow,
+} from '../../api/firm.js';
 
 /* -------------------------------------------------------------- panel kit -- */
 
@@ -373,10 +378,134 @@ function initials(name: string): string {
 
 /* -------------------------------------------------------------- documents -- */
 
+/**
+ * THE DOCUMENT TYPES A FIRM MAY FILE — the same list the server enforces.
+ *
+ * `client_upload` is absent because it is the PORTAL's: a document the client uploaded is
+ * not a document the firm filed, and offering it here would let the firm write a row that
+ * claims the client sent it. `invoice` and `receipt` are absent for a different reason —
+ * they will arrive with P2.3, written by the invoice path rather than by a person with a
+ * file picker.
+ */
+const FILING_TYPES = [
+  'firm_letter', 'court_document', 'signed_document', 'contract',
+  'evidence', 'correspondence', 'identity', 'other',
+] as const;
+
+/** The provenance categories `documents_category_check` admits (and 0064 stopped faking). */
+const FILING_CATEGORIES = ['from_firm', 'signed', 'court', 'financial', 'requested', 'uploaded'] as const;
+
+/** The privilege classes 0054 defines. */
+const FILING_PRIVILEGES = ['none', 'advice', 'work_product', 'litigation'] as const;
+
+/**
+ * A CLOSED VOCABULARY, RENDERED HONESTLY.
+ *
+ * The enum words are the server's and are kept verbatim in the value; the label is the
+ * same word with its underscores replaced, which is what every other surface in this app
+ * does with these values. Translating them properly is a dictionary pass of its own —
+ * inventing a half-Arabic half-English set here would be worse than the consistent
+ * English enum the rest of the screen already shows.
+ */
+const humanise = (v: string): string => v.replace(/_/g, ' ');
+
 export function MatterDocumentsPanel({ matterId }: { matterId: string }) {
   const { t, pick } = useI18n();
   const fmt = useFmt();
+  const toast = useToast();
+  const { can } = useCan();
   const state = usePanel(matterId, () => firmApi.matterDocuments(matterId));
+
+  /*
+    THE PANEL'S OWN COPY OF THE LIST, so a filing can be shown without re-fetching the
+    whole tab. The alternative — reload after every write — makes the panel flash its
+    skeleton each time, which reads as though the upload reset the page.
+  */
+  const [rows, setRows] = useState<MatterDocumentRow[] | null>(null);
+  const documents = rows ?? (state.status === 'ready' ? state.data.documents : []);
+  const inRing = state.status === 'ready' ? state.data.privilege.inRing : false;
+
+  const [filing, setFiling] = useState(false);
+  const [versionOf, setVersionOf] = useState<MatterDocumentRow | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [chainFor, setChainFor] = useState<string | null>(null);
+  const [chain, setChain] = useState<DocumentChainResponse | null>(null);
+  const [confirmArchive, setConfirmArchive] = useState<MatterDocumentRow | null>(null);
+
+  const mayFile = can('documents.create');
+  const mayRelease = can('documents.release');
+  const mayArchive = can('documents.delete');
+  const mayRead = can('documents.read');
+
+  const merge = useCallback((filed: MatterDocumentRow) => {
+    setRows((prev) => {
+      const base = prev ?? (state.status === 'ready' ? state.data.documents : []);
+      return [filed, ...base.filter((d) => d.id !== filed.id)];
+    });
+  }, [state]);
+
+  /* ── the three writes, each guarded by its OWN permission ────────────────── */
+
+  const file = useCallback(async (file: File, fields: {
+    documentType: string; title?: string; category?: string;
+    privilegeClass: string; release: boolean;
+  }) => {
+    const created = await firmApi.fileMatterDocument(matterId, file, fields);
+    merge(created as unknown as MatterDocumentRow);
+    toast.success(t('panel.doc.filed'), pick(created.titleAr, created.title));
+    return created;
+  }, [matterId, merge, toast, t, pick]);
+
+  const fileVersion = useCallback(async (target: MatterDocumentRow, file: File, title?: string) => {
+    const created = await firmApi.fileMatterDocumentVersion(matterId, target.id, file, { title });
+    merge(created as unknown as MatterDocumentRow);
+    toast.success(t('panel.doc.versioned'), `${pick(created.titleAr, created.title)} · v${created.version}`);
+    return created;
+  }, [matterId, merge, toast, t, pick]);
+
+  const patch = useCallback(async (
+    target: MatterDocumentRow,
+    body: Parameters<typeof firmApi.updateMatterDocument>[2],
+    done: string,
+  ) => {
+    setBusyId(target.id);
+    try {
+      await firmApi.updateMatterDocument(matterId, target.id, body);
+      /* PATCH the local row rather than re-reading: the response is deliberately thin
+         (it reports what changed, not the whole record), so the row is updated from the
+         request the member just made and the server remains the authority on the next read. */
+      setRows((prev) => {
+        const base = prev ?? (state.status === 'ready' ? state.data.documents : []);
+        return base.map((d) => (d.id === target.id ? { ...d, ...body } as MatterDocumentRow : d));
+      });
+      toast.success(done);
+    } catch (err) {
+      const e = err instanceof FirmApiError ? err : new FirmApiError(0, 'network_error', 'unreachable');
+      /* The three refusals a member can actually hit, each with the reason it happened.
+         A generic "failed" here would leave a partner guessing whether they lack the
+         permission, the ring, or the document's state. */
+      const why = e.code === 'privileged_needs_a_ground' ? t('panel.doc.privilegedLocked')
+        : e.code === 'document_archived' ? t('panel.doc.archivedLocked')
+          : e.code === 'forbidden' ? t('panel.doc.needsRelease')
+            : e.message;
+      toast.error(t('panel.doc.failed'), why);
+    } finally {
+      setBusyId(null);
+    }
+  }, [matterId, state, toast, t]);
+
+  const openChain = useCallback(async (target: MatterDocumentRow) => {
+    if (chainFor === target.id) { setChainFor(null); setChain(null); return; }
+    setChainFor(target.id);
+    setChain(null);
+    try {
+      setChain(await firmApi.matterDocumentVersions(matterId, target.id));
+    } catch (err) {
+      setChainFor(null);
+      toast.error(t('panel.doc.failed'), (err as FirmApiError).message);
+    }
+  }, [chainFor, matterId, toast, t]);
+
 
   /*
     `responsive: 'card'` is what makes this table work on a phone: below the
@@ -391,11 +520,115 @@ export function MatterDocumentsPanel({ matterId }: { matterId: string }) {
       responsive: 'card',
       cell: (d) => (
         <span className="firm-cellstack">
-          <span className="firm-cellstack__main">{pick(d.titleAr, d.title)}</span>
-          <span className="firm-cellstack__sub">{d.documentType.replace(/_/g, ' ')}</span>
+          {/*
+            THE TITLE IS THE DOOR TO THE BYTES. Reading it is `documents.read`; the panel
+            does not offer the link to a member who does not hold it, and the route refuses
+            them anyway — the two gates are the same rule stated twice on purpose (§50).
+          */}
+          {mayRead ? (
+            <a
+              className="firm-cellstack__main firm-doc__open"
+              href={firmApi.matterDocumentContentUrl(matterId, d.id)}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              {pick(d.titleAr, d.title)}
+            </a>
+          ) : (
+            <span className="firm-cellstack__main">{pick(d.titleAr, d.title)}</span>
+          )}
+          <span className="firm-cellstack__sub">
+            {humanise(d.documentType)}
+            {d.version > 1 && <> · <b className="num">v{d.version}</b></>}
+            {' · '}{humanise(d.origin)}
+          </span>
         </span>
       ),
       compare: (a, b) => pick(a.titleAr, a.title).localeCompare(pick(b.titleAr, b.title)),
+    },
+    {
+      key: 'chain',
+      header: t('panel.doc.chain'),
+      cardLabel: t('panel.doc.chain'),
+      responsive: 'card',
+      width: '6rem',
+      cell: (d) => (
+        <span className="firm-doc__chain">
+          <Badge tone="neutral" size="xs">
+            <span className="num">v{d.version}</span>
+          </Badge>
+          <button
+            type="button"
+            className="firm-doc__link"
+            onClick={() => { void openChain(d); }}
+            aria-expanded={chainFor === d.id}
+          >
+            {chainFor === d.id ? t('common.hide') : t('common.show')}
+          </button>
+        </span>
+      ),
+      compare: (a, b) => a.version - b.version,
+    },
+    {
+      key: 'actions',
+      header: t('common.actions'),
+      cardLabel: t('common.actions'),
+      responsive: 'card',
+      width: '13rem',
+      /* No sorting: this is the column of verbs, and a sorted list of buttons is noise. */
+      cell: (d) => (
+        <span className="firm-doc__actions">
+          {mayRead && (
+            <a
+              className="firm-doc__action"
+              href={firmApi.matterDocumentContentUrl(matterId, d.id, 'attachment')}
+            >
+              {t('panel.doc.download')}
+            </a>
+          )}
+          {/*
+            RELEASE IS A PERMISSION, NOT A SETTING. Drawn only for a member who holds
+            `documents.release` — and for a privileged document the server refuses the
+            transition outright regardless of who asks, which is why the control is not
+            merely hidden but absent for the whole privilege class.
+          */}
+          {mayRelease && d.privilegeClass === 'none' && d.status !== 'archived' && (
+            <button
+              type="button"
+              className="firm-doc__action"
+              disabled={busyId === d.id}
+              onClick={() => { void patch(d,
+                { clientVisibility: d.clientVisibility === 'visible' ? 'internal' : 'visible' },
+                d.clientVisibility === 'visible' ? t('panel.doc.restricted') : t('panel.doc.released')); }}
+            >
+              {d.clientVisibility === 'visible' ? t('panel.doc.restrict') : t('panel.doc.release')}
+            </button>
+          )}
+          {mayFile && d.status !== 'archived' && (
+            <button
+              type="button"
+              className="firm-doc__action"
+              disabled={busyId === d.id}
+              onClick={() => setVersionOf(d)}
+            >
+              {t('panel.doc.newVersion')}
+            </button>
+          )}
+          {mayArchive && d.status !== 'archived' && (
+            <button
+              type="button"
+              className="firm-doc__action firm-doc__action--danger"
+              disabled={busyId === d.id}
+              onClick={() => setConfirmArchive(d)}
+            >
+              {t('panel.doc.archive')}
+            </button>
+          )}
+          {d.status === 'archived' && (
+            <Badge tone="neutral" size="xs">{t('panel.doc.archived')}</Badge>
+          )}
+        </span>
+      ),
     },
     {
       key: 'privilege',
@@ -440,41 +673,373 @@ export function MatterDocumentsPanel({ matterId }: { matterId: string }) {
       cell: (d) => <span className="num c-secondary">{fmt.date(d.createdAt)}</span>,
       compare: (a, b) => a.createdAt.localeCompare(b.createdAt),
     },
-  ], [t, fmt, pick]);
+  ], [t, fmt, pick, matterId, mayRead, mayRelease, mayFile, mayArchive, busyId, chainFor, openChain, patch]);
 
   return (
-    <PanelFrame
-      state={state}
-      title={t('tab.documents')}
-      emptyTitle={t('panel.doc.empty')}
-      isEmpty={(d) => d.documents.length === 0}
-    >
-      {(d) => (
-        <>
-          {/*
-            WITHHELD MATERIAL IS COUNTED, NOT ERASED. If the ring withheld a
-            privileged document, the member is told how many and why — the same
-            rule the matter's own fields follow. A silently shorter list is how a
-            reader concludes the firm lost a file.
-          */}
-          {d.withheldCount > 0 && (
-            <p className="firm-panel__note">
-              <IconLock size={13} aria-hidden="true" />{' '}
-              {t('panel.doc.withheld', { n: d.withheldCount, reason: d.privilege.reason.replace(/_/g, ' ') })}
-            </p>
+    <>
+      <PanelFrame
+        state={state}
+        title={t('tab.documents')}
+        emptyTitle={t('panel.doc.empty')}
+        isEmpty={(d) => (rows ?? d.documents).length === 0}
+      >
+        {(d) => (
+          <>
+            {/*
+              THE FILE BUTTON IS THE POINT OF THIS PHASE. Until it existed the tab was a
+              list with no way to put anything in it: the conflict waiver had no
+              attachment, the engagement letter had no home, and "the current signed
+              contract" was unanswerable. It is drawn only for a member who holds
+              `documents.create`, and the route refuses anyone else.
+            */}
+            {mayFile && (
+              <div className="firm-panel__bar">
+                <Button size="sm" variant="primary" onClick={() => setFiling(true)}>
+                  {t('panel.doc.file')}
+                </Button>
+                {!inRing && (
+                  <span className="firm-panel__note firm-panel__note--inline">
+                    <IconLock size={13} aria-hidden="true" />{' '}
+                    {t('panel.doc.outsideRing', { reason: d.privilege.reason.replace(/_/g, ' ') })}
+                  </span>
+                )}
+              </div>
+            )}
+
+            {/*
+              WITHHELD MATERIAL IS COUNTED, NOT ERASED. If the ring withheld a
+              privileged document, the member is told how many and why — the same
+              rule the matter's own fields follow. A silently shorter list is how a
+              reader concludes the firm lost a file.
+            */}
+            {d.withheldCount > 0 && (
+              <p className="firm-panel__note">
+                <IconLock size={13} aria-hidden="true" />{' '}
+                {t('panel.doc.withheld', { n: d.withheldCount, reason: d.privilege.reason.replace(/_/g, ' ') })}
+              </p>
+            )}
+
+            {/*
+              THE CHAIN, IN PLACE. A version chain is a property of one document, so it
+              belongs under its row rather than in a dialog that hides the list the reader
+              was comparing it against. `withheldCount` appears here too: a member outside
+              the ring sees that versions exist and not what is in them.
+            */}
+            {chainFor && (
+              <div className="firm-doc__chainpanel">
+                {chain === null && <Skeleton lines={2} />}
+                {chain !== null && (
+                  <>
+                    <h4 className="firm-doc__chaintitle">
+                      {t('panel.doc.chainTitle', { n: chain.count })}
+                      {chain.withheldCount > 0 && (
+                        <> · <span className="c-muted">{t('panel.doc.chainWithheld', { n: chain.withheldCount })}</span></>
+                      )}
+                    </h4>
+                    <ol className="firm-doc__chainlist">
+                      {chain.versions.map((v) => (
+                        <li key={v.id} className={v.isHead ? 'is-head' : ''}>
+                          <span className="num">v{v.version}</span>
+                          <span className="firm-doc__chainname">{pick(v.titleAr, v.title)}</span>
+                          <Badge tone={v.clientVisibility === 'visible' ? 'lime' : 'neutral'} size="xs">
+                            {humanise(v.clientVisibility)}
+                          </Badge>
+                          <span className="num c-secondary">{fmt.date(v.createdAt)}</span>
+                          {v.isHead && <Badge tone="lime" size="xs">{t('panel.doc.head')}</Badge>}
+                          {v.privilegeClass !== 'none' && (
+                            <Badge tone="gold" size="xs" icon={<IconLock size={10} />}>{humanise(v.privilegeClass)}</Badge>
+                          )}
+                        </li>
+                      ))}
+                    </ol>
+                    {/*
+                      THE QUESTION A READER ACTUALLY HAS: "which one did the client get?"
+                      The chain answers it by showing each version's own visibility, and
+                      this line names the oldest released one — because a released v1 that
+                      the firm has since replaced is still what the client holds.
+                    */}
+                    <p className="firm-panel__note">
+                      {chain.versions.some((v) => v.clientVisibility === 'visible')
+                        ? t('panel.doc.chainClientHas')
+                        : t('panel.doc.chainClientHasNone')}
+                    </p>
+                  </>
+                )}
+              </div>
+            )}
+
+            <Table
+              columns={columns}
+              rows={documents}
+              rowKey={(row) => row.id}
+              label={t('tab.documents')}
+              density="compact"
+              striped={false}
+              empty={t('panel.doc.empty')}
+            />
+          </>
+        )}
+      </PanelFrame>
+
+      {filing && (
+        <FileDocumentDialog
+          inRing={inRing}
+          mayRelease={mayRelease}
+          onClose={() => setFiling(false)}
+          onFile={file}
+        />
+      )}
+
+      {versionOf && (
+        <NewVersionDialog
+          document={versionOf}
+          onClose={() => setVersionOf(null)}
+          onFile={fileVersion}
+        />
+      )}
+
+      {confirmArchive && (
+        <Modal
+          open
+          onClose={() => setConfirmArchive(null)}
+          title={t('panel.doc.archiveTitle')}
+          description={t('panel.doc.archiveBody')}
+          size="sm"
+          footer={(
+            <>
+              <Button variant="ghost" onClick={() => setConfirmArchive(null)}>{t('common.cancel')}</Button>
+              <Button
+                variant="danger"
+                onClick={() => {
+                  const target = confirmArchive;
+                  setConfirmArchive(null);
+                  void patch(target, { status: 'archived' }, t('panel.doc.archivedDone'));
+                }}
+              >
+                {t('panel.doc.archive')}
+              </Button>
+            </>
           )}
-          <Table
-            columns={columns}
-            rows={d.documents}
-            rowKey={(row) => row.id}
-            label={t('tab.documents')}
-            density="compact"
-            striped={false}
-            empty={t('panel.doc.empty')}
-          />
+        >
+          <p className="firm-doc__confirm">{pick(confirmArchive.titleAr, confirmArchive.title)}</p>
+          <p className="firm-panel__note">{t('panel.doc.archiveNever')}</p>
+        </Modal>
+      )}
+    </>
+  );
+}
+
+/* ─────────────────────────────────────────────────── the filing dialog -- */
+
+/**
+ * FILE A DOCUMENT.
+ *
+ * Two decisions live in this dialog and each is drawn only when the member can actually
+ * make it: the privilege class (only inside the ring — outside it the server refuses a
+ * privileged filing, so the control would be a trap) and "release to the client" (only
+ * with `documents.release`, and never for privileged material, which the server will not
+ * release to a client at all).
+ */
+function FileDocumentDialog({
+  inRing, mayRelease, onClose, onFile,
+}: {
+  inRing: boolean;
+  mayRelease: boolean;
+  onClose: () => void;
+  onFile: (file: File, fields: {
+    documentType: string; title?: string; category?: string;
+    privilegeClass: string; release: boolean;
+  }) => Promise<unknown>;
+}) {
+  const { t } = useI18n();
+  const toast = useToast();
+  const input = useRef<HTMLInputElement>(null);
+  const [picked, setPicked] = useState<File | null>(null);
+  const [documentType, setDocumentType] = useState<string>('firm_letter');
+  const [category, setCategory] = useState<string>('from_firm');
+  const [privilegeClass, setPrivilegeClass] = useState<string>('none');
+  const [title, setTitle] = useState('');
+  const [release, setRelease] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  async function submit() {
+    if (!picked) { toast.error(t('panel.doc.noFile')); return; }
+    setBusy(true);
+    try {
+      await onFile(picked, {
+        documentType, category, privilegeClass,
+        title: title.trim() || undefined,
+        /* Release is a SECOND act on the server, not a flag on the filing — but the
+           member's intent is one gesture, so it is one checkbox here. */
+        release: mayRelease && privilegeClass === 'none' && release,
+      });
+      onClose();
+    } catch (err) {
+      toast.error(t('panel.doc.failed'), (err as FirmApiError).message);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title={t('panel.doc.file')}
+      description={t('panel.doc.fileBody')}
+      size="md"
+      footer={(
+        <>
+          <Button variant="ghost" onClick={onClose}>{t('common.cancel')}</Button>
+          <Button variant="primary" loading={busy} disabled={!picked} onClick={() => { void submit(); }}>
+            {t('panel.doc.fileAction')}
+          </Button>
         </>
       )}
-    </PanelFrame>
+    >
+      <div className="firm-doc__form">
+        {/*
+          A NATIVE FILE INPUT, VISIBLY LABELLED. A drag-and-drop zone that also has to
+          work on a phone, in RTL, with a screen reader, is a component of its own; the
+          button-and-filename pair is honest on every device and names the file it holds.
+        */}
+        <div className="firm-doc__pick">
+          <input
+            ref={input}
+            type="file"
+            className="firm-doc__fileinput"
+            onChange={(e) => setPicked(e.target.files?.[0] ?? null)}
+            aria-label={t('panel.doc.chooseFile')}
+          />
+          <Button size="sm" variant="secondary" onClick={() => input.current?.click()}>
+            {t('panel.doc.chooseFile')}
+          </Button>
+          <span className="firm-doc__filename">
+            {picked ? `${picked.name} · ${Math.max(1, Math.round(picked.size / 1024))} KB` : t('panel.doc.noChosen')}
+          </span>
+        </div>
+
+        <SelectField
+          label={t('panel.doc.type')}
+          value={documentType}
+          onChange={(e) => setDocumentType(e.target.value)}
+          options={FILING_TYPES.map((v) => ({ value: v, label: humanise(v) }))}
+        />
+        <SelectField
+          label={t('panel.doc.category')}
+          hint={t('panel.doc.categoryHint')}
+          value={category}
+          onChange={(e) => setCategory(e.target.value)}
+          options={FILING_CATEGORIES.map((v) => ({ value: v, label: humanise(v) }))}
+        />
+        <TextField
+          label={t('panel.doc.titleField')}
+          hint={t('panel.doc.titleHint')}
+          value={title}
+          maxLength={200}
+          onChange={(e) => setTitle(e.target.value)}
+        />
+
+        {inRing ? (
+          <SelectField
+            label={t('panel.doc.privilege')}
+            hint={t('panel.doc.privilegeHint')}
+            value={privilegeClass}
+            onChange={(e) => {
+              setPrivilegeClass(e.target.value);
+              /* A privileged document cannot be released to the client — the server
+                 refuses it outright — so the checkbox is cleared rather than left
+                 ticked and then refused. */
+              if (e.target.value !== 'none') setRelease(false);
+            }}
+            options={FILING_PRIVILEGES.map((v) => ({ value: v, label: humanise(v) }))}
+          />
+        ) : (
+          <p className="firm-panel__note">
+            <IconLock size={13} aria-hidden="true" /> {t('panel.doc.privilegeOutsideRing')}
+          </p>
+        )}
+
+        {mayRelease && privilegeClass === 'none' && (
+          <Checkbox
+            checked={release}
+            onChange={(e) => setRelease(e.target.checked)}
+            label={t('panel.doc.releaseNow')}
+            hint={t('panel.doc.releaseNowHint')}
+          />
+        )}
+      </div>
+    </Modal>
+  );
+}
+
+/** A NEW VERSION of an existing document (P2.6). */
+function NewVersionDialog({
+  document: target, onClose, onFile,
+}: {
+  document: MatterDocumentRow;
+  onClose: () => void;
+  onFile: (target: MatterDocumentRow, file: File, title?: string) => Promise<unknown>;
+}) {
+  const { t, pick } = useI18n();
+  const toast = useToast();
+  const input = useRef<HTMLInputElement>(null);
+  const [picked, setPicked] = useState<File | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function submit() {
+    if (!picked) { toast.error(t('panel.doc.noFile')); return; }
+    setBusy(true);
+    try {
+      await onFile(target, picked);
+      onClose();
+    } catch (err) {
+      toast.error(t('panel.doc.failed'), (err as FirmApiError).message);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title={t('panel.doc.newVersion')}
+      description={t('panel.doc.versionBody')}
+      size="sm"
+      footer={(
+        <>
+          <Button variant="ghost" onClick={onClose}>{t('common.cancel')}</Button>
+          <Button variant="primary" loading={busy} disabled={!picked} onClick={() => { void submit(); }}>
+            {t('panel.doc.versionAction')}
+          </Button>
+        </>
+      )}
+    >
+      <p className="firm-doc__confirm">
+        <b>{pick(target.titleAr, target.title)}</b> · <span className="num">v{target.version}</span>
+      </p>
+      {/*
+        SAID OUT LOUD, BECAUSE IT IS THE WHOLE POINT OF A CHAIN: the old bytes stay where
+        they are. If the previous version was released, the client keeps it — publishing a
+        replacement tells them nothing and changes nothing they hold. The member should
+        know that before they upload, not after.
+      */}
+      <p className="firm-panel__note">{t('panel.doc.versionKeepsOld')}</p>
+      <div className="firm-doc__pick">
+        <input
+          ref={input}
+          type="file"
+          className="firm-doc__fileinput"
+          onChange={(e) => setPicked(e.target.files?.[0] ?? null)}
+          aria-label={t('panel.doc.chooseFile')}
+        />
+        <Button size="sm" variant="secondary" onClick={() => input.current?.click()}>
+          {t('panel.doc.chooseFile')}
+        </Button>
+        <span className="firm-doc__filename">
+          {picked ? `${picked.name} · ${Math.max(1, Math.round(picked.size / 1024))} KB` : t('panel.doc.noChosen')}
+        </span>
+      </div>
+    </Modal>
   );
 }
 

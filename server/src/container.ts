@@ -17,6 +17,7 @@ import { ClientService } from './domain/client-service.js';
 import { getStorage } from './storage/service.js';
 import type { StorageDriver } from './storage/service.js';
 import { PaymentService } from './domain/payment-service.js';
+import { FirmDocumentService } from './domain/firm-documents.js';
 
 export interface Container {
   db: Db;
@@ -37,6 +38,8 @@ export interface Container {
    * audiences' refusals land in one reviewable trail.
    */
   firm: FirmRepo;
+  /** P2.1 · the firm's document writes: file, release, restrict, re-file, archive. */
+  firmDocuments: FirmDocumentService;
   permissions: PermissionEngine;
   firmSessions: FirmSessionManager;
   firmAuth: FirmAuthService;
@@ -58,6 +61,7 @@ export function createContainer(overrides: {
 
   // ---- Firm OS ------------------------------------------------------------
   const firm = new FirmRepo(db);
+  const firmDocuments = new FirmDocumentService({ repo: firm, storage, audit });
   // Refusals are audited by the engine itself rather than by each handler, so a
   // forgotten audit call in a new route cannot silently drop an escalation
   // attempt (§49). Request context is not available here, so the sink records
@@ -93,6 +97,7 @@ export function createContainer(overrides: {
     audit,
     auth,
     clients,
+    firmDocuments,
     payments,
     storage,
     trustProxy: overrides.trustProxy ?? Boolean(process.env.TRUST_PROXY),

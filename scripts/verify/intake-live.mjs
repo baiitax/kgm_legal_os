@@ -42,7 +42,15 @@ const ADMIN_URL = `postgresql://postgres.sdpezbxwedvxqelpslfv:${encodeURICompone
 
 const FIRM_PASSWORD = 'Demo!Firm2026';
 const TENANT_KGM = 'aaaaaaaa-0000-4000-8000-000000000001';
-const TENANT_NAJD = 'aaaaaaaa-0000-4000-8000-000000000002';
+/*
+  THE SECOND TENANT IS `bbbbbbbb-…-0002`, AND THIS LINE USED TO SAY `aaaaaaaa-…-0002`.
+  The neighbouring-tenant block at the bottom of this file then asked for a client that
+  does not exist, got the same 404 a foreign client gets, and compared two 404s to each
+  other and called it a pass. A fabricated id makes every negative assertion pass for the
+  wrong reason — the harness proved that a client which does not exist is not visible,
+  which is true, easy, and not what it claims to test.
+*/
+const TENANT_NAJD = 'bbbbbbbb-0000-4000-8000-000000000002';
 const NOURA_STAFF = 'f1000000-0000-4000-8000-000000000001';
 const FAISAL_STAFF = 'f1000000-0000-4000-8000-000000000002';
 const MARIAM_STAFF = 'f1000000-0000-4000-8000-000000000003';

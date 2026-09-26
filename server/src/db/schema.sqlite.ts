@@ -456,7 +456,12 @@ create table if not exists documents (
   title text not null,
   title_ar text,
   document_type text not null,
-  category text not null default 'other',
+  /* Mirrors the live CHECK (documents_category_check). The default used to be 'other',
+     which that CHECK refuses — a default no writer could ever have relied on, since
+     supplying it fails. 0064 drops the default on Postgres; the mirror no longer
+     pretends one exists. */
+  category text not null
+    check (category in ('from_firm','requested','uploaded','signed','court','financial')),
   origin text not null check (origin in ('firm','client')),
   version integer not null default 1,
   mime_type text not null,
@@ -477,11 +482,18 @@ create table if not exists documents (
   request_note_ar text,
   uploaded_by_user_id text,
   uploaded_by_staff_id text,
+  /* 0061 · THE VERSION CHAIN. A new version is a new row pointing at the row it
+     replaces, so the old bytes stay readable and "what did we give the client in
+     March" stays answerable. Mirrored here because the demo engine must be able to
+     represent the same chain the real database enforces. */
+  supersedes_document_id text references documents(id),
   created_at text not null,
   updated_at text not null
 );
 create index if not exists documents_client_idx on documents(client_id, created_at desc);
 create index if not exists documents_matter_idx on documents(matter_id, created_at desc);
+create index if not exists documents_supersedes_idx on documents(supersedes_document_id)
+  where supersedes_document_id is not null;
 
 create trigger if not exists document_scan_guard
   before insert on documents

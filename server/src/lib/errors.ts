@@ -211,6 +211,12 @@ export type ErrorCode =
   | 'upload_too_large'
   | 'upload_type_not_allowed'
   | 'upload_rejected'
+  /* P2.1 · the firm's document writes. Each one is a refusal the panel shows
+     as a sentence rather than a stack trace. */
+  | 'document_not_releasable'
+  | 'document_archived'
+  | 'document_already_superseded'
+  | 'privileged_needs_a_ground'
   | 'upload_not_permitted'
   | 'payload_too_large'
   | 'invalid_json'
