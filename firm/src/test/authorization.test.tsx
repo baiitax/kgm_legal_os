@@ -167,33 +167,44 @@ beforeEach(() => {
 // ==========================================================================
 
 describe('§50 · navigation is generated from permissions, never hardcoded', () => {
-  it('gives a partner every module group', () => {
+  it('gives a partner every group this build implements', () => {
+    /*
+      THE NAV IS NOW A STATEMENT ABOUT THIS BUILD, NOT ABOUT THE SPEC.
+
+      It used to list every §12 module, with the unbuilt ones marked `planned`.
+      On the live app that meant a partner signing in saw seventeen dead rows and
+      five live ones. The nav now lists what exists — so the assertion changed
+      shape: the groups present must be exactly the implemented ones, and the
+      §12 groups that are absent (legal, finance, compliance, communication) must
+      be absent for EVERY persona, including the one holding every permission.
+    */
     const nav = visibleNav(PERMISSIONS.partner);
     const ids = nav.groups.map((g) => g.group.id);
-    expect(ids).toEqual(expect.arrayContaining([
-      'dashboard', 'workspace', 'clients', 'matters', 'legal',
-      'finance', 'compliance', 'admin',
-    ]));
+    expect(ids).toEqual(expect.arrayContaining(['dashboard', 'workspace', 'clients', 'matters', 'admin']));
+    for (const absent of ['legal', 'finance', 'compliance', 'communication']) {
+      expect(ids, absent).not.toContain(absent);
+    }
   });
 
-  it('reduces the finance group to Time alone for a lawyer with no billing code', () => {
+  it('offers a lawyer their own work and nothing from the unbuilt modules', () => {
     /*
-      §12 places Time entry under Finance, and a lawyer logs time. So the group
-      is correctly present — but containing only that. Asserting the whole group
-      vanished would be asserting the lawyer cannot record their own hours.
+      A lawyer holds `matters.read` and `clients.read` but not `billing.read`, so
+      the finance group is absent — and it is absent for the partner too, because
+      there is no firm-wide finance screen in this build. The matter's Billing tab
+      is where a lawyer's time and a matter's invoices live, and that tab is gated
+      by the matter's own access level, which the workspace resolves per matter.
     */
     const nav = visibleNav(PERMISSIONS.lawyer);
-    const finance = nav.groups.find((g) => g.group.id === 'finance');
-    expect(finance).toBeDefined();
-    const leafIds = finance!.leaves.map((l) => l.id);
-    expect(leafIds).toEqual(['time']);
-    expect(leafIds).not.toContain('billing');
-    expect(leafIds).not.toContain('collections');
-    // The routes behind those absent leaves are gone from the guard set too,
+    const leafIds = nav.groups.flatMap((g) => g.leaves.map((l) => l.id));
+    expect(leafIds).toContain('mywork');
+    for (const absent of ['time', 'billing', 'collections', 'documents', 'hearings', 'tasks']) {
+      expect(leafIds, absent).not.toContain(absent);
+    }
+    // The routes behind those absent modules are gone from the guard set too,
     // not merely from the menu.
-    expect(isPathAllowed(nav.allowedPaths, '/billing')).toBe(false);
-    expect(isPathAllowed(nav.allowedPaths, '/collections')).toBe(false);
-    expect(isPathAllowed(nav.allowedPaths, '/time')).toBe(true);
+    for (const path of ['/billing', '/collections', '/time', '/documents', '/hearings']) {
+      expect(isPathAllowed(nav.allowedPaths, path), path).toBe(false);
+    }
   });
 
   it('hides the administration group from a paralegal', () => {
@@ -203,59 +214,72 @@ describe('§50 · navigation is generated from permissions, never hardcoded', ()
     expect(isPathAllowed(nav.allowedPaths, '/admin/users')).toBe(false);
   });
 
-  it('lets a finance officer see audit but not hear about hearings', () => {
+  it('lets a finance officer see audit, and no module the build does not have', () => {
     const nav = visibleNav(PERMISSIONS.finance);
     const leafIds = nav.groups.flatMap((g) => g.leaves.map((l) => l.id));
-    expect(leafIds).toContain('audit');     // holds audit.read
-    expect(leafIds).toContain('billing');   // holds billing.read_all
-    expect(leafIds).not.toContain('hearings'); // no hearings.read
-    expect(leafIds).not.toContain('contracts');
-    expect(leafIds).not.toContain('poa');
+    // Clients is a standalone group rather than a leaf, so it is asserted on the
+    // group list — the difference is structural, not a second rule.
+    expect(nav.groups.map((g) => g.group.id)).toContain('clients');
+    expect(leafIds).toContain('audit');       // holds audit.read
+    // Holding `billing.read_all` no longer buys a Billing row, because there is
+    // no firm-wide billing screen. It buys the matter's Billing tab, which the
+    // matter workspace gates on the member's access level for THAT matter.
+    expect(leafIds).not.toContain('billing');
+    for (const absent of ['hearings', 'contracts', 'poa', 'licences', 'collections']) {
+      expect(leafIds, absent).not.toContain(absent);
+    }
   });
 
   it('gives a member with no permissions only their own surface', () => {
     const nav = visibleNav([]);
     const ids = nav.groups.map((g) => g.group.id);
     /*
-      What survives is exactly the member's own surface: the dashboard, their own
-      work and their own notifications. Clients and Matters do NOT — they are
-      record collections gated on a read permission, and showing them here is the
-      §50 violation this test exists to catch. Communication survives only
-      because it is inert: no permission code exists to gate it on, so it renders
-      as a label with no destination and contributes no allowed path.
+      What survives is exactly the member's own surface: the dashboard and their
+      own work. Clients and Matters do NOT — they are record collections gated on
+      a read permission, and showing them here is the §50 violation this test
+      exists to catch. Nothing else survives at all: the modules that used to
+      linger as inert rows are gone from the tree.
     */
     expect(ids).toEqual(expect.arrayContaining(['dashboard', 'workspace']));
-    expect(ids).not.toContain('clients');
-    expect(ids).not.toContain('matters');
-    expect(ids).not.toContain('finance');
-    expect(ids).not.toContain('admin');
+    for (const absent of ['clients', 'matters', 'admin', 'legal', 'finance', 'compliance', 'communication']) {
+      expect(ids, absent).not.toContain(absent);
+    }
     expect(isPathAllowed(nav.allowedPaths, '/clients')).toBe(false);
     expect(isPathAllowed(nav.allowedPaths, '/matters')).toBe(false);
     expect(isPathAllowed(nav.allowedPaths, '/admin/audit')).toBe(false);
     expect(isPathAllowed(nav.allowedPaths, '/billing')).toBe(false);
-    // Inert, so not a destination the guard will wave through.
     expect(isPathAllowed(nav.allowedPaths, '/messages')).toBe(false);
   });
 
-  it('renders Communication inert for every persona, since no messages permission exists', () => {
+  it('does not offer Messages at all, for any persona', () => {
+    /*
+      There is no `messages.*` permission in the server catalogue and no firm-wide
+      messaging screen, so a Messages row could never be opened by anyone. It used
+      to render inert — "present in the §12 structure" — which is the state this
+      phase removes: a member cannot tell an inert row from a broken one, and
+      either reading makes them distrust the rows that do work.
+    */
     for (const [persona, codes] of Object.entries(PERMISSIONS)) {
       const nav = visibleNav(codes);
-      const comms = nav.groups.find((g) => g.group.id === 'communication');
-      expect(comms?.group.planned, persona).toBe(true);
-      // Offered in the §12 structure, but never an authorized destination.
+      expect(nav.groups.find((g) => g.group.id === 'communication'), persona).toBeUndefined();
       expect(isPathAllowed(nav.allowedPaths, '/messages'), persona).toBe(false);
     }
   });
 
   it('never exposes a module the permission set does not grant, for any persona', () => {
     // The invariant, checked exhaustively rather than per persona.
+    /*
+      Paths the nav actually offers. The unbuilt modules are NOT in this table
+      because they are not in the tree — a path nobody lists cannot be exposed,
+      and `does not list a module the firm has not built` (shell-layout.test.tsx)
+      is what holds that end up.
+    */
     const requires: Record<string, string[]> = {
-      '/billing': ['billing.read', 'billing.read_all'],
+      '/clients': ['clients.read'],
+      '/matters': ['matters.read', 'matters.read_all'],
       '/admin/audit': ['audit.read'],
       '/admin/users': ['users.read'],
-      '/hearings': ['hearings.read', 'hearings.manage'],
-      '/poa': ['poa.read', 'poa.manage'],
-      '/licences': ['compliance.licences'],
+      '/admin/settings': ['settings.read', 'settings.manage'],
     };
     for (const [persona, codes] of Object.entries(PERMISSIONS)) {
       const nav = visibleNav(codes);
@@ -278,25 +302,33 @@ describe('§50 · navigation is generated from permissions, never hardcoded', ()
 });
 
 describe('§50 · the resolved session drives the same nav at runtime', () => {
-  it('resolves a partner session to the full nav', async () => {
+  it('resolves a partner session to the whole of this build, and no more', async () => {
     mockSession('partner', 'Noura');
     const { get } = renderWithSession();
     await waitFor(() => expect(get().status).toBe('authenticated'));
+    // The PERMISSION set is still the partner's full set: authorization did not
+    // change in this phase, the nav's honesty about what exists did. Holding
+    // `billing.approve` still grants the matter's billing surfaces.
     expect(get().permissions.size).toBe(PERMISSIONS.partner.length);
     expect(get().can('billing.approve')).toBe(true);
-    expect(get().nav.groups.map((g) => g.group.id)).toContain('finance');
+    const ids = get().nav.groups.map((g) => g.group.id);
+    expect(ids).toEqual(expect.arrayContaining(['dashboard', 'workspace', 'clients', 'matters', 'admin']));
+    expect(ids).not.toContain('finance');
   });
 
-  it('resolves a paralegal session with admin absent and finance reduced to Time', async () => {
+  it('resolves a paralegal session with admin and the unbuilt modules absent', async () => {
     mockSession('paralegal', 'Mariam');
     const { get } = renderWithSession();
     await waitFor(() => expect(get().status).toBe('authenticated'));
+    // She does not hold these, so the permission check is the first reason the
+    // surfaces are closed to her — and the nav agrees for a second reason on the
+    // modules this build has no firm-wide screen for.
     expect(get().can('billing.read')).toBe(false);
     expect(get().can('audit.read')).toBe(false);
     const ids = get().nav.groups.map((g) => g.group.id);
     expect(ids).not.toContain('admin');
-    const finance = get().nav.groups.find((g) => g.group.id === 'finance');
-    expect(finance?.leaves.map((l) => l.id)).toEqual(['time']);
+    expect(ids).not.toContain('finance');
+    expect(ids).not.toContain('legal');
   });
 
   it('reports anonymous on a 401 rather than erroring', async () => {

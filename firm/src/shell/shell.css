@@ -183,27 +183,6 @@
   white-space: nowrap;
 }
 
-/* ---- the line between what works and what is coming ---- */
-.kgm-rail__divider {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  margin: var(--sp-3) 0 var(--sp-1);
-  padding-inline: var(--sp-2);
-  color: var(--text-dim);
-  font-size: var(--fs-meta);
-  letter-spacing: var(--tracking-label);
-  text-transform: uppercase;
-  white-space: nowrap;
-}
-
-.kgm-rail__divider::after {
-  content: '';
-  flex: 1 1 auto;
-  block-size: 1px;
-  background: var(--line-soft);
-}
-
 /* ---- scroll region ---- */
 
 .kgm-rail__scroll {
@@ -292,20 +271,6 @@
 
 .kgm-rail__linklabel { flex: 1 1 auto; min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; }
 
-/* Planned modules: dimmed with a trailing dot, and inert. The dot is a visual
-   affordance only — `aria-disabled` carries the state to AT. */
-.kgm-rail__link[data-planned] { color: var(--text-faint); cursor: not-allowed; }
-.kgm-rail__link[data-planned]:hover { background: transparent; color: var(--text-dim); }
-.kgm-rail__link[data-planned] .kgm-rail__linkicon { color: var(--text-faint); }
-
-.kgm-rail__linkplanned {
-  flex: none;
-  inline-size: 5px;
-  block-size: 5px;
-  border-radius: var(--radius-full);
-  background: var(--gold-400);
-  opacity: .7;
-}
 
 /* Collapsed rail: everything centres, and the label is gone rather than
    truncated. A truncated label in a 72px rail is unreadable AND still occupies
@@ -809,11 +774,8 @@
 
 .kgm-morelist__item:hover { border-color: var(--kgm-green-500); background: var(--surface-2); color: var(--text-hi); }
 .kgm-morelist__item:focus-visible { outline: none; border-color: var(--focus-ring-color); box-shadow: var(--focus-ring-glow); }
-.kgm-morelist__item[data-planned] { color: var(--text-faint); cursor: not-allowed; }
-.kgm-morelist__item[data-planned]:hover { border-color: var(--line-soft); background: var(--surface-1); }
 
 .kgm-morelist__icon { display: inline-grid; place-items: center; flex: none; color: var(--kgm-green-300); }
-.kgm-morelist__item[data-planned] .kgm-morelist__icon { color: var(--text-faint); }
 
 /* --------------------------------------------------------------------------
    7 · PRELOADER · §32, §33
@@ -1160,8 +1122,6 @@
   background: var(--kgm-green-500);
 }
 
-.firm-tab[data-disabled] { color: var(--text-faint); cursor: not-allowed; }
-.firm-tab[data-disabled]:hover { background: transparent; color: var(--text-faint); }
 
 /* ---- matter body ---- */
 
@@ -2022,3 +1982,399 @@
 }
 
 .kgm-morelist__item[data-active] .kgm-morelist__icon { color: var(--text-hi); }
+
+/* ==========================================================================
+   THE MATTER WORKSPACE'S TAB BODIES · §20-§32, §43, §46
+   --------------------------------------------------------------------------
+   Twelve panels that were placeholders until phase 24. The rules below are
+   written to four constraints, and each one is a decision rather than a taste:
+
+   1. EVERY COLOUR IS A TOKEN. Not one hex value in this block. The brief asks
+      for KGM Green as primary, Lime for success, Saudi Gold for the privileged
+      and the internal, and a white card in light mode — all of which already
+      exist as `--kgm-*` and as semantic aliases (`--text-gold`, `--kgm-critical`).
+      A panel that hardcodes a gold is a panel that stays gold in a theme that
+      redefines it, and this product has two themes it treats as first-class.
+
+   2. GLASS IS THE SURFACE, NOT THE DECORATION (§03). Panels sit on
+      `--surface-1`, which IS the glass token, so they lift off the atmospheric
+      background without a second blur pass each. The only element that pays for
+      its own `backdrop-filter` is the sticky matter header, because it is the
+      only one that content scrolls UNDER.
+
+   3. FLUID AT EVERY WIDTH (§43). Rows are `flex-wrap` rather than
+      `white-space: nowrap`, the tag clusters wrap, and long Arabic names break
+      with `overflow-wrap: anywhere` instead of pushing a card wider than the
+      phone. Everything is `min-inline-size: 0` where it is a flex child of a
+      grid — the one line whose absence makes a phone scroll sideways.
+
+   4. LOGICAL PROPERTIES ONLY. No `left`, no `right`, no `margin-left`. The firm
+      ships Arabic RTL as a first-class language, and a physical property in a
+      panel is a bug that is invisible to the English eye until a Saudi lawyer
+      opens the file.
+   ========================================================================== */
+
+/* ---- the panel shell ---- */
+
+.firm-panel { margin-block-start: var(--sp-4); }
+.firm-panel .kgm-card__body { display: flex; flex-direction: column; gap: var(--sp-4); }
+
+.firm-panel__sections { display: flex; flex-direction: column; gap: var(--sp-5); }
+
+.firm-panel__subhead {
+  margin: 0 0 var(--sp-2);
+  color: var(--text-dim);
+  font-size: var(--fs-meta);
+  font-weight: var(--fw-semibold);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+}
+
+/* A note is the voice of the panel explaining itself — why a document is
+   withheld, what a register's state means. It is deliberately quieter than a
+   body line and never a call to action. */
+.firm-panel__note {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0;
+  color: var(--text-dim);
+  font-size: var(--fs-body-sm);
+}
+.firm-panel__note svg { flex: none; color: var(--text-gold); }
+
+/* The verdict line: the server's own conclusion, stated before the rows that
+   support it. Billing's `billable`, the conflict engine's `state`, the execution
+   gate. */
+.firm-panel__verdict {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0;
+}
+
+.firm-panel__loading { display: flex; flex-direction: column; gap: var(--sp-2); }
+
+/* ---- shared list shapes ---- */
+
+.firm-list { display: flex; flex-direction: column; gap: var(--sp-2); margin: 0; padding: 0; list-style: none; }
+.firm-list--compact { gap: var(--sp-1); }
+.firm-list--past { opacity: 0.72; }
+.firm-list__more { display: flex; justify-content: flex-end; padding-block-start: var(--sp-1); }
+
+/* A text button that reads as a link: used where a panel offers one way onward
+   and a filled button would over-weight it. */
+.kgm-linkbtn {
+  border: 0;
+  background: none;
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--radius-sm);
+  color: var(--text-link);
+  font: inherit;
+  font-size: var(--fs-body-sm);
+  font-weight: var(--fw-medium);
+  cursor: pointer;
+}
+.kgm-linkbtn:hover { background: var(--surface-1); color: var(--text-hi); }
+.kgm-linkbtn:focus-visible { outline: 2px solid var(--focus-ring-color); outline-offset: 1px; }
+
+/* ---- timeline ---- */
+
+.firm-timeline { display: flex; flex-direction: column; gap: var(--sp-4); margin: 0; padding: 0; list-style: none; }
+
+.firm-timeline__item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--sp-3);
+  align-items: start;
+  min-inline-size: 0;
+}
+
+/* The dot is the only status channel that is purely decorative, so it is paired
+   with the event badge and the date — never the sole carrier of meaning. */
+.firm-timeline__dot {
+  inline-size: 9px;
+  block-size: 9px;
+  margin-block-start: 6px;
+  border-radius: var(--radius-full);
+  background: var(--text-faint);
+  box-shadow: 0 0 0 3px var(--surface-2);
+}
+.firm-timeline__dot--complete { background: var(--kgm-success); }
+.firm-timeline__dot--pending { background: var(--kgm-warning); }
+.firm-timeline__dot--blocked,
+.firm-timeline__dot--cancelled { background: var(--kgm-critical); }
+.firm-timeline__dot--info { background: var(--kgm-info); }
+
+.firm-timeline__body { display: flex; flex-direction: column; gap: 2px; min-inline-size: 0; }
+.firm-timeline__head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); min-inline-size: 0; }
+.firm-timeline__title { color: var(--text-hi); font-size: var(--fs-body-sm); font-weight: var(--fw-medium); overflow-wrap: anywhere; }
+.firm-timeline__text { margin: 0; color: var(--text-dim); font-size: var(--fs-body-sm); line-height: var(--lh-relaxed); overflow-wrap: anywhere; }
+.firm-timeline__when { color: var(--text-faint); font-size: var(--fs-caption); }
+
+/* ---- team ---- */
+
+.firm-teamlists { display: flex; flex-direction: column; gap: var(--sp-1); margin: 0; padding: 0; list-style: none; }
+
+.firm-teammember {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2);
+  border-radius: var(--radius-md);
+  min-inline-size: 0;
+}
+.firm-teammember:hover { background: var(--surface-1); }
+
+.firm-teammember__avatar {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  inline-size: 34px;
+  block-size: 34px;
+  border-radius: var(--radius-full);
+  background: var(--surface-2);
+  border: 1px solid var(--line-soft);
+  color: var(--kgm-green-300);
+  font-size: var(--fs-caption);
+  font-weight: var(--fw-semibold);
+  letter-spacing: 0.02em;
+}
+
+.firm-teammember__main { display: flex; flex-direction: column; min-inline-size: 0; flex: 1 1 auto; }
+.firm-teammember__name { color: var(--text-hi); font-size: var(--fs-body-sm); font-weight: var(--fw-medium); overflow-wrap: anywhere; }
+.firm-teammember__meta { color: var(--text-dim); font-size: var(--fs-caption); text-transform: capitalize; }
+.firm-teammember__tags { display: flex; flex-wrap: wrap; gap: var(--sp-1); flex: none; }
+
+/* ---- a cell with a line above and a line below it ---- */
+
+.firm-cellstack { display: flex; flex-direction: column; min-inline-size: 0; }
+.firm-cellstack__main { color: var(--text-hi); overflow-wrap: anywhere; }
+.firm-cellstack__sub { color: var(--text-dim); font-size: var(--fs-caption); text-transform: capitalize; }
+
+/* ---- hearings and deadlines ---- */
+
+.firm-hearing,
+.firm-deadline {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  padding: var(--sp-3);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  min-inline-size: 0;
+}
+
+.firm-hearing__when,
+.firm-deadline__due {
+  display: flex;
+  flex-direction: column;
+  flex: none;
+  inline-size: 7.5rem;
+  font-size: var(--fs-caption);
+}
+
+.firm-hearing__main,
+.firm-deadline__main { display: flex; flex-direction: column; gap: 2px; flex: 1 1 auto; min-inline-size: 0; }
+
+.firm-hearing__court,
+.firm-deadline__title { color: var(--text-hi); font-size: var(--fs-body-sm); font-weight: var(--fw-medium); overflow-wrap: anywhere; }
+
+.firm-hearing__meta,
+.firm-deadline__text { color: var(--text-dim); font-size: var(--fs-caption); overflow-wrap: anywhere; }
+
+.firm-hearing__note { color: var(--text-dim); font-size: var(--fs-caption); font-style: italic; overflow-wrap: anywhere; }
+
+/* A statutory deadline names its rule; the citation reads as a footnote. */
+.firm-deadline__rule {
+  margin-block-start: 2px;
+  color: var(--text-faint);
+  font-size: var(--fs-caption);
+  font-variant-numeric: tabular-nums;
+}
+
+.firm-hearing__tags,
+.firm-deadline__tags { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--sp-1); flex: 0 1 auto; max-inline-size: 45%; }
+
+/* OVERDUE IS A STATE, NOT A TINT: a gold edge on the inline-start of the row,
+   plus the badge. Two channels, per §30 — and the edge is what makes a list of
+   twenty deadlines scannable for the one that is late. */
+.firm-deadline[data-overdue] {
+  border-color: var(--border-gold);
+  box-shadow: inset 3px 0 0 -1px var(--kgm-gold-500);
+}
+[dir='rtl'] .firm-deadline[data-overdue] { box-shadow: inset -3px 0 0 -1px var(--kgm-gold-500); }
+
+/* ---- parties ---- */
+
+.firm-parties { display: flex; flex-direction: column; gap: var(--sp-1); margin: 0; padding: 0; list-style: none; }
+
+.firm-party {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2);
+  border-radius: var(--radius-md);
+  min-inline-size: 0;
+}
+.firm-party:hover { background: var(--surface-1); }
+
+.firm-party__kind { flex: none; color: var(--text-faint); font-size: var(--fs-caption); }
+.firm-party__kind[data-kind='entity'] { color: var(--kgm-green-300); }
+
+.firm-party__main { display: flex; flex-direction: column; flex: 1 1 auto; min-inline-size: 0; }
+.firm-party__name { color: var(--text-hi); font-size: var(--fs-body-sm); font-weight: var(--fw-medium); overflow-wrap: anywhere; }
+.firm-party__meta { color: var(--text-dim); font-size: var(--fs-caption); text-transform: capitalize; overflow-wrap: anywhere; }
+
+/* ---- conflicts ---- */
+
+.firm-conflictcheck { margin-block-start: var(--sp-2); }
+
+.firm-hits { display: flex; flex-direction: column; gap: var(--sp-1); margin: 0; padding: 0; list-style: none; }
+
+.firm-hit {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  padding: var(--sp-2);
+  border-radius: var(--radius-md);
+  min-inline-size: 0;
+}
+
+/* The severity rail: a 3px bar, the same shape the deadline row uses for
+   overdue. One visual grammar for "this row needs attention" across the app. */
+.firm-hit__sev {
+  flex: none;
+  inline-size: 3px;
+  align-self: stretch;
+  min-block-size: 20px;
+  border-radius: var(--radius-full);
+  background: var(--text-faint);
+}
+.firm-hit__sev[data-sev='info'] { background: var(--kgm-info); }
+.firm-hit__sev[data-sev='notice'] { background: var(--kgm-green-400); }
+.firm-hit__sev[data-sev='warning'] { background: var(--kgm-warning); }
+.firm-hit__sev[data-sev='high'],
+.firm-hit__sev[data-sev='critical'] { background: var(--kgm-critical); }
+
+.firm-hit__main { display: flex; flex-direction: column; gap: 2px; flex: 1 1 auto; min-inline-size: 0; }
+.firm-hit__name { color: var(--text-hi); font-size: var(--fs-body-sm); font-weight: var(--fw-medium); overflow-wrap: anywhere; }
+.firm-hit__meta { color: var(--text-dim); font-size: var(--fs-caption); overflow-wrap: anywhere; }
+.firm-hit__why { color: var(--text-faint); font-size: var(--fs-caption); font-style: italic; overflow-wrap: anywhere; }
+.firm-hit__tags { display: flex; flex-wrap: wrap; gap: var(--sp-1); flex: 0 1 auto; }
+
+/* ---- judgments ---- */
+
+.firm-judgments { display: flex; flex-direction: column; gap: var(--sp-2); margin: 0; padding: 0; list-style: none; }
+
+.firm-judgment {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  padding: var(--sp-3);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  min-inline-size: 0;
+}
+/* The operative judgment — the one the enforcement register reads — carries the
+   same gold rail as an overdue deadline: it is the row that matters most. */
+.firm-judgment[data-operative] { border-color: var(--border-gold); box-shadow: inset 3px 0 0 -1px var(--kgm-gold-500); }
+[dir='rtl'] .firm-judgment[data-operative] { box-shadow: inset -3px 0 0 -1px var(--kgm-gold-500); }
+
+.firm-judgment__main { display: flex; flex-direction: column; gap: 2px; flex: 1 1 auto; min-inline-size: 0; }
+.firm-judgment__title { color: var(--text-hi); font-size: var(--fs-body-sm); font-weight: var(--fw-medium); overflow-wrap: anywhere; }
+.firm-judgment__meta { color: var(--text-dim); font-size: var(--fs-caption); overflow-wrap: anywhere; }
+.firm-judgment__tags { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--sp-1); flex: 0 1 auto; max-inline-size: 50%; }
+
+.firm-service {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  min-inline-size: 0;
+}
+.firm-service__main { display: flex; flex-direction: column; flex: 1 1 auto; min-inline-size: 0; }
+.firm-service__meta { color: var(--text-dim); font-size: var(--fs-caption); overflow-wrap: anywhere; }
+
+/* ---- billing ---- */
+
+.firm-billinghead { margin-block-end: var(--sp-2); }
+.firm-billinghead__row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); margin-block-end: var(--sp-3); }
+
+/* The fee terms as a definition list that wraps into a grid on wide screens
+   rather than stretching one pair across the whole card. */
+.firm-deflist--inline {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: var(--sp-1) var(--sp-4);
+}
+.firm-deflist--inline .firm-deflist__row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-block: var(--sp-1);
+  border-block-end: 1px solid var(--line-soft);
+}
+.firm-deflist--inline dt { color: var(--text-dim); font-size: var(--fs-caption); }
+.firm-deflist--inline dd { margin: 0; color: var(--text-hi); font-size: var(--fs-body-sm); text-align: start; }
+
+/* ---- responsive: the panels at the widths people actually use ---- */
+
+@media (max-width: 899px) {
+  /* A row that keeps its side-by-side shape on a phone squeezes the text column
+     to a few characters per line. The date column moves above the content and
+     the tag cluster drops to its own line. */
+  .firm-hearing,
+  .firm-deadline,
+  .firm-judgment { flex-direction: column; gap: var(--sp-2); }
+
+  .firm-hearing__when,
+  .firm-deadline__due {
+    inline-size: auto;
+    flex-direction: row;
+    align-items: center;
+    gap: var(--sp-2);
+    color: var(--text-hi);
+  }
+
+  .firm-hearing__tags,
+  .firm-deadline__tags,
+  .firm-judgment__tags {
+    justify-content: flex-start;
+    max-inline-size: 100%;
+  }
+
+  .firm-teammember { flex-wrap: wrap; }
+  .firm-teammember__tags { inline-size: 100%; }
+
+  .firm-hit { flex-wrap: wrap; }
+
+  /* The panel header's action slot wraps under the title rather than pushing it
+     out of the card. */
+  .kgm-card__head { flex-wrap: wrap; }
+}
+
+@media (max-width: 639px) {
+  .firm-panel .kgm-card__body { gap: var(--sp-3); }
+  .firm-panel__subhead { font-size: var(--fs-caption); }
+
+  .firm-parties,
+  .firm-teamlists { gap: 0; }
+
+  .firm-party { padding-inline: 0; }
+  .firm-party__meta { font-size: var(--fs-meta); }
+
+  /* Tighter than comfortable, chosen over the alternative: a horizontal scroll
+     on a card that is already inside one. The panels carry the full record; the
+     table below shows the two columns that identify a row. */
+  .firm-panel .kgm-tablescroll { margin-inline: calc(var(--sp-1) * -1); padding-inline: var(--sp-1); }
+}
+
+/* Tables inside a panel keep their own rounded shell so a scrolling body does
+   not look like it has escaped the card. */
+.firm-panel .kgm-tablewrap { border-radius: var(--radius-md); }

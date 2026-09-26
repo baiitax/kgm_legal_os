@@ -19,11 +19,12 @@
  *     cannot shrink and cannot fit spill out of the rounded background. The
  *     floor is now raised only where there is room for it.
  *
- *  3. A PLANNED MODULE IS NEVER A DESTINATION.
- *     Every nav leaf that is not `planned` must have a screen, and every leaf
- *     that IS planned must be inert. A nav that offers a link the app cannot
- *     render is the "0 functioning page" complaint: it is not a missing feature,
- *     it is a promise the interface made and broke.
+ *  3. EVERY MODULE THE NAV LISTS HAS A SCREEN.
+ *     The nav used to carry an `is planned` escape hatch, and this suite used it
+ *     in both directions: planned leaves must be inert, unplanned leaves must
+ *     have a route. That rule is now stricter and simpler — there is no escape
+ *     hatch. Every leaf in the tree must have a screen, and the modules the firm
+ *     has not built must not be in the tree at all.
  */
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -173,11 +174,16 @@ describe('§16 · the floating bottom nav', () => {
       expect(label!.textContent!.trim().length).toBeGreaterThan(0);
     }
 
-    // §50: no slot may be a module the app cannot render. Home and More are
-    // controls, not destinations, so only the middle three are checked.
+    // §50: every slot is a destination the app can render. Slots are buttons —
+    // they navigate through the app's own router, not a hash — so what can be
+    // asserted here is that no slot is inert and every slot is labelled.
     const flexible = items.slice(1, 4);
     for (const slot of flexible) {
       expect(slot.getAttribute('data-planned')).toBeNull();
+      expect(slot.getAttribute('aria-disabled')).toBeNull();
+      const label = slot.querySelector('.kgm-bottomnav__label')?.textContent?.trim() ?? '';
+      expect(label.length).toBeGreaterThan(0);
+      expect(['More']).not.toContain(label);
     }
   });
 });
@@ -195,37 +201,62 @@ describe('§50 · the nav only offers destinations the app can render', () => {
    * Enumerated from the nav TREE, not from a regex over its source.
    *
    * A text scan has to guess where an entry ends, and it guessed wrong in both
-   * directions: a comment long enough to push `planned: true` out of the window
-   * made a planned group look live, and a short leaf borrowed the `planned` flag
-   * of the entry after it. The tree is the data the rail actually renders, so
-   * asking it is both simpler and the thing under test.
+   * directions: a comment long enough to push a flag out of the window made a
+   * group look live, and a short leaf borrowed the flag of the entry after it.
+   * The tree is the data the rail actually renders, so asking it is both simpler
+   * and the thing under test.
    */
   const LEAVES = NAV_TREE.flatMap((group) => [
     // A childless group is itself a destination.
-    ...(group.leaves.length === 0 ? [{ to: group.to ?? '/', planned: !!group.planned }] : []),
-    ...group.leaves.map((leaf) => ({ to: leaf.to, planned: !!leaf.planned })),
+    ...(group.leaves.length === 0 ? [{ to: group.to ?? '/' }] : []),
+    ...group.leaves.map((leaf) => ({ to: leaf.to })),
   ]);
 
+  /*
+    MODULES THIS BUILD DOES NOT IMPLEMENT AS FIRM-WIDE SCREENS.
+
+    Written down because the nav must not list them, and because the reason is
+    not obvious from a missing row. Hearings, deadlines, documents, parties,
+    conflicts, judgments, time, expenses and billing ARE implemented — inside a
+    matter, on its workspace tabs. Contracts, POA, messages, licences, training
+    and complaints are implemented nowhere.
+  */
+  const NOT_FIRM_SCREENS = [
+    '/hearings', '/deadlines', '/documents', '/contracts', '/poa',
+    '/billing', '/time', '/expenses', '/collections',
+    '/conflicts', '/licences', '/training', '/complaints',
+    '/messages', '/tasks', '/calendar', '/notifications', '/admin/teams',
+  ];
+
   it('finds the nav leaves it is meant to be checking', () => {
-    expect(LEAVES.length).toBeGreaterThan(20);
+    // The rail is small on purpose. A floor rather than a range, so adding a
+    // module cannot fail this test and removing one silently can.
+    expect(LEAVES.length).toBeGreaterThanOrEqual(5);
     expect(ROUTED.size).toBeGreaterThan(4);
   });
 
-  it('has a screen for every module the nav presents as reachable', () => {
-    const broken = LEAVES
-      .filter((leaf) => !leaf.planned && !ROUTED.has(leaf.to))
-      .map((leaf) => leaf.to);
-    // A non-planned leaf with no route is a link that goes nowhere, which is
-    // exactly what a member experiences as "the page does not work".
+  it('has a screen for every module the nav lists', () => {
+    const broken = LEAVES.filter((leaf) => !ROUTED.has(leaf.to)).map((leaf) => leaf.to);
+    // A leaf with no route is a link that goes nowhere, which is exactly what a
+    // member experiences as "the page does not work".
     expect(broken).toEqual([]);
   });
 
-  it('does not mark a module planned that the app can actually render', () => {
-    const needlessly = LEAVES
-      .filter((leaf) => leaf.planned && ROUTED.has(leaf.to))
-      .map((leaf) => leaf.to);
-    // The opposite drift: a working screen hidden behind an "in development"
-    // badge, which reads as a missing feature and is worse than the dead link.
-    expect(needlessly).toEqual([]);
+  it('does not list a module the firm has not built', () => {
+    const listed = new Set(LEAVES.map((leaf) => leaf.to));
+    const offered = NOT_FIRM_SCREENS.filter((p) => listed.has(p));
+    /*
+      THIS IS THE PHASE-24 POLICY, PINNED. A member who signs in must not be
+      offered a module that cannot open: not greyed, not inert, not present.
+      Seventeen of these were rendering as dead rows on the live app.
+    */
+    expect(offered).toEqual([]);
+  });
+
+  it('does not offer a module the matter workspace is where you find', () => {
+    // The three tabs that replaced a rail row are on the matter, not the rail.
+    for (const tabPath of ['/parties', '/judgments']) {
+      expect(LEAVES.some((leaf) => leaf.to === tabPath), tabPath).toBe(false);
+    }
   });
 });

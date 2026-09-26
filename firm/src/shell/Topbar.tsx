@@ -406,9 +406,11 @@ function MobileModuleList({ onNavigate, permissions }: { onNavigate: (to: string
       {nav.groups.map(({ group, leaves }) => {
         // Standalone groups (dashboard, matters, clients, messages) render as a
         // single tile rather than an empty heading with nothing under it.
+        // Standalone groups render as one tile; groups with leaves render their
+        // leaves. Every tile routes — nav.ts lists nothing unbuilt.
         const tiles = group.to
-          ? [{ id: group.id, to: group.to, labelKey: group.labelKey, icon: group.icon, planned: false }]
-          : leaves.map((l) => ({ id: l.id, to: l.to, labelKey: l.labelKey, icon: l.icon, planned: !!l.planned }));
+          ? [{ id: group.id, to: group.to, labelKey: group.labelKey, icon: group.icon }]
+          : leaves.map((l) => ({ id: l.id, to: l.to, labelKey: l.labelKey, icon: l.icon }));
 
         if (tiles.length === 0) return null;
 
@@ -421,9 +423,7 @@ function MobileModuleList({ onNavigate, permissions }: { onNavigate: (to: string
                   key={tile.id}
                   type="button"
                   className="kgm-morelist__item"
-                  data-planned={tile.planned || undefined}
-                  aria-disabled={tile.planned || undefined}
-                  onClick={() => { if (!tile.planned) onNavigate(tile.to); }}
+                  onClick={() => onNavigate(tile.to)}
                 >
                   <span className="kgm-morelist__icon" aria-hidden="true"><tile.icon size={20} /></span>
                   {t(tile.labelKey)}
@@ -446,16 +446,27 @@ function MobileModuleList({ onNavigate, permissions }: { onNavigate: (to: string
             <span className="kgm-morelist__icon" aria-hidden="true"><IconLogout size={20} /></span>
             {t('auth.signOut')}
           </button>
-          <button
-            type="button"
-            className="kgm-morelist__item"
-            onClick={() => onNavigate('/admin/users')}
-            aria-disabled={!permissions.has('users.read') || undefined}
-            data-planned={!permissions.has('users.read') || undefined}
-          >
-            <span className="kgm-morelist__icon" aria-hidden="true"><IconUsers size={20} /></span>
-            {t('nav.users')}
-          </button>
+          {/*
+            USERS IS OFFERED TO THE MEMBERS WHO CAN OPEN IT, AND TO NOBODY ELSE.
+
+            This tile used to render for every member with `aria-disabled` and the
+            `data-planned` marker when they lacked `users.read` — an inert row in
+            the sheet, which is the exact defect this phase removed from the rail,
+            surviving in the one surface the rail audit did not cover. It is now
+            ABSENT, and `visibleNav` is what decides: a member who holds the code
+            also has `/admin/users` in their allowed paths, so this cannot offer a
+            destination the guard would then refuse.
+          */}
+          {permissions.has('users.read') && (
+            <button
+              type="button"
+              className="kgm-morelist__item"
+              onClick={() => onNavigate('/admin/users')}
+            >
+              <span className="kgm-morelist__icon" aria-hidden="true"><IconUsers size={20} /></span>
+              {t('nav.users')}
+            </button>
+          )}
         </div>
       </div>
     </div>

@@ -34,7 +34,7 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   AccessBadge, Alert, Badge, Button, Card, CardBody, CardHeader, EmptyState,
   IconChevronBack, IconEdit, IconLock, IconRestricted, IconTime, PageSkeleton,
-  StatusChip, useFmt, useI18n,
+  Skeleton, StatusChip, useFmt, useI18n,
 } from '@kgm/ui';
 import { useFirmSession } from '../auth/FirmSession.js';
 import { firmApi, FirmApiError, type MatterDetail } from '../api/firm.js';
@@ -52,6 +52,14 @@ const NEVER_ON_THE_WIRE: ReadonlySet<string> = new Set([
   'tenantId', 'storageKey', 'storageBucket', 'storedFilename',
 ]);
 import { MatterTabs, type MatterTabId } from '../components/MatterTabs.js';
+import {
+  MatterDeadlinesPanel, MatterDocumentsPanel, MatterHearingsPanel,
+  MatterTeamPanel, MatterTimelinePanel,
+} from './matter/Panels.js';
+import {
+  MatterBillingPanel, MatterConflictsPanel, MatterJudgmentsPanel, MatterPartiesPanel,
+} from './matter/Registers.js';
+import type { MatterTimelineRow } from '../api/firm.js';
 import '../shell/shell.css';
 
 interface MatterWorkspaceProps {
@@ -381,29 +389,92 @@ export function MatterWorkspace({ matterId, onNavigate }: MatterWorkspaceProps) 
               </CardBody>
             </Card>
 
+            {/*
+              THE OVERVIEW'S TIMELINE CARD SHOWS THE LAST FEW ENTRIES AND POINTS AT
+              THE TAB. It used to render an empty state on the theory that the
+              timeline was not built; it is built now, and an overview that shows
+              "nothing here" while a populated Timeline tab sits one click away is
+              the exact defect this phase removes.
+            */}
             <Card variant="default">
-              <CardHeader title={t('timeline.title')} icon={<IconTime size={15} />} />
+              <CardHeader
+                title={t('timeline.title')}
+                icon={<IconTime size={15} />}
+                action={<Badge tone="neutral" size="xs">{t('common.recent')}</Badge>}
+              />
               <CardBody>
-                <EmptyState kind="empty" title={t('timeline.empty')} compact branded={false} />
+                <OverviewTimeline matterId={matterId} onOpenAll={() => setTab('timeline')} />
               </CardBody>
             </Card>
           </div>
         </div>
       )}
 
-      {tab !== 'overview' && (
-        <Card variant="default">
-          <CardBody>
-            <EmptyState
-              kind="empty"
-              title={t(`tab.${tab}`)}
-              description={t('nav.planned')}
-              compact
-            />
-          </CardBody>
-        </Card>
+      {/*
+        ── THE TAB BODIES ───────────────────────────────────────────────────────
+
+        One panel per tab, mounted only while its tab is the active one. The tab
+        strip has already filtered by permission ∩ access level, so reaching this
+        switch means this member may open this material; the panel's own endpoint
+        checks that again on the server, because the strip is a courtesy and the
+        server is the rule (§50).
+      */}
+      {tab === 'timeline' && <MatterTimelinePanel matterId={matterId} />}
+      {tab === 'team' && <MatterTeamPanel matterId={matterId} />}
+      {tab === 'documents' && <MatterDocumentsPanel matterId={matterId} />}
+      {tab === 'hearings' && <MatterHearingsPanel matterId={matterId} />}
+      {tab === 'deadlines' && <MatterDeadlinesPanel matterId={matterId} />}
+      {tab === 'parties' && <MatterPartiesPanel matterId={matterId} />}
+      {tab === 'conflicts' && <MatterConflictsPanel matterId={matterId} />}
+      {tab === 'judgments' && <MatterJudgmentsPanel matterId={matterId} />}
+      {tab === 'billing' && <MatterBillingPanel matterId={matterId} />}
+      {(tab === 'time' || tab === 'expenses') && (
+        <MatterBillingPanel matterId={matterId} />
       )}
     </div>
+  );
+}
+
+/**
+ * The overview's three most recent entries.
+ *
+ * A small, separately-loading read: if it fails the overview is still a usable
+ * screen, which is why a failure here renders a quiet line and not a panel-wide
+ * error state.
+ */
+function OverviewTimeline({ matterId, onOpenAll }: { matterId: string; onOpenAll: () => void }) {
+  const { t, pick } = useI18n();
+  const fmt = useFmt();
+  const [rows, setRows] = useState<MatterTimelineRow[] | null>(null);
+  useEffect(() => {
+    let alive = true;
+    firmApi.matterTimeline(matterId)
+      .then((d) => { if (alive) setRows(d.timeline.slice(0, 3)); })
+      .catch(() => { if (alive) setRows([]); });
+    return () => { alive = false; };
+  }, [matterId]);
+
+  if (rows === null) return <Skeleton height={54} variant="rect" />;
+  if (rows.length === 0) {
+    return <EmptyState kind="empty" title={t('timeline.empty')} compact branded={false} />;
+  }
+  return (
+    <ul className="firm-list firm-list--compact">
+      {rows.map((e) => (
+        <li className="firm-timeline__item" key={e.id}>
+          <span className={`firm-timeline__dot firm-timeline__dot--${e.status}`} aria-hidden="true" />
+          <span className="firm-timeline__body">
+            <span className="firm-timeline__title">{pick(e.titleAr, e.title)}</span>
+            <span className="firm-timeline__when">{fmt.dateTime(e.occurredAt)}</span>
+          </span>
+        </li>
+      ))}
+      <li className="firm-list__more">
+        <button type="button" className="kgm-linkbtn" onClick={onOpenAll}>
+          {t('panel.seeAll')}
+        </button>
+      </li>
+    </ul>
   );
 }
 

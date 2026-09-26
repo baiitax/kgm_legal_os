@@ -39,8 +39,8 @@ import {
   attachFirmPrincipal, requireFirm, firmCsrfGuard, ensureFirmCsrf, requireFirmMfa,
 } from '../auth/firm-middleware.js';
 import {
-  MATTER_READ, MATTER_WRITE, MATTER_MANAGE, MATTER_FINANCIAL, ACCESS_LEVELS,
-  type AccessLevel,
+  MATTER_READ, MATTER_WRITE, MATTER_MANAGE, MATTER_FINANCIAL, MATTER_OPERATE,
+  ACCESS_LEVELS, type AccessLevel,
 } from '../domain/permissions.js';
 import { projectMatter, projectMatterList } from '../domain/classification.js';
 import {
@@ -450,6 +450,177 @@ export function firmRouter(c: Container): Router {
         they cannot interpret. Nothing here decides access — the server already did.
       */
       privilege: { inRing: p.ring.inRing, reason: p.ring.reason },
+    });
+  }));
+
+  /*
+    ── THE DASHBOARD'S NUMBERS ─────────────────────────────────────────────────
+
+    Four counts, each gated by the permission of the CARD that shows it — not by
+    one umbrella check. A member with `hearings.read` and nothing else gets their
+    hearings count and null for the rest; a finance officer gets the money and
+    null for the legal work. Returning zeros instead would be worse than useless:
+    a zero is a measurement, and "0 overdue" that means "you may not see" is the
+    kind of lie this codebase spends its comments preventing.
+
+    `null` is therefore a first-class answer here, and the dashboard renders it as
+    an absent card rather than as a number.
+  */
+  r.get('/dashboard/summary', ah(async (req, res) => {
+    const p = principal(req);
+    const wantsLegal =
+      p.permissions.has('hearings.read') || p.permissions.has('deadlines.read');
+    const wantsDocs = p.permissions.has('documents.read');
+    const wantsMoney = p.permissions.has('billing.read') || p.permissions.has('billing.read_all');
+    if (!wantsLegal && !wantsDocs && !wantsMoney) {
+      /* A member who may see none of it is told so rather than served zeroes. */
+      ok(res, { hearingsUpcoming: null, deadlinesThisWeek: null, documentsRequested: null, outstanding: null });
+      return;
+    }
+
+    const counts = await c.firm.dashboardCounts(p.tenantId, new Date());
+    ok(res, {
+      hearingsUpcoming: p.permissions.has('hearings.read') ? counts.hearingsUpcoming : null,
+      deadlinesThisWeek: p.permissions.has('deadlines.read') ? counts.deadlinesThisWeek : null,
+      documentsRequested: wantsDocs ? counts.documentsRequested : null,
+      outstanding: wantsMoney
+        ? { amountSar: counts.outstandingSar, openInvoiceCount: counts.openInvoiceCount }
+        : null,
+      /* The screen needs to know which silence is which: `withheld` is a decision
+         the firm made, `none` is a member this dashboard has nothing for. */
+      withheld: [!p.permissions.has('hearings.read') ? 'hearings' : null,
+                 !p.permissions.has('deadlines.read') ? 'deadlines' : null,
+                 !wantsDocs ? 'documents' : null,
+                 !wantsMoney ? 'billing' : null].filter(Boolean),
+    });
+  }));
+
+  /*
+    ── THE MATTER WORKSPACE'S TAB BODIES ──────────────────────────────────────
+
+    Five reads, one per tab that now has a screen. They are separate endpoints
+    rather than one fat `/matters/:id` because that is what the tab strip means:
+    opening a matter should not send the firm's entire file, and a member reading
+    the Documents tab should not be served the conflict register.
+
+    THE TWO GATES ARE THE SAME TWO THE DETAIL ROUTE USES, in the same order, and
+    they are named here rather than implied:
+
+      1. `assertCan(p, <module code>)` — is this module part of the member's grant
+         at all? A fee-earner with `matters.read` but no `documents.read` passes
+         the matter check and fails this one.
+      2. `requireMatter(p, id, <acceptance set>)` — may they open THIS matter, at
+         an access level that carries this material? A finance officer holding
+         `view` on a litigation matter fails here on documents and passes on
+         billing, which is the whole point of two gates rather than one.
+
+    A tab hidden by §50 is therefore hidden TWICE over: the strip filters it from
+    `permissions` + `accessLevel` on the client, and the route refuses it with the
+    server's own verdict. The client's copy of the rule is a courtesy that saves a
+    request; the server's is the rule.
+  */
+
+  /** Documents filed against the matter. Privileged material needs the ring. */
+  r.get('/matters/:id/documents', ah(async (req, res) => {
+    const p = principal(req);
+    const matterId = String(req.params.id);
+    c.permissions.assertCan(p, 'documents.read', { type: 'matter', id: matterId });
+    await c.permissions.requireMatter(p, matterId, MATTER_OPERATE);
+
+    const documents = await c.firm.listMatterDocuments(p.tenantId, matterId, { inRing: p.ring.inRing });
+
+    /*
+      WITHHELD MATERIAL IS COUNTED, NOT ERASED — and the count is fetched, not
+      derived from the list, because the list no longer contains the rows. On
+      PostgreSQL the database withheld them before the application saw anything;
+      on the demo engine the same predicate ran inside the statement. Either way
+      the panel can say "one document is restricted to licensed lawyers" rather
+      than showing a shorter file and letting the member conclude the firm lost
+      it. That is §57's discipline applied to a document list: a reader should
+      learn that material exists and that access is the reason they cannot read
+      it.
+
+      ONLY ASKED WHEN THE ANSWER CAN BE NON-ZERO. A member in the ring is shown the
+      documents themselves, so the question is not put to the database at all —
+      one fewer definer call on the common path, and one fewer audit trail that
+      records a question nobody needed answered.
+    */
+    const withheldCount = p.ring.inRing
+      ? 0
+      : await c.firm.countMatterPrivilegedDocuments(p.tenantId, matterId);
+
+    ok(res, {
+      matterId,
+      count: documents.length,
+      withheldCount,
+      privilege: { inRing: p.ring.inRing, reason: p.ring.reason },
+      documents,
+    });
+  }));
+
+  /** The matter's hearings, with the court's own calendar weekend in force. */
+  r.get('/matters/:id/hearings', ah(async (req, res) => {
+    const p = principal(req);
+    const matterId = String(req.params.id);
+    c.permissions.assertCan(p, 'hearings.read', { type: 'matter', id: matterId });
+    await c.permissions.requireMatter(p, matterId, MATTER_OPERATE);
+    const hearings = await c.firm.listMatterHearings(p.tenantId, matterId);
+    const now = Date.now();
+    ok(res, {
+      matterId,
+      count: hearings.length,
+      /* Split by the clock rather than left to the client: two screens computing
+         "upcoming" from their own clocks disagree at midnight, and this one is
+         the same rule the reminder job would use. */
+      upcoming: hearings.filter((h) => Date.parse(String(h.scheduledAt)) >= now),
+      past: hearings.filter((h) => Date.parse(String(h.scheduledAt)) < now),
+    });
+  }));
+
+  /** The matter's deadlines, soonest first, with what is overdue made explicit. */
+  r.get('/matters/:id/deadlines', ah(async (req, res) => {
+    const p = principal(req);
+    const matterId = String(req.params.id);
+    c.permissions.assertCan(p, 'deadlines.read', { type: 'matter', id: matterId });
+    await c.permissions.requireMatter(p, matterId, MATTER_OPERATE);
+    const deadlines = await c.firm.listMatterDeadlines(p.tenantId, matterId);
+    const now = Date.now();
+    const open = (d: { internalStatus: string }) => !['done', 'cancelled', 'missed'].includes(d.internalStatus);
+    ok(res, {
+      matterId,
+      count: deadlines.length,
+      deadlines: deadlines.map((d) => ({
+        ...d,
+        overdue: open(d) && Date.parse(String(d.dueAt)) < now,
+      })),
+    });
+  }));
+
+  /** What happened on this matter, newest first. */
+  r.get('/matters/:id/timeline', ah(async (req, res) => {
+    const p = principal(req);
+    const matterId = String(req.params.id);
+    c.permissions.assertCan(p, 'matters.read', { type: 'matter', id: matterId });
+    await c.permissions.requireMatter(p, matterId, MATTER_READ);
+    const timeline = await c.firm.listMatterTimeline(p.tenantId, matterId);
+    ok(res, { matterId, count: timeline.length, timeline });
+  }));
+
+  /** Who is on the matter, and at what role — the fact the access level came from. */
+  r.get('/matters/:id/team', ah(async (req, res) => {
+    const p = principal(req);
+    const matterId = String(req.params.id);
+    c.permissions.assertCan(p, 'matters.read', { type: 'matter', id: matterId });
+    await c.permissions.requireMatter(p, matterId, MATTER_READ);
+    const team = await c.firm.listMatterTeam(p.tenantId, matterId);
+    const { level } = await c.permissions.requireMatter(p, matterId, MATTER_READ);
+    ok(res, {
+      matterId,
+      count: team.length,
+      /* The viewer's own level, so the tab can say which of these rows is them and
+         why their name may or may not appear. */
+      yourAccessLevel: level,
+      team,
     });
   }));
 

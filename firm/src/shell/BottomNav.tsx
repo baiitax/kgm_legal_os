@@ -107,11 +107,13 @@ const SLOT_PRIORITY: readonly string[] = [
 const PERSONA_PRIORITY: ReadonlyArray<{ readonly match: readonly string[]; readonly order: readonly string[] }> = [
   {
     /*
-      Each order names the modules that family leads with — today's built ones
-      and the planned ones — and the bar simply cannot see the planned half yet,
-      because a planned module is not a destination. So the difference a member
-      feels today is the order of the modules that DO exist, and that is the
-      difference that matters: it is the first screen they open.
+      Each order names the modules that family leads with, most-preferred first.
+      A name that does not exist in the visible nav — because the module is not
+      built, or the member lacks the permission — is simply not there to match,
+      and the family falls through to the next preference. That is why these
+      orders can name modules this build does not have: the list is a statement
+      of what each family reaches for, and the nav is the statement of what they
+      may reach.
     */
     match: ['FINANCE', 'BILLING_OFFICER', 'ACCOUNTANT'],
     order: ['billing', 'collections', 'time', 'expenses', 'clients', 'matters', 'mywork', 'documents'],
@@ -246,14 +248,10 @@ export function BottomNav({ path, onNavigate, onOpenMore, badges }: BottomNavPro
           labelKey: group.labelKey,
           icon: group.icon,
           permissions: group.permissions,
-          planned: false,
         });
         continue;
       }
-      for (const leaf of leaves) {
-        if (leaf.planned) continue; // A planned module is not a destination.
-        items.push(leaf);
-      }
+      for (const leaf of leaves) items.push(leaf);
     }
     return items.filter((i) => i.id !== 'dashboard').sort((a, b) => rankIn(order, a.id) - rankIn(order, b.id));
   }, [nav, order]);

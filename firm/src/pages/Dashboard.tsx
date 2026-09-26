@@ -33,7 +33,7 @@ import {
   IconRestricted, MetricCard, MetricSkeleton, PageSkeleton, useFmt, useI18n,
 } from '@kgm/ui';
 import { useFirmSession } from '../auth/FirmSession.js';
-import { firmApi, FirmApiError, type MatterListResponse } from '../api/firm.js';
+import { firmApi, FirmApiError, type DashboardSummary, type MatterListResponse } from '../api/firm.js';
 import { MatterRow } from '../components/MatterRow.js';
 import '../shell/shell.css';
 
@@ -51,9 +51,31 @@ export function Dashboard({ onNavigate }: DashboardProps) {
 
   const [data, setData] = useState<MatterListResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  /*
+    The four numbers that used to be em dashes. Fetched separately from the matter
+    list because they are a different question — the list is "my files", this is
+    "my load" — and because a member who may not read one of them must still get
+    the dashboard: the endpoint answers `null` per metric and the card is simply
+    absent, rather than the whole screen failing.
+  */
+  const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [error, setError] = useState<FirmApiError | null>(null);
 
   const name = lang === 'ar' && displayNameAr ? displayNameAr : displayName;
+
+  /*
+    The dashboard's own load. Two requests, one screen: the numbers first so the
+    cards fill in, then the matter list the page is built around. They are issued
+    together and settle independently — a summary the member may not read (403 for
+    a member with no metric permissions at all) leaves the rest of the page whole.
+  */
+  useEffect(() => {
+    let cancelled = false;
+    firmApi.dashboardSummary()
+      .then((res) => { if (!cancelled) setSummary(res); })
+      .catch(() => { if (!cancelled) setSummary(null); });
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -168,47 +190,55 @@ export function Dashboard({ onNavigate }: DashboardProps) {
             />
           )}
 
-          {canAny(['hearings.read', 'hearings.manage']) && (
+          {/*
+            THE LEGAL LOAD. Each card requires its permission AND a number from the
+            server: a member whose permission is present but whose access is
+            narrower than the query sees `null` and is shown no card at all — an
+            absent card is honest, a zero that means "not yours to see" is not.
+          */}
+          {canAny(['hearings.read', 'hearings.manage']) && summary?.hearingsUpcoming != null && (
             <MetricCard
               index={1}
               label={t('dash.pendingHearings')}
-              // No hearings endpoint is wired yet, so this renders the count the
-              // member is authorized to see rather than a fabricated number.
-              value="—"
+              value={fmt.numberLatin(summary.hearingsUpcoming)}
               icon={<IconCalendar size={18} />}
-              note={t('nav.planned')}
+              note={t('dash.acrossMatters')}
+              onClick={() => onNavigate('/matters')}
             />
           )}
 
-          {canAny(['billing.read', 'billing.read_all']) && (
+          {canAny(['billing.read', 'billing.read_all']) && summary?.outstanding && (
             <MetricCard
               index={2}
               label={t('dash.outstanding')}
-              value="—"
+              value={fmt.numberLatin(summary.outstanding.amountSar)}
               unit={fmt.currencyCode()}
               icon={<IconBilling size={18} />}
-              note={t('nav.planned')}
+              note={t('dash.openInvoices', { n: fmt.numberLatin(summary.outstanding.openInvoiceCount) })}
+              onClick={() => onNavigate('/matters')}
               executive
             />
           )}
 
-          {canAny(['deadlines.read', 'deadlines.manage']) && (
+          {canAny(['deadlines.read', 'deadlines.manage']) && summary?.deadlinesThisWeek != null && (
             <MetricCard
               index={3}
               label={t('dash.deadlinesThisWeek')}
-              value="—"
+              value={fmt.numberLatin(summary.deadlinesThisWeek)}
               icon={<IconDeadlines size={18} />}
-              note={t('nav.planned')}
+              note={t('dash.nextSevenDays')}
+              onClick={() => onNavigate('/matters')}
             />
           )}
 
-          {can('documents.read') && (
+          {can('documents.read') && summary?.documentsRequested != null && (
             <MetricCard
               index={4}
               label={t('dash.documentsPending')}
-              value="—"
+              value={fmt.numberLatin(summary.documentsRequested)}
               icon={<IconDocuments size={18} />}
-              note={t('nav.planned')}
+              note={t('dash.awaitingClient')}
+              onClick={() => onNavigate('/matters')}
             />
           )}
 

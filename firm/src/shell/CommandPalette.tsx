@@ -119,7 +119,6 @@ export function CommandPalette({ open, onClose, onNavigate }: CommandPaletteProp
         out.push({ id: `nav:${group.id}`, kind: 'nav', title: t(group.labelKey), meta: '', to: group.to });
       }
       for (const leaf of leaves) {
-        if (leaf.planned) continue;
         out.push({ id: `nav:${leaf.id}`, kind: 'nav', title: t(leaf.labelKey), meta: t(group.labelKey), to: leaf.to });
       }
     }

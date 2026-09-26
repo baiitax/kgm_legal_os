@@ -231,30 +231,17 @@ interface RailGroupProps {
 function RailGroup({ group, leaves, collapsed, path, labelId, onNavigate }: RailGroupProps) {
   const { t } = useI18n();
   const Icon = group.icon;
-  // Split, not filtered: every leaf still renders, and within each half the
-  // tree's own order is preserved.
-  const built = leaves.filter((l) => !l.planned);
-  const planned = leaves.filter((l) => l.planned);
 
   // A group with no children routes directly.
   if (group.to) {
-    /*
-      A planned group reuses the same RailLink inert path a planned leaf takes,
-      rather than growing a second rendering of "unavailable". Its path was
-      deliberately kept out of allowedPaths in nav.ts, so an active link here
-      would hand the router a route the guard then rejects — the member clicks a
-      module the interface just offered and lands on Denied.
-    */
-    const active = !group.planned && isPathAllowed(new Set([group.to]), path);
     return (
       <div className="kgm-rail__group" role="group" aria-label={t(group.labelKey)}>
         <RailLink
           to={group.to}
           label={t(group.labelKey)}
           icon={<Icon size={18} />}
-          active={active}
+          active={isPathAllowed(new Set([group.to]), path)}
           collapsed={collapsed}
-          planned={group.planned}
           onNavigate={onNavigate}
         />
       </div>
@@ -281,16 +268,18 @@ function RailGroup({ group, leaves, collapsed, path, labelId, onNavigate }: Rail
       </p>
 
       /*
-        BUILT FIRST, THEN WHAT IS COMING.
+        EVERY ROW IN THIS LIST IS A DESTINATION.
 
-        Most of this tree is `planned` — Legal, Finance and Compliance are
-        entirely so — and interleaving them with the four modules that work made
-        the rail read as a product that is mostly broken. The split costs
-        nothing: nothing is hidden and nothing is re-ordered within either half,
-        so a member who knew where Audit was still finds it exactly there.
+        There used to be a split here — the modules that work, a rule, then the
+        ones that do not — because most of the tree was unbuilt and interleaving
+        them made the rail read as a product that was mostly broken. The split is
+        gone because its cause is gone: an unbuilt module is no longer listed. A
+        rail that says "in development" seventeen times is not more honest than
+        one that omits them; it is just longer, and it teaches the member that the
+        four rows which do work are equally provisional.
       */
       <ul className="kgm-rail__list">
-        {built.map((leaf) => (
+        {leaves.map((leaf) => (
           <li key={leaf.id}>
             <RailLink
               to={leaf.to}
@@ -298,25 +287,6 @@ function RailGroup({ group, leaves, collapsed, path, labelId, onNavigate }: Rail
               icon={<leaf.icon size={18} />}
               active={isPathAllowed(new Set([leaf.to]), path)}
               collapsed={collapsed}
-              planned={leaf.planned}
-              onNavigate={onNavigate}
-            />
-          </li>
-        ))}
-        {planned.length > 0 && !collapsed && (
-          <li className="kgm-rail__divider" aria-hidden="true">
-            <span>{t('nav.plannedSection')}</span>
-          </li>
-        )}
-        {planned.map((leaf) => (
-          <li key={leaf.id}>
-            <RailLink
-              to={leaf.to}
-              label={t(leaf.labelKey)}
-              icon={<leaf.icon size={18} />}
-              active={false}
-              collapsed={collapsed}
-              planned={leaf.planned}
               onNavigate={onNavigate}
             />
           </li>
@@ -332,48 +302,38 @@ interface RailLinkProps {
   readonly icon: ReactNode;
   readonly active: boolean;
   readonly collapsed: boolean;
-  readonly planned?: boolean;
   readonly onNavigate: (to: string) => void;
 }
 
-function RailLink({ to, label, icon, active, collapsed, planned, onNavigate }: RailLinkProps) {
-  const { t } = useI18n();
-  // A planned module is rendered but inert. `aria-disabled` rather than the
-  // `disabled` attribute keeps it in the tab order so a keyboard user can reach
-  // it and learn its state, instead of silently skipping a menu item.
+function RailLink({ to, label, icon, active, collapsed, onNavigate }: RailLinkProps) {
+  /*
+    A LINK THAT ALWAYS ROUTES.
+
+    There is no inert path left in this component: every row the rail renders has
+    a screen behind it, because nav.ts only lists modules that are built. The
+    `data-planned` / `aria-disabled` machinery that used to live here was correct
+    for the object it described and is deleted rather than left dormant — an
+    unused branch that renders a dead row is an invitation to reuse it.
+  */
   const link = (
     <a
       className="kgm-rail__link"
       data-active={active || undefined}
-      data-planned={planned || undefined}
       href={`#${to}`}
       aria-current={active ? 'page' : undefined}
-      aria-disabled={planned || undefined}
       onClick={(e) => {
         e.preventDefault();
-        if (planned) return;
         onNavigate(to);
       }}
     >
       <span className="kgm-rail__linkicon" aria-hidden="true">{icon}</span>
-      {!collapsed && (
-        <>
-          <span className="kgm-rail__linklabel">{label}</span>
-          {planned && <span className="kgm-rail__linkplanned" aria-hidden="true" />}
-        </>
-      )}
+      {!collapsed && <span className="kgm-rail__linklabel">{label}</span>}
     </a>
   );
 
   // Tooltip only when the label is hidden: an always-on tooltip on a visible
   // label is noise, and it would double-announce the name to screen readers.
-  if (collapsed) {
-    return (
-      <Tooltip label={planned ? `${label} — ${t('nav.planned')}` : label}>
-        {link}
-      </Tooltip>
-    );
-  }
+  if (collapsed) return <Tooltip label={label}>{link}</Tooltip>;
   return link;
 }
 

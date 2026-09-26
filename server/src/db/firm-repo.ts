@@ -1801,6 +1801,301 @@ export class FirmRepo {
     );
   }
 
+  /*
+    ── THE MATTER WORKSPACE'S OWN READS ─────────────────────────────────────────
+
+    Five lists that the workspace needs and the firm half of the repository never
+    had, because until now the workspace had one screen and a tab strip.
+
+    EVERY ONE OF THEM TAKES `tenantId` EXPLICITLY and repeats it in the WHERE
+    clause. RLS already narrows `firm_api` to the caller's tenant and to matters
+    they can see; the predicate is repeated because a repository method that
+    relies on a policy to be correct is a method that returns the whole table the
+    day the policy is dropped, and this project has already been bitten once by a
+    grant that nobody re-read.
+
+    `listMatterDocuments` additionally takes the ring verdict, and the reason is
+    §P0.5: a privileged document is not merely hidden from the CLIENT, it is
+    restricted to licensed lawyers inside the firm. Postgres enforces that with a
+    RESTRICTIVE policy on `firm_api`; SQLite has no RLS, so the same rule is
+    applied here, in the one place both dialects share. Two statements of one rule
+    is a risk this project has paid for before, so the predicate is written once
+    and the policy is left as the second net rather than the only one.
+  */
+
+  /**
+   * THE FOUR NUMBERS THE DASHBOARD WAS TOO HONEST TO INVENT.
+   *
+   * The dashboard's metric cards rendered an em dash and the words "in
+   * development" — which was true, and useless. A member opening their first
+   * screen should be shown their own load, not an apology.
+   *
+   * ONE QUERY, FOUR SCALARS, EACH BEHIND THE PERMISSION ITS CARD REQUIRES. The
+   * route decides which of these a member may see; this method computes all four
+   * because they share a single round trip, and a member who may see none of them
+   * never reaches it.
+   *
+   * EVERY PREDICATE IS WRITTEN IN THE DIALECT-NEUTRAL FORM on purpose. There is
+   * no `= 1` and no `= true` anywhere: `where requested` is valid SQLite AND valid
+   * Postgres, and this project has already lost a day to a boolean written as an
+   * integer and accepted by one driver, rejected by the other.
+   *
+   * `now` is passed in rather than taken from the database clock, so the caller
+   * can pin it in a test and so every count on the screen is measured against one
+   * instant rather than against whatever time each subquery happened to run at.
+   */
+  async dashboardCounts(tenantId: string, now: Date): Promise<{
+    hearingsUpcoming: number;
+    deadlinesThisWeek: number;
+    documentsRequested: number;
+    outstandingSar: number;
+    openInvoiceCount: number;
+  }> {
+    const iso = now.toISOString();
+    const weekAhead = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString();
+    const r = await this.q().get<Row>(
+      `select
+          (select count(*) from hearings h
+            where h.tenant_id = ?
+              and h.scheduled_at >= ?
+              and h.internal_status in ('scheduled','postponed','internal_prep')) as hearings_upcoming,
+          (select count(*) from deadlines d
+            where d.tenant_id = ?
+              and d.due_at >= ? and d.due_at < ?
+              and d.internal_status in ('open','in_progress','overdue')) as deadlines_week,
+          (select count(*) from documents doc
+            where doc.tenant_id = ?
+              and requested
+              and doc.status <> 'archived') as documents_requested,
+          (select coalesce(sum(i.total - i.amount_paid), 0) from invoices i
+            where i.tenant_id = ?
+              and i.internal_status in ('sent','partially_paid','overdue')) as outstanding,
+          (select count(*) from invoices i2
+            where i2.tenant_id = ?
+              and i2.internal_status in ('sent','partially_paid','overdue')) as open_invoices`,
+      [tenantId, iso, tenantId, iso, weekAhead, tenantId, tenantId, tenantId],
+    );
+    return {
+      hearingsUpcoming: toNumber(r?.hearings_upcoming),
+      deadlinesThisWeek: toNumber(r?.deadlines_week),
+      documentsRequested: toNumber(r?.documents_requested),
+      outstandingSar: round2(toNumber(r?.outstanding)),
+      openInvoiceCount: toNumber(r?.open_invoices),
+    };
+  }
+
+  /**
+   * Documents filed against one matter, newest first.
+   *
+   * THE RING FILTERS THE QUERY, NOT THE ANSWER. On PostgreSQL the rows never
+   * arrive — 0054's restrictive policy withholds them from `firm_api` — so an
+   * application-side filter would be a second rule that only ever ran on SQLite,
+   * which is precisely the drift (o) this project has already paid for. The
+   * predicate is therefore added to the statement itself when the caller is
+   * outside the ring, and both dialects return the same list.
+   *
+   * What the caller outside the ring loses by this is the KNOWLEDGE that material
+   * was withheld, which is a different fact and is fetched deliberately, through
+   * `countMatterPrivilegedDocuments` — a number, from a function that returns
+   * nothing else.
+   */
+  async listMatterDocuments(tenantId: string, matterId: string, opts: { inRing: boolean }) {
+    const rows = await this.q().all<Row>(
+      `select id, title, title_ar, document_type, category, origin, version,
+              mime_type, size_bytes, status, client_visibility, privilege_class,
+              requested, created_at, updated_at
+         from documents
+        where tenant_id = ? and matter_id = ?
+          ${opts.inRing ? '' : "and privilege_class = 'none'"}
+        order by created_at desc`,
+      [tenantId, matterId],
+    );
+    return rows.map((r) => ({
+      id: String(r.id),
+      title: String(r.title),
+      titleAr: r.title_ar == null ? null : String(r.title_ar),
+      documentType: String(r.document_type),
+      category: String(r.category),
+      origin: String(r.origin),
+      version: Number(r.version),
+      mimeType: String(r.mime_type),
+      sizeBytes: Number(r.size_bytes),
+      status: String(r.status),
+      clientVisibility: String(r.client_visibility),
+      privilegeClass: String(r.privilege_class ?? 'none'),
+      requested: Boolean(r.requested),
+      createdAt: toIso(r.created_at),
+      updatedAt: toIso(r.updated_at),
+    }));
+  }
+
+  /**
+   * P0.5/task-24 · HOW MUCH WAS WITHHELD, WITHOUT SAYING WHICH.
+   *
+   * The count a panel needs to say "one document is restricted to licensed
+   * lawyers" instead of rendering a list that is short for a reason the reader
+   * cannot see. It is the ONLY read of privileged documents available to a member
+   * outside the ring, it returns an integer, and on PostgreSQL it goes through the
+   * `security definer` function added by 0057 because the rows themselves are
+   * unreachable from the application role.
+   *
+   * The dialect asymmetry is the documented one this repository already carries for
+   * `readMatterPrivilege`: the demo engine has no RLS, so the same predicate is
+   * written here as a plain count. Both must produce the same number, and the
+   * suite asserts the number rather than the mechanism.
+   */
+  async countMatterPrivilegedDocuments(tenantId: string, matterId: string): Promise<number> {
+    if (this.db.driver === 'postgres') {
+      const r = await this.q().get<Row>(
+        `select public.firm_count_matter_privileged_documents(?) as n`,
+        [matterId],
+      );
+      return toNumber(r?.n);
+    }
+    const r = await this.q().get<Row>(
+      `select count(*) as n from documents
+        where tenant_id = ? and matter_id = ? and privilege_class <> 'none'`,
+      [tenantId, matterId],
+    );
+    return toNumber(r?.n);
+  }
+
+  /** The matter's hearings, soonest first. */
+  async listMatterHearings(tenantId: string, matterId: string) {
+    const rows = await this.q().all<Row>(
+      `select id, scheduled_at, ends_at, court, court_ar, hearing_type, location,
+              location_ar, is_remote, remote_platform, internal_status, client_status,
+              client_visible, instructions, instructions_ar
+         from hearings
+        where tenant_id = ? and matter_id = ?
+        order by scheduled_at`,
+      [tenantId, matterId],
+    );
+    return rows.map((r) => ({
+      id: String(r.id),
+      scheduledAt: toIso(r.scheduled_at),
+      endsAt: r.ends_at == null ? null : toIso(r.ends_at),
+      court: String(r.court),
+      courtAr: r.court_ar == null ? null : String(r.court_ar),
+      hearingType: String(r.hearing_type),
+      location: r.location == null ? null : String(r.location),
+      locationAr: r.location_ar == null ? null : String(r.location_ar),
+      isRemote: Boolean(r.is_remote),
+      remotePlatform: r.remote_platform == null ? null : String(r.remote_platform),
+      internalStatus: String(r.internal_status),
+      clientStatus: String(r.client_status),
+      clientVisible: Boolean(r.client_visible),
+      instructions: r.instructions == null ? null : String(r.instructions),
+      instructionsAr: r.instructions_ar == null ? null : String(r.instructions_ar),
+    }));
+  }
+
+  /**
+   * The matter's deadlines, soonest first.
+   *
+   * `kind` rides along because a portal deadline (a client action) and an internal
+   * task are different work, and a tab that mixes them without saying so makes the
+   * list unreadable.
+   */
+  async listMatterDeadlines(tenantId: string, matterId: string) {
+    const rows = await this.q().all<Row>(
+      `select id, kind, title, title_ar, description, description_ar, due_at, priority,
+              internal_status, client_status, client_visible, assigned_staff_id,
+              rule_cited, rule_code, rule_days, source_kind
+         from deadlines
+        where tenant_id = ? and matter_id = ?
+        order by due_at`,
+      [tenantId, matterId],
+    );
+    return rows.map((r) => ({
+      id: String(r.id),
+      kind: String(r.kind),
+      title: String(r.title),
+      titleAr: r.title_ar == null ? null : String(r.title_ar),
+      description: r.description == null ? null : String(r.description),
+      descriptionAr: r.description_ar == null ? null : String(r.description_ar),
+      dueAt: toIso(r.due_at),
+      priority: String(r.priority),
+      internalStatus: String(r.internal_status),
+      clientStatus: String(r.client_status),
+      clientVisible: Boolean(r.client_visible),
+      assignedStaffId: r.assigned_staff_id == null ? null : String(r.assigned_staff_id),
+      ruleCited: r.rule_cited == null ? null : String(r.rule_cited),
+      ruleCode: r.rule_code == null ? null : String(r.rule_code),
+      ruleDays: r.rule_days == null ? null : Number(r.rule_days),
+      sourceKind: r.source_kind == null ? null : String(r.source_kind),
+    }));
+  }
+
+  /**
+   * The matter's own record of what happened, newest first.
+   *
+   * This is the table P0.4's judgment routes append to, which is what makes it a
+   * record rather than decoration: the entries are written by the transactions
+   * that changed something, not by a screen that was opened.
+   */
+  async listMatterTimeline(tenantId: string, matterId: string, limit = 200) {
+    const rows = await this.q().all<Row>(
+      `select id, occurred_at, event_type, title, title_ar, description, description_ar,
+              status, client_visible, created_by_staff, created_at
+         from matter_timeline
+        where tenant_id = ? and matter_id = ?
+        order by occurred_at desc
+        limit ?`,
+      [tenantId, matterId, limit],
+    );
+    return rows.map((r) => ({
+      id: String(r.id),
+      occurredAt: toIso(r.occurred_at),
+      eventType: String(r.event_type),
+      title: String(r.title),
+      titleAr: r.title_ar == null ? null : String(r.title_ar),
+      description: r.description == null ? null : String(r.description),
+      descriptionAr: r.description_ar == null ? null : String(r.description_ar),
+      status: String(r.status),
+      clientVisible: Boolean(r.client_visible),
+      createdByStaffId: r.created_by_staff == null ? null : String(r.created_by_staff),
+    }));
+  }
+
+  /**
+   * Who is on the matter, with their name and their role ON THIS MATTER.
+   *
+   * `matter_role` is the per-matter role (lead, supervising, paralegal…) that
+   * `teamRoleToLevel` turns into an access level, so the tab is showing the reader
+   * the same fact the authorization system used to decide what they may open.
+   */
+  async listMatterTeam(tenantId: string, matterId: string) {
+    const rows = await this.q().all<Row>(
+      /*
+        `staff` carries `internal_role` and the CLIENT-FACING title pair, not a job
+        title: the firm's own vocabulary for a person and the vocabulary a client is
+        shown are different columns on purpose, and this list shows the internal
+        role with the client-facing label beside it so a member can see both.
+      */
+      `select mt.id, mt.staff_id, mt.matter_role, mt.is_active, mt.client_visible,
+              mt.client_role_label, mt.client_role_label_ar, mt.created_at,
+              s.full_name, s.full_name_ar, s.internal_role, s.bar_number
+         from matter_team mt
+         join staff s on s.id = mt.staff_id
+        where mt.tenant_id = ? and mt.matter_id = ? and mt.is_active = ?
+        order by mt.created_at`,
+      [tenantId, matterId, 1],
+    );
+    return rows.map((r) => ({
+      id: String(r.id),
+      staffId: String(r.staff_id),
+      matterRole: String(r.matter_role),
+      clientVisible: Boolean(r.client_visible),
+      clientRoleLabel: r.client_role_label == null ? null : String(r.client_role_label),
+      clientRoleLabelAr: r.client_role_label_ar == null ? null : String(r.client_role_label_ar),
+      name: String(r.full_name),
+      nameAr: r.full_name_ar == null ? null : String(r.full_name_ar),
+      internalRole: String(r.internal_role),
+      barNumber: r.bar_number == null ? null : String(r.bar_number),
+    }));
+  }
+
   async listMatterParties(tenantId: string, matterId: string): Promise<Array<{
     id: string; partyId: string; role: string; note: string | null; createdAt: string;
     name: string; nameAr: string | null; kind: string; status: string;

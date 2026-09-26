@@ -193,26 +193,28 @@ function Routed({ basePath, onNavigate }: { basePath: string; onNavigate: (to: s
     case '/admin/settings':
       return <Settings />;
     default:
-      return <PlannedScreen onNavigate={onNavigate} />;
+      return <UnroutedScreen onNavigate={onNavigate} />;
   }
 }
 
 /**
- * A permitted path with no screen yet.
+ * A permitted path with no screen.
  *
- * The guard already confirmed the member may route here, so this is not a denial —
- * it is an unbuilt module. `denied` would tell them they lack a permission they
- * hold; `unknown` would tell them the route does not exist when it does. Saying
- * "in development" is the only honest option.
+ * THIS BRANCH SHOULD BE UNREACHABLE, and that is the point of keeping it. The
+ * guard permits a path only when `visibleNav` put it in `allowedPaths`, and
+ * `visibleNav` builds that set from the same tree the rail renders — so a path
+ * that reaches here means the tree and the route table have drifted. When they
+ * did, the old copy said "in development", which taught members to read a bug as
+ * a roadmap. It now says the route is not available and offers the dashboard.
  */
-function PlannedScreen({ onNavigate }: { onNavigate: (to: string) => void }) {
+function UnroutedScreen({ onNavigate }: { onNavigate: (to: string) => void }) {
   const { t } = useI18n();
   return (
     <div className="firm-guard">
       <div className="firm-guard__inner">
         <EmptyState
           kind="empty"
-          title={t('nav.planned')}
+          title={t('common.notFound.title')}
           description={t('common.notFound.body')}
           action={{ label: t('nav.dashboard'), onClick: () => onNavigate('/') }}
         />
@@ -265,9 +267,16 @@ function MoreSheetBody({ path, onNavigate }: { path: string; onNavigate: (to: st
       </div>
 
       {nav.groups.map(({ group, leaves }) => {
+        /*
+          ONE TILE SOURCE, AND EVERY TILE OPENS. The sheet used to carry a
+          `planned` flag per tile so the unbuilt half of the tree could render as
+          an inert grid. nav.ts no longer lists an unbuilt module, so no tile can
+          be inert — and a flag that can only ever be false is a flag somebody
+          will set to true again.
+        */
         const tiles = group.to
-          ? [{ id: group.id, to: group.to, labelKey: group.labelKey, icon: group.icon, planned: false }]
-          : leaves.map((l) => ({ id: l.id, to: l.to, labelKey: l.labelKey, icon: l.icon, planned: !!l.planned }));
+          ? [{ id: group.id, to: group.to, labelKey: group.labelKey, icon: group.icon }]
+          : leaves.map((l) => ({ id: l.id, to: l.to, labelKey: l.labelKey, icon: l.icon }));
         if (tiles.length === 0) return null;
 
         return (
@@ -279,11 +288,9 @@ function MoreSheetBody({ path, onNavigate }: { path: string; onNavigate: (to: st
                   key={tile.id}
                   type="button"
                   className="kgm-morelist__item"
-                  data-planned={tile.planned || undefined}
-                  data-active={!tile.planned && isCurrent(tile.to) ? true : undefined}
-                  aria-current={!tile.planned && isCurrent(tile.to) ? 'page' : undefined}
-                  aria-disabled={tile.planned || undefined}
-                  onClick={() => { if (!tile.planned) onNavigate(tile.to); }}
+                  data-active={isCurrent(tile.to) ? true : undefined}
+                  aria-current={isCurrent(tile.to) ? 'page' : undefined}
+                  onClick={() => onNavigate(tile.to)}
                 >
                   <span className="kgm-morelist__icon" aria-hidden="true"><tile.icon size={20} /></span>
                   {t(tile.labelKey)}

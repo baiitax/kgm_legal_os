@@ -21,6 +21,21 @@
  *   it. When an admin grants a new role to a member, the sidebar changes on the
  *   next session resolve with no code edit here.
  *
+ * WHAT DOES NOT APPEAR AT ALL
+ *   A module the firm has no system behind is ABSENT, not greyed. This file used
+ *   to carry seventeen `planned: true` leaves that rendered inert tiles, and on a
+ *   real sign-in that is what most of the rail was: seventeen rows explaining
+ *   what the product does not do. A member reads that as a product that does not
+ *   work, and they stop trusting the four rows that do. Every entry below is a
+ *   destination with a screen behind it and a server that will answer.
+ *
+ *   THAT IS A HARDER CONSTRAINT THAN IT LOOKS, and it is the right one: the rail
+ *   is a promise about what this build can do for this member, and a promise
+ *   costs nothing to make and everything to break. Modules that exist only INSIDE
+ *   a matter — hearings, deadlines, documents, parties, conflicts, judgments,
+ *   time, expenses, billing — are reached through the matter workspace's tabs,
+ *   not from the rail, because that is the only place they are implemented.
+ *
  * WHY HIDING IS NOT THE CONTROL
  *   Hiding a module is a courtesy, not a defense. Every route in this app is also
  *   guarded, and every guard re-checks against the same permission set — because
@@ -33,12 +48,8 @@
  */
 import type { ComponentType } from 'react';
 import {
-  IconAdmin, IconAudit, IconBell, IconBilling, IconCalendar, IconClients,
-  IconCollections, IconComplaints, IconCompliance, IconConflicts, IconContracts,
-  IconDashboard, IconDeadlines, IconDocuments, IconExpenses, IconHearings,
-  IconLegal, IconLicences, IconMessages, IconMatters, IconMyWork, IconPoa,
-  IconTasks, IconTeams, IconTime, IconTraining, IconUsers, IconWorkspace,
-  type IconProps,
+  IconAdmin, IconAudit, IconClients, IconDashboard, IconMatters, IconMyWork,
+  IconUsers, IconWorkspace, type IconProps,
 } from '@kgm/ui';
 
 export type Icon = ComponentType<IconProps>;
@@ -54,9 +65,6 @@ export interface NavLeaf {
    * for the dashboard, which every authenticated member has.
    */
   readonly permissions: readonly string[];
-  /** Marks a leaf that is not built yet, so it renders disabled rather than
-   *  routing to a blank page. Honest about state instead of shipping a stub. */
-  readonly planned?: boolean;
   /** Badge count source, wired later to a live endpoint. */
   readonly badgeKey?: 'notifications' | 'tasks' | 'messages';
 }
@@ -69,12 +77,6 @@ export interface NavGroup {
   readonly leaves: readonly NavLeaf[];
   /** A group with no leaves is itself a leaf in the rail. */
   readonly to?: string;
-  /**
-   * Renders inert: present in the §12 structure, claiming no access, routing
-   * nowhere. Used where a module has no permission code to gate on yet, so
-   * showing it live would promise a destination the server cannot authorize.
-   */
-  readonly planned?: boolean;
 }
 
 /**
@@ -113,9 +115,6 @@ const GROUP_DEFS: ReadonlyArray<NavGroupDef> = [
     permissions: [],
     leaves: [
       { id: 'mywork', to: '/my-work', labelKey: 'nav.myWork', icon: IconMyWork, permissions: [] },
-      { id: 'tasks', to: '/tasks', labelKey: 'nav.tasks', icon: IconTasks, permissions: ['tasks.read', 'tasks.manage'], planned: true, badgeKey: 'tasks' },
-      { id: 'calendar', to: '/calendar', labelKey: 'nav.calendar', icon: IconCalendar, permissions: ['hearings.read', 'deadlines.read', 'tasks.read'], planned: true },
-      { id: 'notifications', to: '/notifications', labelKey: 'nav.notifications', icon: IconBell, permissions: [], planned: true, badgeKey: 'notifications' },
     ],
   },
   {
@@ -139,55 +138,26 @@ const GROUP_DEFS: ReadonlyArray<NavGroupDef> = [
     permissions: ['matters.read', 'matters.read_all'],
     leaves: [],
   },
-  {
-    id: 'legal',
-    labelKey: 'nav.legal',
-    icon: IconLegal,
-    permissions: [],
-    leaves: [
-      { id: 'hearings', to: '/hearings', labelKey: 'nav.hearings', icon: IconHearings, permissions: ['hearings.read', 'hearings.manage'], planned: true },
-      { id: 'deadlines', to: '/deadlines', labelKey: 'nav.deadlines', icon: IconDeadlines, permissions: ['deadlines.read', 'deadlines.manage'], planned: true },
-      { id: 'documents', to: '/documents', labelKey: 'nav.documents', icon: IconDocuments, permissions: ['documents.read'], planned: true },
-      { id: 'contracts', to: '/contracts', labelKey: 'nav.contracts', icon: IconContracts, permissions: ['contracts.read', 'contracts.manage'], planned: true },
-      { id: 'poa', to: '/poa', labelKey: 'nav.poa', icon: IconPoa, permissions: ['poa.read', 'poa.manage'], planned: true },
-    ],
-  },
-  {
-    id: 'finance',
-    labelKey: 'nav.finance',
-    icon: IconBilling,
-    permissions: [],
-    leaves: [
-      { id: 'billing', to: '/billing', labelKey: 'nav.billing', icon: IconBilling, permissions: ['billing.read', 'billing.read_all'], planned: true },
-      { id: 'time', to: '/time', labelKey: 'nav.time', icon: IconTime, permissions: ['time.read', 'time.create'], planned: true },
-      { id: 'expenses', to: '/expenses', labelKey: 'nav.expenses', icon: IconExpenses, permissions: ['expenses.read', 'expenses.create'], planned: true },
-      { id: 'collections', to: '/collections', labelKey: 'nav.collections', icon: IconCollections, permissions: ['billing.read', 'billing.read_all', 'billing.record_payment'], planned: true },
-    ],
-  },
-  {
-    id: 'compliance',
-    labelKey: 'nav.compliance',
-    icon: IconCompliance,
-    permissions: [],
-    leaves: [
-      { id: 'conflicts', to: '/conflicts', labelKey: 'nav.conflicts', icon: IconConflicts, permissions: ['compliance.read', 'compliance.review'], planned: true },
-      { id: 'licences', to: '/licences', labelKey: 'nav.licences', icon: IconLicences, permissions: ['compliance.licences'], planned: true },
-      { id: 'training', to: '/training', labelKey: 'nav.training', icon: IconTraining, permissions: ['compliance.training'], planned: true },
-      { id: 'complaints', to: '/complaints', labelKey: 'nav.complaints', icon: IconComplaints, permissions: ['compliance.complaints'], planned: true },
-    ],
-  },
-  {
-    id: 'communication',
-    labelKey: 'nav.communication',
-    icon: IconMessages,
-    to: '/messages',
-    // No `messages.*` permission exists in the server catalogue, so there is
-    // nothing to gate this on and it cannot honestly claim the member may open
-    // it. Rendered inert until the module and its permission both exist.
-    permissions: [],
-    leaves: [],
-    planned: true,
-  },
+  /*
+    ── WHAT IS NOT HERE, AND WHY ────────────────────────────────────────────────
+
+    Three §12 groups are absent rather than empty: Legal, Finance and Compliance.
+
+      LEGAL      hearings, deadlines and documents are implemented — inside a
+                 matter, on its workspace tabs, which is where they belong.
+                 Contracts and POA are implemented nowhere.
+      FINANCE    billing, time and expenses are implemented on the matter's
+                 Billing tab (P1: terms, unbilled totals, the blockers that
+                 explain a refusal). There is no firm-wide billing screen.
+      COMPLIANCE conflict checking is implemented (P0.1) and is reached from the
+                 matter it belongs to. Licences, training and complaints have no
+                 system behind them.
+
+    An empty group is not neutral: a group with no leaves and no `to` renders as
+    a rail row that routes nowhere, which is the same lie as a greyed tile. The
+    route the member needs is on the matter they are working on, and the rail
+    says so by not pretending otherwise.
+  */
   {
     id: 'admin',
     labelKey: 'nav.admin',
@@ -195,7 +165,6 @@ const GROUP_DEFS: ReadonlyArray<NavGroupDef> = [
     permissions: [],
     leaves: [
       { id: 'users', to: '/admin/users', labelKey: 'nav.users', icon: IconUsers, permissions: ['users.read'] },
-      { id: 'teams', to: '/admin/teams', labelKey: 'nav.teams', icon: IconTeams, permissions: ['departments.manage', 'roles.read'], planned: true },
       { id: 'settings', to: '/admin/settings', labelKey: 'nav.settings', icon: IconAdmin, permissions: ['settings.read', 'settings.manage'] },
       { id: 'audit', to: '/admin/audit', labelKey: 'nav.audit', icon: IconAudit, permissions: ['audit.read'] },
     ],
@@ -217,8 +186,8 @@ export const NAV_TREE: readonly NavGroup[] = GROUP_DEFS.map((g) => ({
  * Whether one nav item is visible to a permission set.
  *
  * An EMPTY `permissions` array means visible to every authenticated member. That
- * is a deliberate exception and it is small: the dashboard, my-work,
- * notifications, clients, matters and messages. Everything else names its codes.
+ * is a deliberate exception and it is small: the dashboard and my-work.
+ * Everything else names its codes.
  */
 export function canSee(permissions: ReadonlySet<string>, required: readonly string[]): boolean {
   if (required.length === 0) return true;
@@ -256,13 +225,7 @@ export function visibleNav(permissions: readonly string[]): VisibleNav {
     if (group.leaves.length === 0) {
       // A standalone entry (dashboard, clients, matters, messages).
       if (!canSee(set, group.permissions)) continue;
-      /*
-        A planned group is shown but is NOT a permitted path. Adding its `to` to
-        allowedPaths would let the router guard pass a route that has no screen
-        and no server authorization behind it — the guard would say "allowed" and
-        the member would land on nothing.
-      */
-      if (group.to && !group.planned) allowed.add(group.to);
+      if (group.to) allowed.add(group.to);
       groups.push({ group, leaves: [] });
       continue;
     }

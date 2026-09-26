@@ -84,8 +84,18 @@ async function renderNav(permissions: readonly string[], path = '/') {
       </I18nProvider>
     </ThemeProvider>,
   );
+  /*
+    THE BAR HAS A FLOOR, NOT A FIXED WIDTH.
+
+    Five slots — Home, three flexible, More — is the designed shape, and it is
+    what a member with three or more reachable modules gets. A member who may
+    reach only two gets four slots, because the alternative is a padded slot,
+    and a slot with nothing behind it is the defect this phase removed from the
+    rail. The wait is therefore for the bar to have settled at its minimum, and
+    each test asserts the size it expects.
+  */
   await waitFor(() => {
-    expect(utils.container.querySelectorAll('.kgm-bottomnav__item').length).toBe(5);
+    expect(utils.container.querySelectorAll('.kgm-bottomnav__item').length).toBeGreaterThanOrEqual(4);
   });
   const labels = [...utils.container.querySelectorAll('.kgm-bottomnav__label')]
     .map((n) => n.textContent?.trim() ?? '');
@@ -167,6 +177,20 @@ describe('§16/§17 · the bottom nav is user-driven within what the member may 
     expect(inAudit.active).toEqual(['More']);
   });
 
+  it('shrinks to the reachable set rather than padding a slot', async () => {
+    /*
+      A member with `matters.read` and nothing else reaches exactly two modules:
+      My Work (which every authenticated member has) and Matters. The bar renders
+      Home + those two + More. It does NOT render a third flexible slot with
+      nothing in it, which is what "five slots" would mean read literally.
+    */
+    const { labels, container } = await renderNav(['matters.read']);
+    // The LAWYER persona order leads with Matters, then My Work — the persona
+    // decides the order, the authorized set decides what is there to order.
+    expect(labels).toEqual(['Home', 'Matters', 'My Work', 'More']);
+    expect(container.querySelectorAll('.kgm-bottomnav__item').length).toBe(4);
+  });
+
   it('marks the active slot in the DOM even when no lamp can be measured', async () => {
     const { container, active } = await renderNav(['matters.read'], '/matters');
 
@@ -196,7 +220,7 @@ describe('§16/§17 · the bottom nav is user-driven within what the member may 
         </I18nProvider>
       </ThemeProvider>,
     );
-    await waitFor(() => expect(container.querySelectorAll('.kgm-bottomnav__item').length).toBe(5));
+    await waitFor(() => expect(container.querySelectorAll('.kgm-bottomnav__item').length).toBe(4));
 
     // No badge source is reachable for this member, so no item claims a count —
     // and no item is announced as having one. The count is asserted through the

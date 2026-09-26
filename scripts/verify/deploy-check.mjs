@@ -152,6 +152,64 @@ check('the nav can recede without ever losing the member',
   /kgm-bottomnav\[data-receded\]/.test(firm) && /prefers-reduced-motion/.test(firm),
   '');
 
+/*
+  TASK 24 · THE SERVED BYTES THAT PROVE THE NAV AND THE TABS CHANGED.
+
+  Every check above this line is from an earlier phase. These four are this one,
+  and each is written against a defect that was visible on the live site:
+
+    (a) the rail rendered seventeen inert rows. `data-planned` and the
+        "in development" divider were how they announced themselves, and both
+        must now be ABSENT from the served CSS — a rule that survives in the
+        stylesheet is a rule someone will re-use;
+    (b) the matter workspace's twelve tabs. The three that replaced a rail row
+        (parties, conflicts, judgments) are new ids and must be in the bundle;
+    (c) the panels; without their rules every tab renders as unstyled rows;
+    (d) the dashboard's numbers — the string that replaces "In development".
+
+  These are NOT a substitute for the live harness: they prove the artefact is the
+  build, and the harness proves the build behaves. Both, or neither is worth much.
+*/
+check('the rail no longer ships an inert state at all', 
+  !/data-planned/.test(firm) && !/kgm-rail__divider/.test(firm) && !/kgm-rail__linkplanned/.test(firm),
+  'data-planned / divider / planned-dot must all be gone from the served CSS');
+
+check('the three tabs that replaced a rail row are in the shipped bundle',
+  /*
+    Asserted on the DICTIONARY KEYS rather than on English words: the keys are
+    object properties, so minification keeps them, while a word like "Parties"
+    could come from anywhere (including the §22 label list this phase deleted).
+    If the panels are dropped from the build, these three keys go with them.
+  */
+  firm.includes('tab.parties') && firm.includes('tab.conflicts') && firm.includes('tab.judgments')
+    && firm.includes('panel.doc.withheld'),
+  'tab.parties / tab.conflicts / tab.judgments / panel.doc.withheld');
+
+check('the matter panels ship their own styling',
+  /\.firm-panel\{/.test(firm) && /\.firm-timeline__dot/.test(firm)
+    && /\.firm-deadline\[data-overdue\]/.test(firm) && /\.firm-teammember\{/.test(firm),
+  '');
+
+check('the panels are fluid at phone width, not only on a desktop',
+  /*
+    The responsive block, asserted where it lands. The breakpoint needles allow the
+    space a minifier may or may not keep — `max-width: 899px` and `max-width:899px`
+    are the same declaration, and a check that only matched one of them would
+    report a defect that does not exist (which this suite has done once already
+    with a pretty-printed selector).
+  */
+  /firm-hearing__when/.test(firm)
+    && /max-width:\s*899px/.test(firm) && /max-width:\s*639px/.test(firm)
+    && /firm-deadline__tags/.test(firm),
+  '');
+
+check('the dashboard reads its own numbers rather than an apology',
+  /* The four note keys the metric cards gained, and the endpoint they are fed by.
+     A card that still said "in development" would have no reason to carry these. */
+  firm.includes('dash.acrossMatters') && firm.includes('dash.nextSevenDays')
+    && firm.includes('dash.openInvoices') && firm.includes('dashboard/summary'),
+  'dash.* note keys and the /dashboard/summary call');
+
 // ---- behaviour ------------------------------------------------------------
 const csrf = await fetch(`${BASE}/api/firm/auth/csrf`, { headers: { accept: 'application/json' } });
 check('firm door answers a CSRF bootstrap', csrf.status === 200, `HTTP ${csrf.status}`);

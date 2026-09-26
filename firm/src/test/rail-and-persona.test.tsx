@@ -11,11 +11,12 @@
  *      licence — a rail that omits the member, the role and the firm is asking
  *      the reader to guess which of their several selves is signed in.
  *
- *   2. BUILT MODULES COME FIRST. Most of this tree is `planned`, and Legal,
- *      Finance and Compliance are entirely so. Interleaved with the four modules
- *      that work, the rail read as a product that is mostly broken. Nothing is
- *      hidden and nothing is dropped: the split is a presentation of the same
- *      authorization-filtered tree, and this test proves both halves are present.
+ *   2. THE RAIL IS ONLY DESTINATIONS. This tree used to be mostly `planned`
+ *      entries — seventeen rows rendered inert with an "in development" rule
+ *      between the built and the unbuilt. That rule is gone and the rows are
+ *      gone with it: a member must not be offered a module that cannot open.
+ *      This test proves the rail renders no inert row at all, which is a
+ *      stronger claim than the split it replaces.
  *
  *   3. THE BAR'S DEFAULT IS PER PERSONA, AND STILL BOUNDED BY AUTHORIZATION.
  *      The bottom bar's first-day order was one array for every member, so a
@@ -164,47 +165,53 @@ describe('§12 · the rail states the identity the tree below it depends on', ()
     const { container } = await renderRail({ roles: ['LAWYER'] });
     expect(container.querySelector('.kgm-rail__identity')).toBeNull();
     // Collapsing hides labels, never items — the tree is still whole.
-    expect(container.querySelectorAll('.kgm-rail__link').length).toBeGreaterThan(10);
+    expect(container.querySelectorAll('.kgm-rail__link').length).toBeGreaterThanOrEqual(5);
   });
 });
 
-describe('§12 · built modules first, and nothing dropped', () => {
-  it('renders every leaf it was given, split and never filtered', async () => {
+describe('§12/§50 · every row the rail renders is a destination', () => {
+  it('renders no inert row and no in-development rule', async () => {
     const { container } = await renderRail({ roles: ['MANAGING_PARTNER'] });
     const links = [...container.querySelectorAll('.kgm-rail__link')];
-    const planned = links.filter((l) => l.getAttribute('data-planned') !== null);
-    const built = links.filter((l) => l.getAttribute('data-planned') === null);
 
-    expect(links.length).toBeGreaterThan(10);
-    // Both halves exist — a rail that had silently dropped the unbuilt modules
-    // would pass a weaker test and fail the product: §50 says nothing is hidden.
-    expect(planned.length).toBeGreaterThan(0);
-    expect(built.length).toBeGreaterThan(0);
-  });
+    // The rail is small on purpose. What matters is not how many rows there are
+    // but that each one opens — so the count is a floor and the claims below are
+    // the test.
+    expect(links.length).toBeGreaterThanOrEqual(5);
 
-  it('puts the in-development label above the planned block, and only once per group', async () => {
-    const { container } = await renderRail({ roles: ['MANAGING_PARTNER'] });
-    const dividers = container.querySelectorAll('.kgm-rail__divider');
-    expect(dividers.length).toBeGreaterThan(0);
-    expect(dividers[0].textContent?.trim()).toBe('In development');
+    /*
+      THE PHASE-24 POLICY, IN THE DOM.
 
-    // Within a group, nothing built follows the divider — that is the whole
-    // point of the split, and the assertion a re-order would break.
-    const groups = [...container.querySelectorAll('.kgm-rail__group')];
-    for (const group of groups) {
-      const children = [...group.querySelectorAll('.kgm-rail__list > li')];
-      const dividerAt = children.findIndex((li) => li.classList.contains('kgm-rail__divider'));
-      if (dividerAt === -1) continue;
-      for (const after of children.slice(dividerAt + 1)) {
-        const link = after.querySelector('.kgm-rail__link');
-        if (link) expect(link.getAttribute('data-planned')).not.toBeNull();
-      }
+      `data-planned` was how an unbuilt module announced itself: it removed the
+      aria-current, swallowed the click and appended a dot beside the label. The
+      attribute must now appear ZERO times — not because the styles changed but
+      because no row can be inert any more. If a future change re-introduces an
+      unbuilt module to the tree, this test fails at the first row.
+    */
+    for (const link of links) {
+      expect(link.getAttribute('data-planned')).toBeNull();
+      expect(link.getAttribute('aria-disabled')).toBeNull();
+      // Every row carries a real hash destination, which is what the router
+      // reads. A row whose href is "#" is a row that goes nowhere.
+      const href = link.getAttribute('href') ?? '';
+      expect(href.startsWith('#/')).toBe(true);
     }
+
+    expect(container.querySelector('.kgm-rail__divider')).toBeNull();
+    expect(container.querySelector('.kgm-rail__linkplanned')).toBeNull();
   });
 
-  it('keeps the divider out of the collapsed rail, where a text rule has no room', async () => {
+  it('keeps every row routable in the collapsed rail too', async () => {
+    // Collapsing changes what is visible, never what is reachable: the same
+    // links are present with their labels hidden behind a tooltip.
     window.localStorage.setItem('kgm.firm.rail', 'collapsed');
     const { container } = await renderRail({ roles: ['LAWYER'] });
+    const links = [...container.querySelectorAll('.kgm-rail__link')];
+    expect(links.length).toBeGreaterThanOrEqual(4);
+    for (const link of links) {
+      expect(link.getAttribute('href')?.startsWith('#/')).toBe(true);
+      expect(link.getAttribute('data-planned')).toBeNull();
+    }
     expect(container.querySelector('.kgm-rail__divider')).toBeNull();
   });
 
@@ -221,9 +228,10 @@ describe('§12 · built modules first, and nothing dropped', () => {
 
 describe('§16/§17 · the bottom bar defaults by persona, and only as a default', () => {
   it('gives a lawyer the legal order on their first day', async () => {
-    // The persona names Tasks third, and Tasks is `planned` — so the third slot
-    // falls to the next reachable module. What is asserted is the ORDER the
-    // persona asked for, as far as the built set can honour it.
+    // The persona names Tasks third, and Tasks is not a module this build has as
+    // a firm-wide screen — so the third slot falls to the next module the member
+    // may reach. What is asserted is the ORDER the persona asked for, as far as
+    // the reachable set can honour it.
     const { middle } = await renderBar({ roles: ['LAWYER'] });
     expect(middle).toEqual(['Matters', 'My Work', 'Clients']);
   });
@@ -240,11 +248,12 @@ describe('§16/§17 · the bottom bar defaults by persona, and only as a default
     expect(admin.middle).not.toEqual(lawyer.middle);
   });
 
-  it('leads a finance officer with the register of who owes, since Billing is not built yet', async () => {
-    // The persona names Billing first, and Billing is `planned` — so it is not a
-    // candidate at all, and the persona's next reachable module takes the slot.
-    // This is the honest behaviour: the default describes the work, the
-    // authorized-and-built set decides what can fill it.
+  it('leads a finance officer with the register of who owes, since Billing is not a firm-wide screen', async () => {
+    // The persona names Billing first. Billing is built — as the matter's Billing
+    // tab — but there is no firm-wide billing screen, so it is not a candidate
+    // for the bar, and the persona's next reachable module takes the slot. This
+    // is the honest behaviour: the default describes the work, the reachable set
+    // decides what can fill it.
     const { middle } = await renderBar({ roles: ['FINANCE'] });
     expect(middle[0]).toBe('Clients');
     expect(middle).not.toContain('Billing');

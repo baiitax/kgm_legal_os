@@ -1,12 +1,17 @@
 /**
  * MATTER TABS · §22, §50
  *
- * Overview / Timeline / Team / Documents / Hearings / Deadlines / Contracts / POA
- * / Time / Expenses / Billing / Messages / Compliance.
+ * Overview / Timeline / Team / Documents / Hearings / Deadlines / PARTIES /
+ * CONFLICTS / JUDGMENTS / Time / Expenses / Billing.
  *
- * §22 lists thirteen tabs. §50 says the interface must reflect the member's
- * actual permissions. Both hold, and the resolution is the same one the rail
- * uses: the tab set is FILTERED, not fixed.
+ * §22 lists thirteen tabs and twelve of them were not built. This strip carries
+ * twelve that are. The three §22 modules the firm has no system behind —
+ * Contracts, POA, Messages — are ABSENT rather than inert: the brief for this
+ * phase is that a destination the member cannot open must not be offered, and a
+ * tab that opens onto "in development" is exactly that.
+ *
+ * §50 says the interface must reflect the member's actual permissions. The
+ * resolution is the same one the rail uses: the tab set is FILTERED, not fixed.
  *
  *   A finance-only member on a matter sees Overview, Billing and Time. They do not
  *   see Hearings. Showing a Hearings tab that renders "not authorized" would be a
@@ -27,8 +32,8 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import {
-  IconBilling, IconCalendar, IconCompliance, IconContracts, IconDocuments,
-  IconExpenses, IconMessages, IconMatters, IconPoa, IconTasks, IconTeams,
+  IconBilling, IconCalendar, IconClients, IconConflicts, IconDocuments,
+  IconExpenses, IconGavel, IconMatters, IconTasks, IconTeams,
   IconTime, useI18n,
 } from '@kgm/ui';
 import type { MatterAccessLevel } from '../api/firm.js';
@@ -36,7 +41,8 @@ import '../shell/shell.css';
 
 export type MatterTabId =
   | 'overview' | 'timeline' | 'team' | 'documents' | 'hearings' | 'deadlines'
-  | 'contracts' | 'poa' | 'time' | 'expenses' | 'billing' | 'messages' | 'compliance';
+  | 'parties' | 'conflicts' | 'judgments'
+  | 'time' | 'expenses' | 'billing';
 
 interface TabDef {
   readonly id: MatterTabId;
@@ -49,23 +55,42 @@ interface TabDef {
    * `full` always passes, so it is not listed.
    */
   readonly accessLevels: readonly MatterAccessLevel[];
-  readonly planned?: boolean;
 }
 
+/**
+ * THIRTEEN TABS, AND EVERY ONE OF THEM IS A DESTINATION.
+ *
+ * Twelve of these rendered a card reading "in development": honest, and useless.
+ * A strip in which nothing opens teaches a member that the product does not
+ * work, and the modules that DO work stop being trusted along with it. Each tab
+ * below now has an endpoint behind it and a panel in front of it.
+ *
+ * WHAT REPLACED `planned` IS NOT A WIDER GATE. A tab is still filtered by
+ * permission AND by this matter's access level; what changed is that a member
+ * passing both gates gets the record instead of a promise. Three tabs changed
+ * their gates to match the routes behind them, because a tab that is offered and
+ * then refused is the same defect wearing a different hat:
+ *
+ *   team       `matters.read` — the team list is part of the matter's own record,
+ *              and the per-matter `matter_role` gate is already the access level.
+ *   parties    `matters.read`, for the same reason: the parties register is what
+ *              the conflict engine is built on and is not itself a compliance
+ *              record.
+ *   conflicts  unchanged — `compliance.read` ∩ matter compliance/full.
+ */
 const TABS: readonly TabDef[] = [
   { id: 'overview',   labelKey: 'tab.overview',   icon: IconMatters,     permissions: [], accessLevels: [] },
-  { id: 'timeline',   labelKey: 'tab.timeline',   icon: IconCalendar,    permissions: [], accessLevels: [], planned: true },
-  { id: 'team',       labelKey: 'tab.team',       icon: IconTeams,       permissions: ['matters.assign', 'matters.read_all'], accessLevels: ['edit', 'operational'], planned: true },
-  { id: 'documents',  labelKey: 'tab.documents',  icon: IconDocuments,   permissions: ['documents.read'], accessLevels: ['edit', 'operational'], planned: true },
-  { id: 'hearings',   labelKey: 'tab.hearings',   icon: IconCalendar,    permissions: ['hearings.read', 'hearings.manage'], accessLevels: ['edit', 'operational'], planned: true },
-  { id: 'deadlines',  labelKey: 'tab.deadlines',  icon: IconTasks,       permissions: ['deadlines.read', 'deadlines.manage'], accessLevels: ['edit', 'operational'], planned: true },
-  { id: 'contracts',  labelKey: 'tab.contracts',  icon: IconContracts,   permissions: ['contracts.read', 'contracts.manage'], accessLevels: ['edit', 'operational'], planned: true },
-  { id: 'poa',        labelKey: 'tab.poa',        icon: IconPoa,         permissions: ['poa.read', 'poa.manage'], accessLevels: ['edit', 'operational'], planned: true },
-  { id: 'time',       labelKey: 'tab.time',       icon: IconTime,        permissions: ['time.read', 'time.create'], accessLevels: ['edit', 'operational', 'financial'], planned: true },
-  { id: 'expenses',   labelKey: 'tab.expenses',   icon: IconExpenses,    permissions: ['expenses.read', 'expenses.create'], accessLevels: ['edit', 'operational', 'financial'], planned: true },
-  { id: 'billing',    labelKey: 'tab.billing',    icon: IconBilling,     permissions: ['billing.read', 'billing.read_all'], accessLevels: ['edit', 'financial'], planned: true },
-  { id: 'messages',   labelKey: 'tab.messages',   icon: IconMessages,    permissions: [], accessLevels: [], planned: true },
-  { id: 'compliance', labelKey: 'tab.compliance', icon: IconCompliance,  permissions: ['compliance.read', 'compliance.review'], accessLevels: ['compliance', 'edit'], planned: true },
+  { id: 'timeline',   labelKey: 'tab.timeline',   icon: IconCalendar,    permissions: [], accessLevels: [] },
+  { id: 'team',       labelKey: 'tab.team',       icon: IconTeams,       permissions: ['matters.read'], accessLevels: ['edit', 'operational'] },
+  { id: 'documents',  labelKey: 'tab.documents',  icon: IconDocuments,   permissions: ['documents.read'], accessLevels: ['edit', 'operational'] },
+  { id: 'hearings',   labelKey: 'tab.hearings',   icon: IconCalendar,    permissions: ['hearings.read', 'hearings.manage'], accessLevels: ['edit', 'operational'] },
+  { id: 'deadlines',  labelKey: 'tab.deadlines',  icon: IconTasks,       permissions: ['deadlines.read', 'deadlines.manage'], accessLevels: ['edit', 'operational'] },
+  { id: 'parties',    labelKey: 'tab.parties',    icon: IconClients,     permissions: ['matters.read'], accessLevels: ['edit', 'operational', 'compliance'] },
+  { id: 'conflicts',  labelKey: 'tab.conflicts',  icon: IconConflicts,   permissions: ['compliance.read', 'compliance.review'], accessLevels: ['compliance', 'edit'] },
+  { id: 'judgments',  labelKey: 'tab.judgments',  icon: IconGavel,       permissions: ['judgments.read'], accessLevels: ['edit', 'operational'] },
+  { id: 'time',       labelKey: 'tab.time',       icon: IconTime,        permissions: ['time.read', 'time.create'], accessLevels: ['edit', 'operational', 'financial'] },
+  { id: 'expenses',   labelKey: 'tab.expenses',   icon: IconExpenses,    permissions: ['expenses.read', 'expenses.create'], accessLevels: ['edit', 'operational', 'financial'] },
+  { id: 'billing',    labelKey: 'tab.billing',    icon: IconBilling,     permissions: ['billing.read', 'billing.read_all'], accessLevels: ['edit', 'financial'] },
 ];
 
 interface MatterTabsProps {
@@ -152,10 +177,7 @@ export function MatterTabs({ active, onChange, accessLevel, permissions }: Matte
             tabIndex={isActive ? 0 : -1}
             className="firm-tab"
             data-active={isActive || undefined}
-            data-disabled={tab.planned || undefined}
-            aria-disabled={tab.planned || undefined}
-            title={tab.planned ? t('nav.planned') : undefined}
-            onClick={() => { if (!tab.planned) onChange(tab.id); }}
+            onClick={() => onChange(tab.id)}
           >
             <Icon size={15} aria-hidden="true" />
             {t(tab.labelKey)}

@@ -326,6 +326,18 @@ export const firmApi = {
     return request('/session/revoke-all', { method: 'POST' });
   },
 
+  /**
+   * The dashboard's counts.
+   *
+   * Every field is `null`-able and the null is MEANINGFUL: it means the member
+   * does not hold the permission for that card, and the screen must render no
+   * card rather than a zero. The endpoint returns `withheld` alongside so the
+   * page can tell "nothing to show you" from "nothing happened".
+   */
+  async dashboardSummary(): Promise<DashboardSummary> {
+    return request<DashboardSummary>('/dashboard/summary');
+  },
+
   // ---- matters (§17, §18, §57) ------------------------------------------
 
   async matters(): Promise<MatterListResponse> {
@@ -334,6 +346,58 @@ export const firmApi = {
 
   async matter(id: string): Promise<MatterDetail> {
     return request<MatterDetail>(`/matters/${encodeURIComponent(id)}`);
+  },
+
+  /*
+    ── THE WORKSPACE'S TAB BODIES ────────────────────────────────────────────
+
+    One call per tab, fetched when the tab is opened. Deliberately not one call
+    for the whole workspace: the firm's file for a matter is unbounded, and a
+    screen that asks for all of it so it can render one panel is a screen that
+    gets slower every year the practice keeps records.
+
+    Each of these can 403 or 404, and the panels treat both honestly — a tab the
+    member's access level does not carry answers with a refusal, and the panel
+    says so rather than showing an empty list that reads like "nothing here".
+  */
+
+  async matterDocuments(id: string): Promise<MatterDocumentsResponse> {
+    return request(`/matters/${encodeURIComponent(id)}/documents`);
+  },
+
+  async matterHearings(id: string): Promise<MatterHearingsResponse> {
+    return request(`/matters/${encodeURIComponent(id)}/hearings`);
+  },
+
+  async matterDeadlines(id: string): Promise<MatterDeadlinesResponse> {
+    return request(`/matters/${encodeURIComponent(id)}/deadlines`);
+  },
+
+  async matterTimeline(id: string): Promise<MatterTimelineResponse> {
+    return request(`/matters/${encodeURIComponent(id)}/timeline`);
+  },
+
+  async matterTeam(id: string): Promise<MatterTeamResponse> {
+    return request(`/matters/${encodeURIComponent(id)}/team`);
+  },
+
+  /** The conflict register for the matter (P0.1). */
+  async matterParties(id: string): Promise<{ count: number; parties: MatterPartyRow[] }> {
+    return request(`/matters/${encodeURIComponent(id)}/parties`);
+  },
+
+  async matterConflicts(id: string): Promise<MatterConflictsResponse> {
+    return request(`/matters/${encodeURIComponent(id)}/conflicts`);
+  },
+
+  /** The judgments register for the matter (P0.4), with the execution gate. */
+  async matterJudgments(id: string): Promise<MatterJudgmentsResponse> {
+    return request(`/matters/${encodeURIComponent(id)}/judgments`);
+  },
+
+  /** Billing for the matter (P1): terms, letters, unbilled, and why. */
+  async matterBilling(id: string): Promise<MatterBillingResponse> {
+    return request(`/matters/${encodeURIComponent(id)}/billing`);
   },
 
   // ---- administration (§49-§51) -----------------------------------------
@@ -642,4 +706,184 @@ export interface AuditEvent {
   readonly outcome: string;
   readonly reasonCode: string | null;
   readonly metadata: Record<string, unknown> | null;
+}
+
+/* ---------------------------------------------------------- workspace tabs -- */
+
+export interface MatterDocumentRow {
+  id: string;
+  title: string;
+  titleAr: string | null;
+  documentType: string;
+  category: string;
+  origin: string;
+  version: number;
+  mimeType: string;
+  sizeBytes: number;
+  status: string;
+  clientVisibility: string;
+  privilegeClass: string;
+  requested: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MatterDocumentsResponse {
+  matterId: string;
+  count: number;
+  /** Privileged material the ring withheld — reported, never hidden silently. */
+  withheldCount: number;
+  privilege: { inRing: boolean; reason: string };
+  documents: MatterDocumentRow[];
+}
+
+export interface MatterHearingRow {
+  id: string;
+  scheduledAt: string;
+  endsAt: string | null;
+  court: string;
+  courtAr: string | null;
+  hearingType: string;
+  location: string | null;
+  locationAr: string | null;
+  isRemote: boolean;
+  remotePlatform: string | null;
+  internalStatus: string;
+  clientStatus: string;
+  clientVisible: boolean;
+  instructions: string | null;
+  instructionsAr: string | null;
+}
+
+export interface MatterHearingsResponse {
+  matterId: string;
+  count: number;
+  upcoming: MatterHearingRow[];
+  past: MatterHearingRow[];
+}
+
+export interface MatterDeadlineRow {
+  id: string;
+  kind: string;
+  title: string;
+  titleAr: string | null;
+  description: string | null;
+  descriptionAr: string | null;
+  dueAt: string;
+  priority: string;
+  internalStatus: string;
+  clientStatus: string;
+  clientVisible: boolean;
+  assignedStaffId: string | null;
+  ruleCited: string | null;
+  ruleCode: string | null;
+  ruleDays: number | null;
+  sourceKind: string | null;
+  /** Computed by the server against the same clock the reminder job uses. */
+  overdue: boolean;
+}
+
+export interface MatterDeadlinesResponse {
+  matterId: string;
+  count: number;
+  deadlines: MatterDeadlineRow[];
+}
+
+export interface MatterTimelineRow {
+  id: string;
+  occurredAt: string;
+  eventType: string;
+  title: string;
+  titleAr: string | null;
+  description: string | null;
+  descriptionAr: string | null;
+  status: string;
+  clientVisible: boolean;
+  createdByStaffId: string | null;
+}
+
+export interface MatterTimelineResponse {
+  matterId: string;
+  count: number;
+  timeline: MatterTimelineRow[];
+}
+
+export interface MatterTeamRow {
+  id: string;
+  staffId: string;
+  matterRole: string;
+  clientVisible: boolean;
+  clientRoleLabel: string | null;
+  clientRoleLabelAr: string | null;
+  name: string;
+  nameAr: string | null;
+  internalRole: string;
+  barNumber: string | null;
+}
+
+export interface MatterTeamResponse {
+  matterId: string;
+  count: number;
+  yourAccessLevel: MatterAccessLevel;
+  team: MatterTeamRow[];
+}
+
+export interface MatterPartyRow {
+  id: string;
+  partyId: string;
+  role: string;
+  note: string | null;
+  createdAt: string;
+  name: string;
+  nameAr: string | null;
+  kind: string;
+  status: string;
+}
+
+export interface MatterConflictHitRow {
+  id: string;
+  [key: string]: unknown;
+}
+
+export interface MatterConflictsResponse {
+  matterId: string;
+  state: string;
+  count: number;
+  waivers: Array<Record<string, unknown>>;
+  checks: Array<{ id: string; [key: string]: unknown; hits: MatterConflictHitRow[] }>;
+}
+
+export interface MatterJudgmentsResponse {
+  matterId: string;
+  judgments: Array<Record<string, unknown> & { id: string; operative?: boolean }>;
+  matterExecution: Record<string, unknown>;
+  services: Array<Record<string, unknown> & { id: string }>;
+  rules: unknown;
+}
+
+export interface MatterBillingResponse {
+  matterId: string;
+  billable: boolean;
+  blockers: string[];
+  terms: null | {
+    id: string; basis: string; feeAmountSar: number | null; capAmountSar: number | null;
+    retainerAmountSar: number | null; agreedDiscountPct: number; effectiveFrom: string | null;
+    notes: string | null;
+  };
+  engagementLetters: Array<Record<string, unknown> & { id: string }>;
+  unbilled: { time: number; expenses: number; total: number };
+  time: Array<Record<string, unknown> & { id: string }>;
+  expenses: Array<Record<string, unknown> & { id: string }>;
+}
+
+export interface DashboardSummary {
+  /** Upcoming hearings across the matters this member can see. */
+  hearingsUpcoming: number | null;
+  /** Deadlines falling due within the next seven days. */
+  deadlinesThisWeek: number | null;
+  /** Documents the firm has requested and not yet received. */
+  documentsRequested: number | null;
+  outstanding: { amountSar: number; openInvoiceCount: number } | null;
+  /** Which metrics were withheld, so the screen can explain a short dashboard. */
+  withheld: string[];
 }

@@ -521,6 +521,83 @@ const ar = {
   'settings.error.title': 'تعذّر تحميل الإعدادات',
   'settings.error.body': 'حدث خطأ أثناء جلب إعدادات الكيان. حاول مرة أخرى.',
   'settings.mfaNotice': 'المصادقة الثنائية إلزامية في هذا الكيان: الإجراءات الحساسة — كإسناد الأدوار وتعليق العضوية — تتطلب تحققًا ثنائيًا ساريًا.',
+  // ---- matter workspace panels (task 24) ---------------------------------
+  // Every panel says WHY an absence is an absence: a refusal and an empty
+  // record are different facts, and Arabic distinguishes them here as it does
+  // in the rest of this file.
+  'dash.acrossMatters': 'عبر الدعاوى الظاهرة لك',
+  'dash.nextSevenDays': 'خلال الأيام السبعة القادمة',
+  'dash.openInvoices': '{n} فاتورة غير مسدّدة',
+  'dash.awaitingClient': 'بانتظار استلامها من العميل',
+
+  'panel.denied.title': 'غير متاح لمستوى صلاحيتك',
+  'panel.denied.body': 'هذا القسم لا يشمله مستوى صلاحيتك على هذه الدعوى. القائمة الفارغة تعني عدم وجود بيانات، أما هذا فحجب.',
+  'panel.error.title': 'تعذّر تحميل هذا القسم',
+  'panel.error.body': 'لم تصل البيانات من الخادم. أعد المحاولة.',
+  'panel.seeAll': 'عرض الكل',
+  'panel.internalOnly': 'داخلي',
+  'panel.bar': 'رقم الترخيص',
+
+  'timeline.emptyBody': 'لم يُسجَّل أي حدث على هذه الدعوى بعد.',
+  'panel.team.empty': 'لا يوجد أعضاء مسندون إلى هذه الدعوى.',
+
+  'panel.doc.name': 'المستند',
+  'panel.doc.visibility': 'ظهوره للعميل',
+  'panel.doc.size': 'الحجم',
+  'panel.doc.empty': 'لا توجد مستندات على هذه الدعوى.',
+  'panel.doc.withheld': '{n} مستند محجوب عنك — {reason}',
+
+  'panel.hearings.empty': 'لا توجد جلسات مقررة.',
+  'panel.hearings.upcoming': 'الجلسات القادمة',
+  'panel.hearings.past': 'الجلسات السابقة',
+  'panel.hearings.noneUpcoming': 'لا توجد جلسات قادمة.',
+
+  'panel.deadlines.empty': 'لا توجد مواعيد على هذه الدعوى.',
+  'panel.deadlines.overdue': 'متأخر',
+
+  'panel.parties.empty': 'لا يوجد أطراف مسجلون.',
+  'panel.parties.emptyBody': 'يسجّل الأطراف محرك تعارض المصالح؛ ودعوى بلا أطراف لا يمكن فحصها.',
+
+  'panel.conflicts.empty': 'لم يُجرَ فحص تعارض على هذه الدعوى.',
+  'panel.conflicts.emptyBody': 'يُسجَّل الفحص عند فتح الدعوى وعند إضافة طرف جديد.',
+  'panel.conflicts.waivers': '{n} تنازل موثّق',
+  'panel.conflicts.noHits': 'لم يُرصد أي تعارض في هذا الفحص.',
+  'panel.conflicts.undispositioned': 'بلا معالجة',
+  'panel.conflicts.generated': 'حالة السجل بتاريخ {when}.',
+
+  'panel.judgments.empty': 'لا توجد أحكام مسجلة.',
+  'panel.judgments.emptyBody': 'يُسجَّل الحكم بتاريخ صدوره وتاريخ تبليغه، ويُحتسب أجل الاستئناف من التبليغ.',
+  'panel.judgments.operative': 'الحكم المنفَّذ',
+  'panel.judgments.appealBy': 'الاستئناف حتى',
+  'panel.judgments.noAppealWindow': 'لا أجل استئناف',
+  'panel.judgments.service': 'التبليغ',
+  'panel.judgments.evidenced': 'مُثبت',
+  'panel.judgments.unevidenced': 'غير مُثبت',
+
+  'common.recent': 'الأحدث',
+  'common.updated': 'آخر تحديث',
+  'cls.privilege': 'السرية المهنية',
+  'tab.parties': 'الأطراف',
+  'tab.conflicts': 'تعارض المصالح',
+  'tab.judgments': 'الأحكام',
+
+  'panel.billing.empty': 'لا توجد بيانات فوترة على هذه الدعوى.',
+  'panel.billing.billable': 'قابل للفوترة',
+  'panel.billing.notBillable': 'غير قابل للفوترة',
+  'panel.billing.basis': 'أساس الأتعاب',
+  'panel.billing.fee': 'قيمة الأتعاب',
+  'panel.billing.cap': 'الحد الأعلى',
+  'panel.billing.discount': 'الخصم المتفق عليه',
+  'panel.billing.unbilled': 'غير المفوتر',
+  'panel.billing.time': 'الوقت المسجّل',
+  'panel.billing.expenses': 'المصروفات',
+  'panel.billing.who': 'المحامي',
+  'panel.billing.narrative': 'الوصف',
+  'panel.billing.minutes': 'الدقائق',
+  'panel.billing.amount': 'المبلغ',
+  'panel.billing.status': 'الحالة',
+  'panel.billing.category': 'التصنيف',
+  'panel.billing.description': 'البيان',
 } as const;
 
 const en = {
@@ -999,6 +1076,80 @@ const en = {
   'settings.error.title': 'Could not load settings',
   'settings.error.body': 'An error occurred while fetching firm settings. Try again.',
   'settings.mfaNotice': 'MFA is required in this firm: sensitive actions — assigning roles, suspending memberships — require a verified second factor.',
+  // ---- matter workspace panels (task 24) ---------------------------------
+  'dash.acrossMatters': 'Across the matters you can see',
+  'dash.nextSevenDays': 'Falling due in the next seven days',
+  'dash.openInvoices': '{n} unpaid invoice(s)',
+  'dash.awaitingClient': 'Requested from the client, not yet received',
+
+  'panel.denied.title': 'Not available at your access level',
+  'panel.denied.body': 'Your access level on this matter does not carry this section. An empty list means there is nothing here; this means it is withheld.',
+  'panel.error.title': 'This section could not be loaded',
+  'panel.error.body': 'The server did not answer. Try again.',
+  'panel.seeAll': 'See all',
+  'panel.internalOnly': 'Internal',
+  'panel.bar': 'Bar no.',
+
+  'timeline.emptyBody': 'Nothing has been recorded on this matter yet.',
+  'panel.team.empty': 'Nobody is assigned to this matter.',
+
+  'panel.doc.name': 'Document',
+  'panel.doc.visibility': 'Client visibility',
+  'panel.doc.size': 'Size',
+  'panel.doc.empty': 'No documents are filed against this matter.',
+  'panel.doc.withheld': '{n} document(s) withheld from you — {reason}',
+
+  'panel.hearings.empty': 'No hearings are scheduled.',
+  'panel.hearings.upcoming': 'Upcoming hearings',
+  'panel.hearings.past': 'Past hearings',
+  'panel.hearings.noneUpcoming': 'No hearings are coming up.',
+
+  'panel.deadlines.empty': 'No deadlines on this matter.',
+  'panel.deadlines.overdue': 'Overdue',
+
+  'panel.parties.empty': 'No parties are recorded.',
+  'panel.parties.emptyBody': 'The conflict engine is built on this register; a matter with no parties cannot be checked.',
+
+  'panel.conflicts.empty': 'No conflict check has been run on this matter.',
+  'panel.conflicts.emptyBody': 'A check is recorded when the matter is opened and when a party is added.',
+  'panel.conflicts.waivers': '{n} documented waiver(s)',
+  'panel.conflicts.noHits': 'This check found no conflict.',
+  'panel.conflicts.undispositioned': 'not dispositioned',
+  'panel.conflicts.generated': 'Register state as at {when}.',
+
+  'panel.judgments.empty': 'No judgments are recorded.',
+  'panel.judgments.emptyBody': 'A judgment is recorded with its pronouncement and service dates; the appeal window runs from service.',
+  'panel.judgments.operative': 'Operative',
+  'panel.judgments.appealBy': 'Appeal by',
+  'panel.judgments.noAppealWindow': 'No appeal window',
+  'panel.judgments.service': 'Service',
+  'panel.judgments.evidenced': 'Evidenced',
+  'panel.judgments.unevidenced': 'Not evidenced',
+
+  'panel.billing.empty': 'There is no billing record on this matter.',
+  'panel.billing.billable': 'Billable',
+  'panel.billing.notBillable': 'Not billable',
+  'panel.billing.basis': 'Fee basis',
+  'panel.billing.fee': 'Fee',
+  'panel.billing.cap': 'Cap',
+  'panel.billing.discount': 'Agreed discount',
+  'panel.billing.unbilled': 'Unbilled',
+  'panel.billing.time': 'Recorded time',
+  'panel.billing.expenses': 'Expenses',
+  'panel.billing.who': 'Fee-earner',
+  'panel.billing.narrative': 'Narrative',
+  'panel.billing.minutes': 'Minutes',
+  'panel.billing.amount': 'Amount',
+  'panel.billing.status': 'Status',
+  'panel.billing.category': 'Category',
+  'panel.billing.description': 'Description',
+
+  'common.recent': 'Recent',
+  'common.updated': 'Last updated',
+  'cls.privilege': 'Legal privilege',
+  'tab.parties': 'Parties',
+  'tab.conflicts': 'Conflicts',
+  'tab.judgments': 'Judgments',
 } as const;
 
 /**
