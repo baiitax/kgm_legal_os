@@ -159,6 +159,21 @@ export type AuditAction =
     recording billable time on files that have no contract.
   */
   | 'FISCAL_IDENTITY_RECORDED' | 'FISCAL_DEVICE_RECORDED'
+  /*
+    P2.3 · THE THREE WRITES THAT MAKE THE MONEY LOOP CLOSE.
+
+    `INVOICE_DRAFTED` is the firm committing to a fee, `INVOICE_SENT` is the firm asking
+    for it, and `PAYMENT_RECORDED` is the money arriving. They were missing because the
+    writes were: the invoice could be approved, discounted, written off, issued and
+    reported, and never created, sent or paid.
+
+    Kept separate rather than folded into `INVOICE_ISSUED` because they are three
+    different people's acts on three different days, and the question an inspection asks
+    — who agreed this fee with the client, and when — is not answerable from a document
+    hash.
+  */
+  | 'INVOICE_DRAFTED' | 'INVOICE_SENT' | 'PAYMENT_RECORDED'
+  | 'INVOICE_CANCELLED'
   | 'INVOICE_ISSUED' | 'INVOICE_SUBMITTED' | 'INVOICE_CLEARED' | 'INVOICE_REPORTED'
   | 'INVOICE_REJECTED' | 'CREDIT_NOTE_ISSUED'
   | 'TRUST_RECEIPT_RECORDED' | 'TRUST_APPLIED_TO_INVOICE' | 'TRUST_DISBURSEMENT_RECORDED'

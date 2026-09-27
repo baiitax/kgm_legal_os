@@ -48,7 +48,7 @@
  */
 import type { ComponentType } from 'react';
 import {
-  IconAdmin, IconAudit, IconClients, IconDashboard, IconMatters, IconMyWork,
+  IconAdmin, IconAudit, IconBilling, IconClients, IconDashboard, IconMatters, IconMyWork,
   IconUsers, IconWorkspace, type IconProps,
 } from '@kgm/ui';
 
@@ -146,9 +146,14 @@ const GROUP_DEFS: ReadonlyArray<NavGroupDef> = [
       LEGAL      hearings, deadlines and documents are implemented — inside a
                  matter, on its workspace tabs, which is where they belong.
                  Contracts and POA are implemented nowhere.
-      FINANCE    billing, time and expenses are implemented on the matter's
-                 Billing tab (P1: terms, unbilled totals, the blockers that
-                 explain a refusal). There is no firm-wide billing screen.
+      FINANCE    IS here now, as `/billing`. The matter's Billing tab remains the
+                 place for one engagement's terms, unbilled work and the blockers
+                 that explain a refusal; the console is where the firm's invoices
+                 are drafted, released to the client and paid. Time entries and
+                 expenses are still recorded on the matter they belong to, and
+                 there is deliberately no firm-wide timesheet: an hour is recorded
+                 against a file, and a screen that let one be typed without one
+                 would be a screen that loses the file.
       COMPLIANCE conflict checking is implemented (P0.1) and is reached from the
                  matter it belongs to. Licences, training and complaints have no
                  system behind them.
@@ -158,6 +163,30 @@ const GROUP_DEFS: ReadonlyArray<NavGroupDef> = [
     route the member needs is on the matter they are working on, and the rail
     says so by not pretending otherwise.
   */
+  {
+    /*
+      ── FINANCE, AND WHY IT IS A SCREEN AT LAST ─────────────────────────────────
+
+      This group used to be listed under "what is not here": billing, time and expenses
+      lived on the matter's own tab, and there was no firm-wide billing screen. That was
+      true, and it was the shape of the gap — a firm could not see its own receivable, and
+      could not create an invoice at all.
+
+      P2.3 gave the server the three writes that were missing (`billing.create`,
+      `billing.send`, `billing.record_payment` — codes that had been granted to four roles
+      since P0.6 and consulted by nothing), and this leaf is where they are reached. The
+      gate is either billing read code: a member who may read one invoice may read the
+      list, and the SERVER narrows every row to the matters they can bill. The nav decides
+      whether a row is worth showing, never which rows are visible.
+    */
+    id: 'finance',
+    labelKey: 'nav.finance',
+    icon: IconBilling,
+    permissions: [],
+    leaves: [
+      { id: 'billing', to: '/billing', labelKey: 'money.title', icon: IconBilling, permissions: ['billing.read', 'billing.read_all'] },
+    ],
+  },
   {
     id: 'admin',
     labelKey: 'nav.admin',

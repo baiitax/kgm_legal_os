@@ -161,6 +161,7 @@ export type ErrorCode =
   /** The invoice is not (yet) a tax invoice, so it may not reach the client. */
   | 'invoice_not_issued'
   | 'invoice_number_taken'
+  | 'overpayment'
   /** A standard invoice that ZATCA has not cleared — the buyer cannot claim the VAT. */
   | 'invoice_not_cleared'
   /** The firm has no onboarded production fiscal identity and device. */
@@ -197,6 +198,13 @@ export type ErrorCode =
   | 'expense_receipt_required'
   | 'expense_wrong_client'
   | 'entry_already_billed'
+  /**
+   * A line the caller asked to bill is not billable — non-billable time, an unapproved
+   * disbursement, or a source that is not on the matter named. Distinct from
+   * `entry_already_billed`, and the distinction matters at the desk: one means "do not
+   * put this here", the other means "this was put somewhere already".
+   */
+  | 'not_billable'
   | 'ceiling_actor_unknown'
   /*
     ── TASK 25 · INTAKE ─────────────────────────────────────────────────────────
@@ -473,6 +481,14 @@ const REFUSAL_STATUS: Record<string, number> = {
   reconciliation_is_append_only: 409,
   invoice_not_issued: 409,
   invoice_number_taken: 409,
+  /*
+    Money that exceeds what is owed. A conflict, not a validation failure: the request
+    is well-formed and the person is not mistaken about the invoice — the invoice has
+    simply moved on, and the answer will not change by re-sending it. (The database's
+    own guard raises the same token, so this entry is also what stops a diligent
+    over-application from arriving at the API edge as an anonymous 500.)
+  */
+  overpayment: 409,
 
   /*
     P0.3, and the same distinction. A refusal about the STATE of a record that has moved

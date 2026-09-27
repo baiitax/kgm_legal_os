@@ -178,6 +178,99 @@ describe('matter-lifecycle · the route', () => {
     expect([403, 404], 'closing must be refused without matters.close').toContain(closing.status);
   });
 
+  it('gives a matter created through the product a control row, so it can be restricted', async () => {
+    /*
+      THE HOLE THIS TEST EXISTS FOR. `matter_controls` is keyed by matter_id and holds a
+      matter's restriction, owner, lead, supervising partner and department. Nothing in
+      the application could create the row — `firm_api` has SELECT and six UPDATE columns
+      on that table, and no INSERT — because creating it was meant to be the database's
+      job, and no rule ever did the job.
+
+      The consequences were quiet and then loud. Restricting a matter updated zero rows,
+      the route read zero as "no such matter" and answered 404 `not_found`, and the
+      success audit row it had already written was committed by the transaction that had
+      changed nothing. Every matter created since launch was in that state; only the
+      seven seeded ones were not, because the demo seeder inserts the row itself.
+
+      So this asserts the INVARIANT, through the product's own door: create a matter, and
+      the row is there, before anything asks for it.
+    */
+    const agent = createAgent(s.app);
+    await firmLoginAs(agent, FIRM.managingPartner);
+
+    /* A client of this matter's own, made here: the test must not depend on which
+       seeded client happens to be first, and creating one proves the firm door works. */
+    const made = await agent.post('/api/firm/clients', {
+      clientType: 'organization', name: `Restriction Check Co ${Date.now()}`,
+    });
+    expect(made.status).toBe(201);
+    const clientId = String(made.body.data.id);
+
+    /*
+      WITH THE PARTNER ON THE MATTER. `matters.restrict` is not enough on its own: the
+      route also demands MATTER_MANAGE on the matter itself, and a matter with nobody on
+      its team gives nobody that level — a partner with `matters.read_all` may SEE every
+      file and still not manage one she is not on. So the creator is named as the lead,
+      which is what the intake route does when it opens a file for a member.
+    */
+    const staffId = await staffIdFor(agent, FIRM.managingPartner);
+    const created = await agent.post('/api/firm/matters', {
+      clientId, title: 'A file opened to prove it can be restricted',
+      leadStaffId: staffId, leadRole: 'lead_partner',
+    });
+    expect(created.status, JSON.stringify(created.body).slice(0, 200)).toBe(201);
+    const matterId = String(created.body.data.id);
+
+    const controls = await s.db.all<{ matter_id: string }>(
+      `select matter_id from matter_controls where matter_id = ?`, [matterId],
+    );
+    expect(controls.length, 'the database must owe a new matter its control row').toBe(1);
+
+    /* And the restriction lands — which is the point of the row existing at all. */
+    const restricted = await agent.post(`/api/firm/matters/${matterId}/restrict`, {
+      restricted: true, reason: 'verification: the row exists, so the write lands',
+    });
+    expect(restricted.status, JSON.stringify(restricted.body).slice(0, 200)).toBe(200);
+
+    const after = await s.db.get<{ is_restricted: number }>(
+      `select is_restricted from matter_controls where matter_id = ?`, [matterId],
+    );
+    expect(Number(after!.is_restricted)).toBe(1);
+
+    /* …and lifting it is symmetrical, so the harness leaves nothing restricted behind. */
+    const lifted = await agent.post(`/api/firm/matters/${matterId}/restrict`, { restricted: false });
+    expect(lifted.status).toBe(200);
+    const back = await s.db.get<{ is_restricted: number }>(
+      `select is_restricted from matter_controls where matter_id = ?`, [matterId],
+    );
+    expect(Number(back!.is_restricted)).toBe(0);
+  });
+
+  it('records no restriction in the trail when the write did not happen', async () => {
+    /*
+      THE ORDER OF THE TWO. A refusal must be decided before the success row is written,
+      or the audit trail asserts events that did not occur — the failure mode that makes a
+      trail worse than useless, because it will be believed.
+
+      The action is aimed at a matter that does not exist, which is the one case the route
+      can still refuse after the guards pass.
+    */
+    const agent = createAgent(s.app);
+    await firmLoginAs(agent, FIRM.managingPartner);
+
+    const res = await agent.post('/api/firm/matters/00000000-0000-4000-8000-00000000dead/restrict', {
+      restricted: true, reason: 'a matter that is not there',
+    });
+    expect([403, 404]).toContain(res.status);
+
+    const rows = await s.db.all<{ action: string }>(
+      `select action from audit_events where action in ('MATTER_RESTRICTED', 'MATTER_UNRESTRICTED')
+         and resource_id = ?`,
+      ['00000000-0000-4000-8000-00000000dead'],
+    );
+    expect(rows.length, 'no success row may be written for a restriction that did not happen').toBe(0);
+  });
+
   it('closes with matters.close and resumes with matters.reopen', async () => {
     const agent = createAgent(s.app);
     await firmLoginAs(agent, FIRM.managingPartner);

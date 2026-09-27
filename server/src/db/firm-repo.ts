@@ -4109,6 +4109,561 @@ export class FirmRepo {
     return r.changes;
   }
   /* ═════════════════════════════════════════════════════════════════════════════
+     P2.3 · THE FIRM DRAFTS ITS OWN INVOICE
+
+     The money console's first write. Until this, `invoices` had every verb except
+     the one that matters: approve, discount, write off, issue, report, apply money
+     — and no way to CREATE a row. Every invoice in the system came from a seed
+     fixture. A firm cannot bill from a system that cannot draft the bill.
+
+     ── HOW A DRAFT IS NUMBERED ──────────────────────────────────────────────────
+
+     `invoice_number` is NOT NULL and unique per tenant, so a draft has to carry one
+     before it is a row. The convention the ISSUE path already implements is
+     `<final>-DRAFT`: it strips a trailing `-DRAFT` and requires the remainder to be
+     unused on an issued invoice (`invoice_number_in_use`, 0038). So the draft
+     sequence and the official sequence are the same list, and the firm sees the
+     number it will issue under from the moment it drafts.
+
+     `suggestInvoiceNumber` computes the next free one by reading the tenant's own
+     numbers rather than keeping a counter. A counter table was considered and
+     rejected (gap analysis III §6): the fiscal guard already freezes
+     `invoice_number` at issue, the ICV on `fiscal_devices` is the regulatory
+     sequence, and a third counter would be a second source of truth for a value
+     that only one statement may write. Reading the list also means a firm migrating
+     from another system can type its own series and nothing has to be reconciled.
+
+     ── WHAT A DRAFT BILLS ───────────────────────────────────────────────────────
+
+     Only APPROVED work: `time_entries.status in ('submitted','approved')` — the same
+     predicate `GET /matters/:id/billing` reports as unbilled — and
+     `expenses.status = 'approved'`, which is the stricter of the two because an
+     unreviewed disbursement has not been agreed to by anyone yet.
+
+     Each line carries `billing_source_key` (`time:<id>` / `expense:<id>`), which is
+     what makes the invoice's lines traceable back to the hours and the receipts they
+     came from — and what makes the same entry impossible to bill twice, since the
+     entry is marked `billed` with this invoice's id in the same transaction.
+     ═════════════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * The next free invoice number for a year: `<prefix>-<yyyy>-<nnnn>`, zero-padded.
+   *
+   * Deliberately advisory. The caller may send its own number (a firm with an
+   * existing series does), and the ISSUE path is what enforces uniqueness — this
+   * only spares the user from counting their own invoices.
+   */
+  async suggestInvoiceNumber(tenantId: string, year: string): Promise<string> {
+    const prefix = `INV-${year}-`;
+    const rows = await this.q().all<{ invoice_number: string }>(
+      `select invoice_number from invoices
+        where tenant_id = ? and invoice_number like ?`,
+      [tenantId, `${prefix}%`],
+    );
+    let highest = 0;
+    for (const r of rows ?? []) {
+      const digits = String(r.invoice_number).replace(/[\s\-–—]*draft\s*$/i, '')
+        .slice(prefix.length).replace(/\D/g, '');
+      if (digits) highest = Math.max(highest, Number(digits));
+    }
+    return `${prefix}${String(highest + 1).padStart(4, '0')}`;
+  }
+
+  /**
+   * Draft an invoice, its lines, and the link back to what it bills — in ONE
+   * transaction.
+   *
+   * The three writes belong together or not at all. An invoice whose lines failed to
+   * insert has no basis for its totals; an invoice whose entries were not marked
+   * `billed` leaves them available to a second draft, and the firm bills the same
+   * hour twice without anything refusing it.
+   */
+  async createInvoiceDraft(input: {
+    tenantId: string; clientId: string; matterId: string;
+    invoiceNumber: string; issueDate: string; dueDate: string;
+    notesInternal: string | null;
+    lines: Array<{
+      description: string; descriptionAr: string | null;
+      quantity: number; unitPrice: number; discountAmount: number;
+      vatCategory: string; vatRate: number; billingSourceKey: string | null;
+    }>;
+    timeEntryIds: string[];
+    expenseIds: string[];
+  }): Promise<{
+    id: string; invoiceNumber: string; subtotal: number; vatAmount: number; total: number;
+    timeLinked: number; expensesLinked: number;
+  }> {
+    const now = new Date().toISOString();
+    const id = newId();
+
+    return this.tx(async () => {
+      /* The arithmetic is computed HERE, from the lines, and never taken from the
+         caller. An invoice whose header disagrees with its own lines is refused by
+         the reconcile guard at issue — computing it once, in one place, is what
+         makes that guard a backstop rather than the mechanism. */
+      let subtotal = 0;
+      let vatAmount = 0;
+      const computed = input.lines.map((l, i) => {
+        const net = round2(l.quantity * l.unitPrice - l.discountAmount);
+        const vat = round2(net * l.vatRate);
+        subtotal = round2(subtotal + net);
+        vatAmount = round2(vatAmount + vat);
+        return { ...l, position: i + 1, net, vat };
+      });
+      const total = round2(subtotal + vatAmount);
+      const nominalRate = computed[0]?.vatRate ?? 0.15;
+
+      /*
+        THE NUMBER IS UNIQUE PER FIRM AND THE DATABASE IS WHAT SAYS SO — but a driver
+        error is not an answer anybody at a desk can use. `invoices(tenant_id,
+        invoice_number)` is the constraint, the issue path already translates a taken
+        number into `invoice_number_taken`, and a draft that collides must say the same
+        thing: the alternative is a 500 that reads like a server fault when the real
+        problem is that somebody else used that number first.
+      */
+      try {
+        await this.q().run(
+          `insert into invoices
+             (id, tenant_id, client_id, matter_id, invoice_number, issue_date, due_date,
+              currency, subtotal, vat_rate, vat_amount, total, amount_paid,
+              internal_status, client_status, notes_internal, created_at, updated_at)
+           values (?, ?, ?, ?, ?, ?, ?, 'SAR', ?, ?, ?, ?, 0, 'draft', null, ?, ?, ?)`,
+          [id, input.tenantId, input.clientId, input.matterId, input.invoiceNumber,
+            input.issueDate, input.dueDate, subtotal, nominalRate, vatAmount, total,
+            input.notesInternal, now, now],
+        );
+      } catch (e) {
+        const m = e instanceof Error ? e.message : String(e);
+        if (/unique|duplicate/i.test(m) && /invoice_number/i.test(m)) {
+          throw new Error(`invoice_number_taken: ${input.invoiceNumber} is already on another invoice — a number may not be used twice, even by a draft`);
+        }
+        throw e;
+      }
+
+      for (const l of computed) {
+        await this.q().run(
+          `insert into invoice_lines
+             (id, invoice_id, position, description, description_ar, quantity, unit_price,
+              amount, discount_amount, vat_category, vat_rate, vat_amount, billing_source_key)
+           values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [newId(), id, l.position, l.description, l.descriptionAr, l.quantity, l.unitPrice,
+            l.net, l.discountAmount, l.vatCategory, l.vatRate, l.vat, l.billingSourceKey],
+        );
+      }
+
+      /*
+        AND NOW THE ENTRIES BECOME UNAVAILABLE. The WHERE clause is the concurrency
+        guard: another draft that billed this entry a moment ago has already moved its
+        status, so this update matches nothing for that row — and a zero count is
+        reported rather than ignored, because a line exists for it and an invoice line
+        that bills nothing is worse than a refusal.
+      */
+      let timeLinked = 0;
+      for (const entryId of input.timeEntryIds) {
+        const r = await this.q().run(
+          `update time_entries
+              set status = 'billed', invoice_id = ?, updated_at = ?
+            where id = ? and tenant_id = ? and invoice_id is null
+              and status in ('submitted', 'approved')`,
+          [id, now, entryId, input.tenantId],
+        );
+        timeLinked += r.changes;
+      }
+
+      let expensesLinked = 0;
+      for (const expenseId of input.expenseIds) {
+        const r = await this.q().run(
+          `update expenses
+              set status = 'billed', invoice_id = ?, updated_at = ?
+            where id = ? and tenant_id = ? and invoice_id is null
+              and status = 'approved'`,
+          [id, now, expenseId, input.tenantId],
+        );
+        expensesLinked += r.changes;
+      }
+
+      return {
+        id, invoiceNumber: input.invoiceNumber, subtotal, vatAmount, total,
+        timeLinked, expensesLinked,
+      };
+    });
+  }
+
+  /**
+   * Record money received against an issued invoice.
+   *
+   * TWO ROWS, ONE FACT: the `payments` row is the receipt — the bank's reference, the
+   * date, who recorded it — and `applyMoneyToInvoice` moves the invoice. A payment row
+   * with no application would show a receipt against a balance that never moved, and an
+   * application with no payment row would move a balance nothing accounts for.
+   *
+   * ONLY AN ISSUED INVOICE MAY BE PAID. `applyMoneyToInvoice` carries the same
+   * condition in its WHERE clause (`invoice_uuid is not null`), so a draft cannot take
+   * money even if this check is bypassed — but the refusal is raised here so the caller
+   * is told which of the two problems it is.
+   *
+   * OVERPAYMENT IS REFUSED WITH A REASON. The database refuses it too
+   * (`invoice cannot be overpaid without a credit record`) and that message has no
+   * refusal token, so it would arrive as a 500; refusing here means the person at the
+   * desk is told the balance.
+   */
+  async recordInvoicePayment(input: {
+    tenantId: string; invoiceId: string; amount: number;
+    provider: 'bank_transfer' | 'sadad' | 'manual';
+    reference: string | null; receivedOn: string; actorUserId: string | null;
+  }): Promise<{ id: string; amountPaid: number; status: string; total: number }> {
+    const now = new Date().toISOString();
+    const id = newId();
+    return this.tx(async () => {
+      const inv = await this.q().get<Row>(
+        `select id, client_id, total, amount_paid, invoice_uuid, internal_status
+           from invoices where id = ? and tenant_id = ?`,
+        [input.invoiceId, input.tenantId],
+      );
+      if (!inv) throw new Error(`invoice_not_found: ${input.invoiceId}`);
+      if (!inv.invoice_uuid) {
+        throw new Error('invoice_not_issued: a draft invoice cannot take a payment — issue it first, or record the money in the client ledger');
+      }
+      if (['cancelled', 'written_off'].includes(String(inv.internal_status))) {
+        throw new Error(`invoice_not_issued: this invoice is ${inv.internal_status} and cannot take a payment`);
+      }
+
+      const total = round2(Number(inv.total));
+      const paid = round2(Number(inv.amount_paid ?? 0));
+      const amount = round2(input.amount);
+      const balance = round2(total - paid);
+      if (amount > balance) {
+        throw new Error(`overpayment: ${amount.toFixed(2)} exceeds the ${balance.toFixed(2)} outstanding on this invoice`);
+      }
+
+      await this.q().run(
+        `insert into payments
+           (id, tenant_id, invoice_id, client_id, initiated_by_user_id, provider,
+            provider_intent_id, amount, currency, status, receipt_number, completed_at, created_at)
+         values (?, ?, ?, ?, ?, ?, ?, ?, 'SAR', 'succeeded', ?, ?, ?)`,
+        [id, input.tenantId, input.invoiceId, String(inv.client_id), input.actorUserId,
+          input.provider, input.reference, amount, input.reference,
+          new Date(`${input.receivedOn}T00:00:00.000Z`).toISOString(), now],
+      );
+
+      await this.applyMoneyToInvoice(input.tenantId, input.invoiceId, amount);
+
+      const after = await this.q().get<Row>(
+        `select amount_paid, internal_status from invoices where id = ?`, [input.invoiceId],
+      );
+      return {
+        id, amountPaid: round2(Number(after?.amount_paid ?? paid + amount)),
+        status: String(after?.internal_status ?? 'partially_paid'), total,
+      };
+    });
+  }
+
+  /**
+   * CANCEL A DRAFT — and give its sources back.
+   *
+   * THE OTHER HALF OF BEING ABLE TO DRAFT. A member who bills the wrong hour, or a fee
+   * that was never agreed, needs a way out that does not involve the database. Until this
+   * existed there was none: a draft could not be written off (`writeOffInvoice` requires
+   * sent, partly paid or overdue), could not be deleted, and — because 0036's freeze
+   * guards fired on any invoice rather than on an issued one — could not release its
+   * entries either. The hour was frozen, the number consumed, and the client's unbilled
+   * total dropped by a value nothing on screen could explain. 0070 narrowed those guards
+   * to the rule they state, and this is what uses the room it made.
+   *
+   * WHAT A CANCELLATION IS, AND IS NOT.
+   *
+   *   The invoice ROW SURVIVES, carrying `cancelled` and the reason. The lines survive
+   *   with it: they are the record of what was drafted, and a register that erases its
+   *   mistakes cannot be audited. Nothing is deleted, which is also why the number is
+   *   safe — a draft's number carries the `-DRAFT` marker, and issuing is the only thing
+   *   that seals a final one, so cancelling frees the final number again.
+   *
+   *   The SOURCES GO BACK. A cancelled hour returns to `submitted` and a cancelled
+   *   disbursement to `approved` — the states they were in when they were selected, and
+   *   the states the unbilled predicate reads. The hour deliberately does NOT return as
+   *   `approved`: nobody approved it, and a cancellation that asserted an approval would
+   *   be inventing a decision on a partner's behalf.
+   *
+   *   An ISSUED invoice is refused. `invoice_uuid is not null` means the document has a
+   *   UUID, an ICV and a position in the hash chain; it is a tax document, and the remedy
+   *   for a wrong one is a credit note (0034), not a cancellation.
+   */
+  async cancelInvoiceDraft(input: {
+    tenantId: string; invoiceId: string; reason: string;
+  }): Promise<{ cancelled: boolean; releasedTime: number; releasedExpenses: number; reason: string | null }> {
+    const now = new Date().toISOString();
+
+    return this.tx(async () => {
+      const inv = await this.q().get<Row>(
+        `select id, invoice_uuid, internal_status from invoices where id = ? and tenant_id = ?`,
+        [input.invoiceId, input.tenantId],
+      );
+      if (!inv) throw new Error(`invoice_not_found: ${input.invoiceId}`);
+      if (inv.invoice_uuid) {
+        throw new Error('issued_invoice_immutable: this invoice has been issued — a tax document is corrected by a credit note, never cancelled');
+      }
+      if (!['draft', 'pending_internal_approval'].includes(String(inv.internal_status))) {
+        throw new Error(`issued_invoice_immutable: an invoice in ${String(inv.internal_status)} is not a draft and cannot be cancelled`);
+      }
+
+      /* The guarded update, so two cancellations of the same draft cannot both report
+         success — and so a send that landed a moment ago wins the race.
+
+         `client_status` IS SET IN THE SAME STATEMENT, and it is not decoration.
+         `guard_invoice_state` (0002, restated by 0007) compares the column against
+         `derive_invoice_client_status(...)` on EVERY insert and update and refuses a
+         write where the two disagree — a Postgres trigger with no SQLite counterpart, so
+         the test suite passes and only the real database refuses. Cancelling moves the
+         invoice from `draft` — whose derived client status is NULL, so it is not projected
+         to the client at all — to `cancelled`, whose derived status is the string
+         'cancelled'. Leaving the column NULL would be refused, and it would also be a
+         lie: the row WOULD be cancelled and the column would claim nothing had happened. This is the same trap `approveInvoice` documents two hundred lines up,
+         and it was walked into once already in this file. */
+      /*
+        THE NOTE IS APPENDED WITH `coalesce(...) || ?` AND NOT WITH A CASE, for a reason
+        that only Postgres has: `case when ? is null then ...` leaves the parameter with no
+        type to infer, and the server answers
+
+            could not determine data type of parameter $1
+
+        — the same trap `setMatterRestriction` documents further up this file, walked into
+        a second time. Concatenating a parameter onto a text expression types it, and
+        `coalesce` keeps the append working on an invoice whose note is empty. The SQLite
+        mirror has no opinion either way, so the test suite passes and only the live
+        database refuses; that asymmetry is the whole reason this comment is longer than
+        the statement.
+      */
+      const changed = await this.q().run(
+        `update invoices
+            set internal_status = 'cancelled',
+                client_status = 'cancelled',
+                notes_internal = coalesce(notes_internal || ' · ', '') || ?,
+                updated_at = ?
+          where id = ? and tenant_id = ? and invoice_uuid is null
+            and internal_status in ('draft', 'pending_internal_approval')`,
+        [`cancelled: ${input.reason}`, now, input.invoiceId, input.tenantId],
+      );
+      if (changed.changes === 0) {
+        throw new Error('issued_invoice_immutable: this draft has already moved on and cannot be cancelled');
+      }
+
+      /*
+        ── AND THE LINES LET GO OF WHAT THEY BILLED ──────────────────────────────
+
+        `invoice_lines(billing_source_key)` is UNIQUE, which is what stops one recorded
+        hour from appearing on two invoices at once. A cancelled draft must therefore give
+        the key back, or the hour it released cannot be billed again — which is the entire
+        point of the release, and the failure this code met the first time it was written
+        (SQLite said so plainly: UNIQUE constraint failed: invoice_lines.billing_source_key).
+
+        The LINE stays. Its description already names the date, the member and the
+        narrative, so what was drafted survives in the register; what goes is the LINK, and
+        the link cannot survive anyway — the entry it pointed at no longer names this
+        invoice. The released keys are written into the invoice's own note below, so the
+        provenance is still readable on the document a year later.
+      */
+      const unlinked = await this.q().all<Row>(
+        `select billing_source_key from invoice_lines
+          where invoice_id = ? and billing_source_key is not null
+          order by position`,
+        [input.invoiceId],
+      );
+      await this.q().run(
+        `update invoice_lines set billing_source_key = null where invoice_id = ?`,
+        [input.invoiceId],
+      );
+      const releasedKeys = (unlinked ?? []).map((r) => String(r.billing_source_key));
+
+      if (releasedKeys.length > 0) {
+        /* The note is the audit trail a human reads. Appended rather than replaced: the
+           cancellation reason was already written above, and this says which sources went
+           back. */
+        await this.q().run(
+          `update invoices
+              set notes_internal = coalesce(notes_internal, '') || ?, updated_at = ?
+            where id = ? and tenant_id = ?`,
+          [` · released: ${releasedKeys.join(', ')}`, now, input.invoiceId, input.tenantId],
+        );
+      }
+
+      const time = await this.q().run(
+        `update time_entries
+            set status = 'submitted', invoice_id = null, updated_at = ?
+          where tenant_id = ? and invoice_id = ? and status = 'billed'`,
+        [now, input.tenantId, input.invoiceId],
+      );
+      const expenses = await this.q().run(
+        `update expenses
+            set status = 'approved', invoice_id = null, updated_at = ?
+          where tenant_id = ? and invoice_id = ? and status = 'billed'`,
+        [now, input.tenantId, input.invoiceId],
+      );
+
+      return {
+        cancelled: true,
+        releasedTime: time.changes,
+        releasedExpenses: expenses.changes,
+        reason: input.reason,
+      };
+    });
+  }
+
+  /**
+   * Send an approved, ISSUED invoice to the client.
+   *
+   * The write is the transition, and the portal reads the result: `client_status` is
+   * derived here in the form the guard demands, so the invoice appears in the client's
+   * list — and it is the ACT of recording that it went out that makes it appear, which
+   * is what the firm's own record has to show.
+   *
+   * ISSUED FIRST, ALWAYS. An approved invoice that has not been issued has no fiscal
+   * identity — no UUID, no ICV, no hash, no QR — and sending one would put a document
+   * the tax authority has never seen in front of the client.
+   */
+  async markInvoiceSent(tenantId: string, invoiceId: string): Promise<number> {
+    const now = new Date().toISOString();
+    const r = await this.q().run(
+      `update invoices
+          set internal_status = 'sent',
+              client_status = case
+                when amount_paid >= total and total > 0 then 'paid'
+                when amount_paid > 0 then 'partially_paid'
+                when due_date < ? then 'overdue'
+                else 'awaiting_payment'
+              end,
+              updated_at = ?
+        where id = ? and tenant_id = ?
+          and internal_status = 'approved'
+          and invoice_uuid is not null`,
+      [now.slice(0, 10), now, invoiceId, tenantId],
+    );
+    return r.changes;
+  }
+
+  /**
+   * The invoices a member may see, for the firm's billing console.
+   *
+   * SCOPED BY THE MATTERS THEY CAN REACH, not by a separate rule: `matterIds` is the
+   * caller's own matter scope, computed once in the route, and an empty scope returns
+   * nothing rather than everything. That is the same shape `/billing/invoices` already
+   * used — it returned matter ids — and the fault in it was that it stopped there and
+   * returned no rows for anyone to render.
+   */
+  async listInvoicesForFirm(tenantId: string, opts: {
+    matterIds: readonly string[]; status?: string | null; clientId?: string | null; limit?: number;
+  }) {
+    if (opts.matterIds.length === 0) return [];
+    const placeholders = opts.matterIds.map(() => '?').join(', ');
+    const params: Param[] = [tenantId, ...opts.matterIds];
+    let sql = `select i.id, i.invoice_number, i.issue_date, i.due_date, i.currency,
+                      i.subtotal, i.vat_amount, i.total, i.amount_paid, i.internal_status,
+                      i.client_status, i.invoice_uuid, i.fiscal_status, i.matter_id,
+                      m.matter_number, c.name as client_name, c.name_ar as client_name_ar
+                 from invoices i
+                 left join matters m on m.id = i.matter_id
+                 left join clients c on c.id = i.client_id
+                where i.tenant_id = ? and i.matter_id in (${placeholders})`;
+    if (opts.status) { sql += ` and i.internal_status = ?`; params.push(opts.status); }
+    if (opts.clientId) { sql += ` and i.client_id = ?`; params.push(opts.clientId); }
+    sql += ` order by i.issue_date desc, i.invoice_number desc limit ?`;
+    params.push(opts.limit ?? 200);
+    const rows = await this.q().all<Row>(sql, params);
+    return (rows ?? []).map((r) => ({
+      id: String(r.id),
+      invoiceNumber: String(r.invoice_number),
+      issueDate: String(r.issue_date),
+      dueDate: String(r.due_date),
+      currency: String(r.currency),
+      subtotal: Number(r.subtotal),
+      vatAmount: Number(r.vat_amount),
+      total: Number(r.total),
+      amountPaid: Number(r.amount_paid ?? 0),
+      outstanding: round2(Number(r.total) - Number(r.amount_paid ?? 0)),
+      internalStatus: String(r.internal_status),
+      clientStatus: r.client_status == null ? null : String(r.client_status),
+      issued: Boolean(r.invoice_uuid),
+      fiscalStatus: r.fiscal_status == null ? null : String(r.fiscal_status),
+      matterId: r.matter_id == null ? null : String(r.matter_id),
+      matterNumber: r.matter_number == null ? null : String(r.matter_number),
+      clientName: r.client_name == null ? null : String(r.client_name),
+      clientNameAr: r.client_name_ar == null ? null : String(r.client_name_ar),
+    }));
+  }
+
+  /** One invoice, with its lines and the receipts against it. */
+  async getInvoiceDetail(tenantId: string, invoiceId: string) {
+    const row = await this.q().get<Row>(
+      /* The buyer's VAT registration lives on the PARTY — `clients` is a commercial
+         relationship and `parties` is the identity — and reading it off `clients` is the
+         mistake this codebase has already made once: `vat_number` was read as `vatNumber`
+         from a raw driver row and every standard tax invoice in the system was refused.
+         One join, one source, and it is NULL rather than empty when the buyer is an
+         individual with no registration. */
+      `select i.*, m.matter_number, m.title as matter_title, m.title_ar as matter_title_ar,
+              c.name as client_name, c.name_ar as client_name_ar,
+              p.vat_number as client_vat, p.commercial_registration as client_cr
+         from invoices i
+         left join matters m on m.id = i.matter_id
+         left join clients c on c.id = i.client_id
+         left join parties p on p.id = c.party_id
+        where i.id = ? and i.tenant_id = ?`,
+      [invoiceId, tenantId],
+    );
+    if (!row) return null;
+    const lines = await this.listInvoiceLines(invoiceId);
+    const payments = await this.q().all<Row>(
+      `select id, provider, amount, currency, status, receipt_number, created_at, completed_at
+         from payments where invoice_id = ? and tenant_id = ? order by created_at`,
+      [invoiceId, tenantId],
+    );
+    return {
+      id: String(row.id),
+      invoiceNumber: String(row.invoice_number),
+      issueDate: String(row.issue_date),
+      dueDate: String(row.due_date),
+      currency: String(row.currency),
+      subtotal: Number(row.subtotal),
+      vatRate: Number(row.vat_rate),
+      vatAmount: Number(row.vat_amount),
+      total: Number(row.total),
+      amountPaid: Number(row.amount_paid ?? 0),
+      outstanding: round2(Number(row.total) - Number(row.amount_paid ?? 0)),
+      internalStatus: String(row.internal_status),
+      clientStatus: row.client_status == null ? null : String(row.client_status),
+      issued: Boolean(row.invoice_uuid),
+      invoiceUuid: row.invoice_uuid == null ? null : String(row.invoice_uuid),
+      invoiceType: row.invoice_type == null ? null : String(row.invoice_type),
+      icv: row.icv == null ? null : Number(row.icv),
+      fiscalStatus: row.fiscal_status == null ? null : String(row.fiscal_status),
+      qrPayload: row.qr_payload == null ? null : String(row.qr_payload),
+      supplyAt: row.supply_at == null ? null : String(row.supply_at),
+      notesInternal: row.notes_internal == null ? null : String(row.notes_internal),
+      matterId: row.matter_id == null ? null : String(row.matter_id),
+      matterNumber: row.matter_number == null ? null : String(row.matter_number),
+      matterTitle: row.matter_title == null ? null : String(row.matter_title),
+      matterTitleAr: row.matter_title_ar == null ? null : String(row.matter_title_ar),
+      clientId: String(row.client_id),
+      clientName: row.client_name == null ? null : String(row.client_name),
+      clientNameAr: row.client_name_ar == null ? null : String(row.client_name_ar),
+      clientVatNumber: row.client_vat == null ? null : String(row.client_vat),
+      lines: (lines ?? []).map((l) => ({
+        id: String(l.id), position: Number(l.position), description: String(l.description),
+        descriptionAr: l.description_ar == null ? null : String(l.description_ar),
+        quantity: Number(l.quantity), unitPrice: Number(l.unit_price), amount: Number(l.amount),
+        discountAmount: Number(l.discount_amount ?? 0), vatCategory: String(l.vat_category ?? 'standard'),
+        vatRate: Number(l.vat_rate ?? 0.15), vatAmount: Number(l.vat_amount ?? 0),
+        billingSourceKey: l.billing_source_key == null ? null : String(l.billing_source_key),
+      })),
+      payments: (payments ?? []).map((p) => ({
+        id: String(p.id), provider: String(p.provider), amount: Number(p.amount),
+        currency: String(p.currency), status: String(p.status),
+        receiptNumber: p.receipt_number == null ? null : String(p.receipt_number),
+        createdAt: String(p.created_at), completedAt: p.completed_at == null ? null : String(p.completed_at),
+      })),
+    };
+  }
+
+  /* ═════════════════════════════════════════════════════════════════════════════
      P0.3 · CLIENT DUE DILIGENCE, THE OWNERS, THE SCREENING AND THE REPORT
 
      WHY EVERY METHOD HERE RETURNS A MAPPED OBJECT. `getClientForInvoice` handed the

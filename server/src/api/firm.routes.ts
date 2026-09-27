@@ -2015,23 +2015,40 @@ export function firmRouter(c: Container): Router {
       throw badRequest('validation_failed', 'a restriction requires a recorded reason');
     }
 
-    const changes = await c.firm.tx(async () => {
+    await c.firm.tx(async () => {
       const n = await c.firm.setMatterRestriction({
         tenantId: p.tenantId, matterId, restricted: body.restricted,
         reason: body.restricted ? (body.reason ?? null) : null,
         reasonAr: body.restricted ? (body.reasonAr ?? null) : null,
         actorMembershipId: p.membershipId,
       });
+
+      /*
+        THE REFUSAL COMES BEFORE THE RECORD, AND INSIDE THE TRANSACTION.
+
+        This used to read `return n` here, write the success row, commit, and only then
+        test the count outside — so an UPDATE that matched no rows produced an audit
+        trail asserting MATTER_RESTRICTED `outcome: success` for a restriction that was
+        never applied, followed by a 404 telling the caller the matter does not exist.
+        It was reachable: a matter with no `matter_controls` row made the update match
+        nothing (0073 gives every matter that row, and this is the second half of the
+        same correction).
+
+        Throwing here rolls the transaction back, so the trail records the attempt the
+        way the rest of the system records refusals — or not at all — and never records
+        an outcome that did not occur.
+      */
+      if (!n) throw notFoundOrForbidden('matter', matterId);
+
       await c.audit.write({
         action: body.restricted ? 'MATTER_RESTRICTED' : 'MATTER_UNRESTRICTED',
         actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
         resourceType: 'matter', resourceId: matterId, outcome: 'success',
         metadata: { membershipId: p.membershipId, reason: body.reason ?? null },
       }, requestInfo(req, c.trustProxy));
+
       return n;
     });
-
-    if (!changes) throw notFoundOrForbidden('matter', matterId);
     ok(res, { id: matterId, restricted: body.restricted });
   }));
 
@@ -2195,17 +2212,436 @@ export function firmRouter(c: Container): Router {
     ok(res, { id: invoiceId, status: 'approved', amount: outstanding });
   }));
 
+  /**
+   * THE FIRM'S INVOICE LIST · P2.3
+   *
+   * This route used to return the IDS of the matters a member could bill and nothing
+   * else — a scope computation with no rows behind it, which is why the surface-parity
+   * audit reported it as a route no screen requests. It requests nothing because there
+   * was nothing to render.
+   *
+   * The scope rule is unchanged and is still the only one: the member's own matter
+   * scope, filtered to the levels that carry financial material. What is added is the
+   * list itself, and `matterIds` is KEPT in the response because the old shape was a
+   * documented contract of this route and a console is not a reason to break it.
+   */
   r.get('/billing/invoices', ah(async (req, res) => {
     const p = principal(req);
     c.permissions.assertCanAny(p, ['billing.read', 'billing.read_all'], { type: 'invoice_collection' });
     const matters = await c.permissions.listMatters(p);
     const visible = new Set(matters.filter((m) => MATTER_FINANCIAL.includes(m.accessLevel as AccessLevel)).map((m) => m.id));
-    ok(res, {
-      // The list is derived from the matter scope, not from a separate query:
-      // one scope rule, applied everywhere, is the only way the two stay in step.
-      count: visible.size,
-      matterIds: [...visible],
+
+    /* One route, two readers: without `?detail` it answers the scope question it always
+       answered; with it, the rows. A console asks for the rows; a scope check that only
+       wants to know which matters are billable does not pay for them. */
+    if (req.query.detail !== '1') {
+      ok(res, { count: visible.size, matterIds: [...visible] });
+      return;
+    }
+
+    const matterId = typeof req.query.matterId === 'string' ? req.query.matterId : null;
+    const clientId = typeof req.query.clientId === 'string' ? req.query.clientId : null;
+    const status = typeof req.query.status === 'string' ? req.query.status : null;
+    const limitRaw = Number(req.query.limit ?? 200);
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 500) : 200;
+
+    /* An explicit matter filter is intersected with the scope rather than trusted: a
+       caller naming a matter they cannot reach gets an empty list, not a 403 — the same
+       answer they would get for a matter that does not exist. */
+    const scope = matterId
+      ? (visible.has(matterId) ? [matterId] : [])
+      : [...visible];
+
+    const invoices = await c.firm.listInvoicesForFirm(p.tenantId, { matterIds: scope, status, clientId, limit });
+    ok(res, { count: invoices.length, matterIds: [...visible], invoices });
+  }));
+
+  /**
+   * DRAFT AN INVOICE · P2.3 — the write the firm could not make.
+   *
+   * WHY NO `invoiceNumber` IS REQUIRED. A firm migrating from another system has its
+   * own series and must be able to keep it; a firm starting here should not have to
+   * count its invoices. So the route suggests the next free number when the caller
+   * omits one (`GET`-free: the suggestion travels back in the response), and the ISSUE
+   * path is what enforces uniqueness — the number is not sealed until the document
+   * exists.
+   *
+   * TWO WAYS TO BILL, AND THEY COMBINE. Recorded work (time entries and approved
+   * expenses, billed at the rate each entry carries) and manual lines (a fixed fee, a
+   * stage payment — the shapes `matter_billing_terms.basis` already names). Both end up
+   * as invoice lines with a `billing_source_key` where they came from recorded work.
+   */
+  r.post('/billing/invoices', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const body = strictBody(
+      z.object({
+        matterId: z.string().uuid(),
+        invoiceNumber: z.string().trim().min(3).max(60).optional(),
+        issueDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+        dueDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+        notesInternal: z.string().trim().max(2000).nullable().optional(),
+        timeEntryIds: z.array(z.string().uuid()).max(500).default([]),
+        expenseIds: z.array(z.string().uuid()).max(500).default([]),
+        lines: z.array(z.object({
+          description: z.string().trim().min(3).max(500),
+          descriptionAr: z.string().trim().max(500).nullable().optional(),
+          quantity: z.number().positive().max(100_000),
+          unitPrice: z.number().nonnegative().max(100_000_000),
+          discountAmount: z.number().nonnegative().max(100_000_000).default(0),
+          vatRate: z.number().min(0).max(1).default(0.15),
+          vatCategory: z.enum(['standard', 'zero_rated', 'exempt', 'out_of_scope']).default('standard'),
+        }).strict()).max(100).default([]),
+      }).strict(),
+      req, c, '/api/firm/billing/invoices',
+    );
+
+    const matterId = body.matterId;
+    c.permissions.assertCan(p, 'billing.create', { type: 'matter', id: matterId });
+    const { facts } = await c.permissions.requireMatter(p, matterId, MATTER_FINANCIAL);
+
+    if (body.timeEntryIds.length === 0 && body.expenseIds.length === 0 && body.lines.length === 0) {
+      throw badRequest('validation_failed',
+        'an invoice needs at least one line — select unbilled time or expenses, or add a line for a fixed fee');
+    }
+
+    /*
+      ═══ THE RULE 12 GATE ═══
+
+      A matter may not be billed without a SIGNED engagement letter and CURRENT terms.
+      The same predicate guards recording billable time (P1), and asking it here is not
+      belt-and-braces: drafting the invoice is the moment the firm states a fee to the
+      client, and Rule 12 requires the fee to have been agreed in writing first. The
+      refusal carries the blockers the matter's own billing panel already displays, so
+      the member is sent to the page that fixes it rather than to a rule number.
+    */
+    const billable = await c.firm.matterBillable(matterId);
+    if (!billable) {
+      await c.audit.tryWrite({
+        action: 'ENGAGEMENT_GATE_DENIED',
+        actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+        resourceType: 'matter', resourceId: matterId, outcome: 'denied',
+        reasonCode: 'engagement_gate',
+        metadata: { membershipId: p.membershipId, stage: 'invoice_draft' },
+      }, requestInfo(req, c.trustProxy));
+      throw badRequest('engagement_gate',
+        'this matter cannot be billed yet: it needs a signed engagement letter and billing terms in force (Rule 12)');
+    }
+
+    /* ── build the lines from the recorded work the caller selected ── */
+    const lines: Array<{
+      description: string; descriptionAr: string | null; quantity: number; unitPrice: number;
+      discountAmount: number; vatCategory: string; vatRate: number; billingSourceKey: string | null;
+    }> = [];
+
+    const timeRows = await c.firm.listTimeEntries(p.tenantId, { matterId });
+    const byTimeId = new Map(timeRows.map((t) => [String(t.id), t]));
+    for (const id of body.timeEntryIds) {
+      const t = byTimeId.get(id);
+      if (!t) throw badRequest('not_billable', `time entry ${id} is not on this matter`);
+      if (!['submitted', 'approved'].includes(String(t.status))) {
+        throw badRequest('entry_already_billed',
+          `the hour of ${String(t.entry_date)} is ${String(t.status)} and cannot be billed again`);
+      }
+      if (!t.billable) throw badRequest('not_billable', 'a non-billable hour cannot be put on an invoice');
+      const hours = round2(Number(t.minutes) / 60);
+      lines.push({
+        description: `${String(t.entry_date)} · ${String(t.staff_name)} · ${String(t.narrative)}`.slice(0, 500),
+        descriptionAr: t.narrative_ar ? String(t.narrative_ar).slice(0, 500) : null,
+        quantity: hours,
+        unitPrice: Number(t.hourly_rate_sar),
+        discountAmount: 0,
+        vatCategory: 'standard',
+        vatRate: 0.15,
+        billingSourceKey: `time:${id}`,
+      });
+    }
+
+    const expenseRows = await c.firm.listExpenses(p.tenantId, { matterId });
+    const byExpenseId = new Map(expenseRows.map((e) => [String(e.id), e]));
+    for (const id of body.expenseIds) {
+      const e = byExpenseId.get(id);
+      if (!e) throw badRequest('not_billable', `expense ${id} is not on this matter`);
+      if (String(e.status) !== 'approved') {
+        throw badRequest('not_billable', `a disbursement that is not approved cannot be billed (it is ${String(e.status)})`);
+      }
+      lines.push({
+        /* The NET is the line; the VAT the firm already paid on the disbursement is
+           carried as the line's own tax treatment, so a pass-on does not silently
+           become a second VAT charge at a different rate. */
+        description: `${String(e.incurred_on)} · ${String(e.category).replace(/_/g, ' ')} · ${String(e.description)}`.slice(0, 500),
+        descriptionAr: e.description_ar ? String(e.description_ar).slice(0, 500) : null,
+        quantity: 1,
+        unitPrice: Number(e.net_amount_sar),
+        discountAmount: 0,
+        vatCategory: String(e.vat_category ?? 'standard'),
+        vatRate: Number(e.total_amount_sar) > 0
+          ? round2(Number(e.vat_amount_sar) / Math.max(Number(e.net_amount_sar), 0.01))
+          : 0,
+        billingSourceKey: `expense:${id}`,
+      });
+    }
+
+    for (const l of body.lines) {
+      lines.push({
+        description: l.description,
+        descriptionAr: l.descriptionAr ?? null,
+        quantity: l.quantity,
+        unitPrice: l.unitPrice,
+        discountAmount: l.discountAmount,
+        vatCategory: l.vatCategory,
+        vatRate: l.vatRate,
+        billingSourceKey: null,
+      });
+    }
+
+    /* ── the number, the dates, and the ceiling ── */
+    const today = new Date().toISOString().slice(0, 10);
+    const issueDate = body.issueDate ?? today;
+    const dueDate = body.dueDate ?? new Date(Date.now() + 30 * 86_400_000).toISOString().slice(0, 10);
+    if (dueDate < issueDate) {
+      throw badRequest('validation_failed', 'the due date cannot fall before the issue date');
+    }
+
+    const preTotal = round2(lines.reduce(
+      (a, l) => a + round2(l.quantity * l.unitPrice - l.discountAmount) * (1 + l.vatRate), 0));
+    /*
+      THE NUMERIC CEILING, ASKED BEFORE THE ROW EXISTS. §73's discipline: the amount that
+      matters is the invoice's total, and a member's authority to commit the firm to it is
+      a recorded figure. Asking after the insert would leave a draft over the ceiling
+      behind every refusal.
+    */
+    c.permissions.assertWithinAuthority(p, 'invoice', preTotal, { type: 'matter', id: matterId });
+
+    const invoiceNumber = body.invoiceNumber
+      ? (body.invoiceNumber.endsWith('-DRAFT') ? body.invoiceNumber : `${body.invoiceNumber}-DRAFT`)
+      : `${await c.firm.suggestInvoiceNumber(p.tenantId, issueDate.slice(0, 4))}-DRAFT`;
+
+    const created = await c.firm.createInvoiceDraft({
+      tenantId: p.tenantId, clientId: String(facts.clientId ?? ''), matterId,
+      invoiceNumber, issueDate, dueDate,
+      notesInternal: body.notesInternal ?? null,
+      lines,
+      timeEntryIds: body.timeEntryIds,
+      expenseIds: body.expenseIds,
     });
+
+    /*
+      A SELECTION THAT BILLED NOTHING IS REPORTED, NOT SWALLOWED. The linking statements
+      are guarded (only entries that are still unbilled match), so a race with another
+      draft can leave a line on the invoice whose source entry went elsewhere. The counts
+      are returned, and a shortfall is audited, because an invoice that silently bills
+      less than the member selected is a fee the firm does not collect.
+    */
+    const shortfall = (body.timeEntryIds.length - created.timeLinked)
+      + (body.expenseIds.length - created.expensesLinked);
+    if (shortfall > 0) {
+      await c.audit.tryWrite({
+        action: 'CEILING_EXCEEDED',
+        actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+        resourceType: 'invoice', resourceId: created.id, outcome: 'denied',
+        reasonCode: 'billing_source_taken',
+        metadata: {
+          membershipId: p.membershipId, requested: body.timeEntryIds.length + body.expenseIds.length,
+          linked: created.timeLinked + created.expensesLinked,
+        },
+      }, requestInfo(req, c.trustProxy));
+    }
+
+    await c.audit.write({
+      action: 'INVOICE_DRAFTED',
+      actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+      resourceType: 'invoice', resourceId: created.id, outcome: 'success',
+      metadata: {
+        matterId, invoiceNumber, total: created.total,
+        timeEntries: created.timeLinked, expenses: created.expensesLinked,
+        manualLines: body.lines.length,
+      },
+    }, requestInfo(req, c.trustProxy));
+
+    ok(res, {
+      id: created.id, invoiceNumber: created.invoiceNumber,
+      subtotal: created.subtotal, vatAmount: created.vatAmount, total: created.total,
+      timeEntriesBilled: created.timeLinked, expensesBilled: created.expensesLinked,
+      /* The count comes back so the dialog can SAY when it billed fewer entries than
+         were selected. Silence here would be the firm losing money quietly. */
+      shortfall,
+    }, 201);
+  }));
+
+  /**
+   * CANCEL A DRAFT · the way out of a mistake the firm has not made official yet.
+   *
+   * GATED ON `billing.create`, NOT ON `billing.approve`. Cancelling an unapproved draft is
+   * the same act as drafting one — the member is taking back something that has not been
+   * promised to anyone: no approval, no fiscal identity, no client has seen it. Demanding
+   * a partner's code for it would mean the only way to fix a mistyped fee is to ask a
+   * partner to do it, which is how firms end up keeping mistakes.
+   *
+   * AN ISSUED INVOICE IS A DIFFERENT MATTER and is refused by the repository: a tax
+   * document is corrected by a credit note. The refusal arrives as `issued_invoice_immutable`
+   * (409), which is the same token the write-off path uses for the same reason.
+   */
+  r.post('/billing/invoices/:id/cancel', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const invoiceId = String(req.params.id);
+    const body = strictBody(
+      z.object({
+        /* A cancellation without a reason is a hole in the register: it is the only trace
+           left of an invoice that was drafted and taken back. */
+        reason: z.string().trim().min(5).max(500),
+      }).strict(),
+      req, c, '/api/firm/billing/invoices/:id/cancel',
+    );
+
+    c.permissions.assertCan(p, 'billing.create', { type: 'invoice', id: invoiceId });
+    const invoice = await c.firm.getInvoiceDetail(p.tenantId, invoiceId);
+    if (!invoice) throw notFoundOrForbidden('invoice', invoiceId);
+    if (invoice.matterId) await c.permissions.requireMatter(p, invoice.matterId, MATTER_FINANCIAL);
+
+    const result = await c.firm.tx(async () => {
+      const out = await c.firm.cancelInvoiceDraft({
+        tenantId: p.tenantId, invoiceId, reason: body.reason,
+      });
+      await c.audit.write({
+        action: 'INVOICE_CANCELLED',
+        actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+        resourceType: 'invoice', resourceId: invoiceId, outcome: 'success',
+        metadata: {
+          membershipId: p.membershipId, invoiceNumber: invoice.invoiceNumber,
+          reason: body.reason, releasedTime: out.releasedTime, releasedExpenses: out.releasedExpenses,
+        },
+      }, requestInfo(req, c.trustProxy));
+      return out;
+    });
+
+    /* The counts go back so the screen can say what came back to the unbilled list. A
+       cancellation that reported only success would leave the member wondering whether
+       the hour they mistakenly billed is usable again. */
+    ok(res, {
+      id: invoiceId, internalStatus: 'cancelled',
+      releasedTime: result.releasedTime, releasedExpenses: result.releasedExpenses,
+    });
+  }));
+
+  /** One invoice, with its lines, its receipts and its fiscal identity. */
+  r.get('/billing/invoices/:id', ah(async (req, res) => {
+    const p = principal(req);
+    const invoiceId = String(req.params.id);
+    c.permissions.assertCanAny(p, ['billing.read', 'billing.read_all'], { type: 'invoice', id: invoiceId });
+    const detail = await c.firm.getInvoiceDetail(p.tenantId, invoiceId);
+    if (!detail) throw notFoundOrForbidden('invoice', invoiceId);
+    /* The matter scope is asked AFTER the row is read, because the row is what names the
+       matter — and a member who cannot reach the matter gets the 404 a missing invoice
+       would give, not a 403 that confirms it exists. */
+    if (detail.matterId) await c.permissions.requireMatter(p, detail.matterId, MATTER_FINANCIAL);
+    ok(res, detail);
+  }));
+
+  /**
+   * SEND IT TO THE CLIENT · the write behind `billing.send`.
+   *
+   * `billing.send` has been in the catalogue since P0.6 and granted to the managing
+   * partner, the partner and the finance role — and nothing consulted it, because
+   * nothing sent anything. This is the transition that puts the invoice in the client's
+   * portal, and it is separated from approval for the reason the two are separate
+   * permission codes: approving is the firm agreeing with its own arithmetic, sending is
+   * the firm asking for money.
+   */
+  r.post('/billing/invoices/:id/send', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const invoiceId = String(req.params.id);
+    strictBody(z.object({}).strict(), req, c, '/api/firm/billing/invoices/:id/send');
+
+    c.permissions.assertCan(p, 'billing.send', { type: 'invoice', id: invoiceId });
+    const invoice = await c.firm.getInvoiceDetail(p.tenantId, invoiceId);
+    if (!invoice) throw notFoundOrForbidden('invoice', invoiceId);
+    if (invoice.matterId) await c.permissions.requireMatter(p, invoice.matterId, MATTER_FINANCIAL);
+
+    /*
+      AN UNISSUED INVOICE IS NOT SENDABLE, and the refusal says which of the two things
+      is missing. A document with no UUID, no ICV and no hash is one the tax authority has
+      never seen; putting it in front of the client would be the firm issuing an invoice
+      it cannot report.
+    */
+    if (!invoice.issued) {
+      throw conflict('invoice_not_issued',
+        'this invoice has not been issued — it has no fiscal identity to send');
+    }
+    if (invoice.internalStatus !== 'approved') {
+      throw conflict('invoice_not_issued',
+        `an invoice in ${invoice.internalStatus} cannot be sent — approve it first`);
+    }
+
+    const changes = await c.firm.tx(async () => {
+      const n = await c.firm.markInvoiceSent(p.tenantId, invoiceId);
+      if (n > 0) {
+        await c.audit.write({
+          action: 'INVOICE_SENT',
+          actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+          resourceType: 'invoice', resourceId: invoiceId, outcome: 'success',
+          metadata: {
+            membershipId: p.membershipId, invoiceNumber: invoice.invoiceNumber,
+            total: invoice.total, clientId: invoice.clientId, matterId: invoice.matterId,
+          },
+        }, requestInfo(req, c.trustProxy));
+      }
+      return n;
+    });
+    if (!changes) throw conflict('invoice_not_issued', 'this invoice is not in a state that can be sent');
+
+    ok(res, { id: invoiceId, internalStatus: 'sent' });
+  }));
+
+  /**
+   * RECORD MONEY RECEIVED · the write behind `billing.record_payment`.
+   *
+   * The second half of the money block's entry point: money arrives at the firm, and it
+   * has to be attributable to an invoice AND to a bank reference. Two rows, one fact —
+   * the receipt and the application (see `recordInvoicePayment`).
+   *
+   * NO CEILING HERE, DELIBERATELY. §73's ceilings govern what a member may COMMIT the
+   * firm to — a discount, a write-off, an invoice total. Money already received is not a
+   * commitment, and a ceiling on recording it would only make the ledger late.
+   */
+  r.post('/billing/invoices/:id/payments', firmCsrfGuard(), ah(async (req, res) => {
+    const p = principal(req);
+    const invoiceId = String(req.params.id);
+    const body = strictBody(
+      z.object({
+        amount: z.number().finite().positive().max(1e12),
+        provider: z.enum(['bank_transfer', 'sadad', 'manual']).default('bank_transfer'),
+        reference: z.string().trim().max(200).nullable().optional(),
+        receivedOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+      }).strict(),
+      req, c, '/api/firm/billing/invoices/:id/payments',
+    );
+
+    c.permissions.assertCan(p, 'billing.record_payment', { type: 'invoice', id: invoiceId });
+    const invoice = await c.firm.getInvoiceDetail(p.tenantId, invoiceId);
+    if (!invoice) throw notFoundOrForbidden('invoice', invoiceId);
+    if (invoice.matterId) await c.permissions.requireMatter(p, invoice.matterId, MATTER_FINANCIAL);
+
+    const received = await c.firm.recordInvoicePayment({
+      tenantId: p.tenantId, invoiceId, amount: body.amount, provider: body.provider,
+      reference: body.reference ?? null,
+      receivedOn: body.receivedOn ?? new Date().toISOString().slice(0, 10),
+      actorUserId: p.userId,
+    });
+
+    await c.audit.write({
+      action: 'PAYMENT_RECORDED',
+      actor: { kind: 'firm_member', userId: p.userId, tenantId: p.tenantId },
+      resourceType: 'invoice', resourceId: invoiceId, outcome: 'success',
+      metadata: {
+        membershipId: p.membershipId, amount: body.amount, provider: body.provider,
+        reference: body.reference ?? null, amountPaid: received.amountPaid, status: received.status,
+      },
+    }, requestInfo(req, c.trustProxy));
+
+    ok(res, {
+      id: received.id, amountPaid: received.amountPaid, total: received.total,
+      outstanding: round2(received.total - received.amountPaid), internalStatus: received.status,
+    }, 201);
   }));
 
   // ---- parties and conflicts (§P0.1, migration 0029) ----------------------

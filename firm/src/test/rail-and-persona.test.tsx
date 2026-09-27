@@ -248,15 +248,21 @@ describe('§16/§17 · the bottom bar defaults by persona, and only as a default
     expect(admin.middle).not.toEqual(lawyer.middle);
   });
 
-  it('leads a finance officer with the register of who owes, since Billing is not a firm-wide screen', async () => {
-    // The persona names Billing first. Billing is built — as the matter's Billing
-    // tab — but there is no firm-wide billing screen, so it is not a candidate
-    // for the bar, and the persona's next reachable module takes the slot. This
-    // is the honest behaviour: the default describes the work, the reachable set
-    // decides what can fill it.
+  it('leads a finance officer with the invoices, which is what the persona asked for', async () => {
+    /*
+      THE PERSONA TABLE NAMED BILLING FIRST AND NOTHING COULD FILL THE SLOT. Its first
+      preference, `billing`, was granted to the role, named by the order — and unreachable,
+      because there was no firm-wide billing screen for the leaf to point at. The bar fell
+      through to the next preference and handed the officer the client register on their
+      first day, which is a defensible default for a role that cannot open its own module.
+
+      P2.3 built `/billing`, and the table's first preference now resolves. Two things are
+      asserted: the slot is Invoices, and it is there because the member may reach it — the
+      same authorised-set-first rule as every case around it. The order was never wrong;
+      the product was short of a screen.
+    */
     const { middle } = await renderBar({ roles: ['FINANCE'] });
-    expect(middle[0]).toBe('Clients');
-    expect(middle).not.toContain('Billing');
+    expect(middle[0]).toBe('Invoices');
   });
 
   it('lets usage override the persona, exactly as it overrides the global order', async () => {
@@ -279,7 +285,14 @@ describe('§16/§17 · the bottom bar defaults by persona, and only as a default
   });
 
   it('falls back to the designed order for a role the table does not name', async () => {
+    /*
+      The designed order is `matters, tasks, documents, hearings, deadlines, billing, …`.
+      Four of the five ahead of `billing` are not firm-wide screens — tasks, documents,
+      hearings and deadlines live on a matter — so the third slot goes to `billing`, which
+      is now one. Before P2.3 the slot went to My Work and then Clients, and this assertion
+      said so; the change in the expected list is the product changing, not the rule.
+    */
     const { middle } = await renderBar({ roles: ['SOMETHING_NEW'] });
-    expect(middle).toEqual(['Matters', 'My Work', 'Clients']);
+    expect(middle).toEqual(['Matters', 'Invoices', 'My Work']);
   });
 });

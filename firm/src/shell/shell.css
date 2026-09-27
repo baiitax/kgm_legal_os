@@ -2896,3 +2896,130 @@
   /* The state chip takes its own line so the three controls sit together beneath it. */
   .firm-life__state { flex-basis: 100%; }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   THE MONEY CONSOLE · P2.3
+
+   The firm's invoice list, the panel behind a row, and the draft dialog. Money is the
+   one screen where a misread column costs something, so the figures are set in the
+   Latin numeric face with tabular figures: an Arabic session reads the amounts without
+   losing the alignment, and a column of `1,200.00` lines up under a column of `900.00`
+   the way a statement does. That is what `--font-num` is for.
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+.firm-money__totals {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
+  gap: var(--sp-3);
+  margin-block-end: var(--sp-4);
+}
+
+.firm-money__stat { block-size: 100%; }
+.firm-money__stat .kgm-card__body { display: grid; gap: var(--sp-1); }
+.firm-money__statlabel {
+  font-size: var(--step--1);
+  color: var(--text-muted, currentColor);
+  letter-spacing: 0.01em;
+}
+.firm-money__statvalue {
+  font-family: var(--font-num, inherit);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--step-3, 1.5rem);
+  font-weight: 600;
+  line-height: 1.1;
+}
+.firm-money__statfoot { font-size: var(--step--2, 0.8125rem); line-height: 1.5; }
+
+/* The status filters are buttons, not tabs with panels — but they behave as one control,
+   so they are laid out as a row that wraps rather than a scroll strip. */
+.firm-money__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-block-end: var(--sp-3);
+}
+
+.firm-money__num,
+.firm-money__owed,
+.firm-money__paid,
+.firm-money__optionamt,
+.firm-money__total {
+  font-family: var(--font-num, inherit);
+  font-variant-numeric: tabular-nums;
+}
+
+/* What is still owed is the number a partner looks for; what has been paid is quieter. */
+.firm-money__owed { font-weight: 600; }
+.firm-money__paid { color: var(--text-muted, currentColor); }
+
+.firm-money__who { display: grid; gap: 2px; }
+.firm-money__matter { font-size: var(--step--2, 0.8125rem); }
+
+/*
+  THE TWO STATES, STACKED. Internal state on top, client visibility underneath, because
+  they answer different questions — what the firm has done, and whether the client has
+  the document at all — and a row that showed only the first would make an unreleased
+  invoice look like progress.
+*/
+.firm-money__status { display: grid; gap: 2px; justify-items: start; }
+.firm-money__vis { font-size: var(--step--2, 0.8125rem); }
+
+.firm-money__issued { display: inline-flex; }
+
+.firm-money__line { display: grid; gap: 2px; }
+.firm-money__src { font-size: var(--step--2, 0.8125rem); }
+
+/* The Rule 12 refusal, shown BEFORE anything can be selected: the dialog says why the
+   matter cannot be billed rather than letting a member build a selection that the server
+   will refuse at the last click. */
+.firm-money__blocker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-nested-1);
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+  font-size: var(--step--1);
+}
+
+/* The unbilled work a draft can bill. A list of checkboxes rather than a table: the
+   decision is per row and the narrative is long, which a column of checkboxes handles
+   better than a grid of cells. */
+.firm-money__pick { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--sp-1); }
+.firm-money__option {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-nested-1);
+  cursor: pointer;
+}
+.firm-money__optionmain { flex: 1 1 auto; min-inline-size: 0; font-size: var(--step--1); line-height: 1.5; }
+.firm-money__optionamt { flex: 0 0 auto; font-weight: 600; }
+
+/* A fee line: description wide, quantity and rate narrow, removal at the end. */
+.firm-money__feerow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 6rem 8rem auto;
+  gap: var(--sp-2);
+  align-items: end;
+  margin-block-end: var(--sp-2);
+}
+
+.firm-money__preview {
+  margin-block-start: var(--sp-3);
+  padding-block-start: var(--sp-3);
+  border-block-start: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+}
+.firm-money__total { font-weight: 700; }
+
+/* The dialog footer: matter on the left, the two writes on the right, close last. */
+.firm-money__spacer { flex: 1 1 auto; }
+
+@media (max-width: 560px) {
+  .firm-money__feerow { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .firm-money__feerow > :first-child { grid-column: 1 / -1; }
+}

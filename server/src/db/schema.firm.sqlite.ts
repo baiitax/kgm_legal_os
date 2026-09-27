@@ -284,6 +284,34 @@ create trigger if not exists firm_membership_tenant_immutable
   before update of tenant_id on firm_memberships
   begin select raise(ABORT, 'firm_memberships.tenant_id is immutable'); end;
 
+-- ── EVERY MATTER IS OWED A CONTROL ROW ──────────────────────────────────────
+--
+-- matter_controls is where a matter's restriction, owner, lead, supervising partner
+-- and department live, and it is keyed by matter_id — one row per matter. Nothing in
+-- the application can create it: the grants give firm_api SELECT on every column and
+-- UPDATE on the six restriction columns, and INSERT on none, because creating the row
+-- was meant to be the database's job. No rule ever did that job, so every matter made
+-- through the product had no row — and POST /matters/:id/restrict updated nothing,
+-- answered 404 "matter not found", and recorded a success in the audit trail (0073
+-- corrects all three).
+--
+-- The trigger is the rule. It fires for every writer — the product, an import, a
+-- verification script — so "a matter with no controls" stops being a state the system
+-- can be in. In SQLite there is no SECURITY DEFINER to reason about: the trigger runs
+-- as the connection, which owns the tables.
+--
+-- INSERT OR IGNORE is load-bearing. The demo seeder inserts its own, richer control
+-- row (department, owner, lead, and the restriction that demonstrates §27) AFTER the
+-- matter row, and whichever arrives second must not fail. The seeder's row wins, which
+-- is what the seed data depends on — see the upsert in seed.ts.
+create trigger if not exists matters_controls_row
+  after insert on matters
+  for each row
+  begin
+    insert or ignore into matter_controls (matter_id, tenant_id, created_at, updated_at)
+    values (new.id, new.tenant_id, current_timestamp, current_timestamp);
+  end;
+
 -- A matter's tenant cannot drift from the matter it controls.
 create trigger if not exists matter_controls_tenant_matches
   before insert on matter_controls
@@ -1341,10 +1369,29 @@ create trigger if not exists expense_shape_guard
   document that cannot be amended, so moving the entry would make its own totals wrong.
   And its figures may not be rewritten either — an invoice whose lines were computed
   from a duration that has since changed is a document with no defensible basis.
+
+  ── THE FREEZE FOLLOWS THE DOCUMENT, NOT THE MERE EXISTENCE OF ONE ────────────
+
+  Every guard below used to fire on "the row is billed" or "the row names an invoice",
+  with no reference to WHICH invoice holds the entry. That is wider than the rule each one
+  states in its own error message ("this entry is on an ISSUED invoice"), and the
+  difference is a member's afternoon: a DRAFT that billed the wrong hour could not be
+  removed, and the hour could not be released either, because the guards fired on the draft
+  exactly as hard as on a tax document. The firm was left with a number consumed, an hour
+  frozen, and no move that recovered either.
+
+  So each guard now asks the question it always claimed to ask: is the invoice that holds
+  this row ISSUED? The invoice_uuid column decides that — the same fact 0034 is
+  immutability guards read — and a draft, which has no fiscal identity and is on no server
+  the tax authority can see, stops freezing anything. The service is then free to release
+  the row when a draft is cancelled, which is what a firm does with a mistake it has not
+  yet made official. (0070 in the Postgres tree carries the same correction, for the same
+  reason; the two engines agree, which is the point of keeping this mirror honest.)
 */
 create trigger if not exists time_entry_billed_immutable_guard
   before update on time_entries
   when old.status = 'billed' and new.status <> 'billed'
+   and exists (select 1 from invoices i where i.id = old.invoice_id and i.invoice_uuid is not null)
   begin
     select raise(ABORT, 'entry_already_billed: this entry is on an issued invoice — correct it with a credit note, not by un-billing it');
   end;
@@ -1352,13 +1399,16 @@ create trigger if not exists time_entry_billed_immutable_guard
 create trigger if not exists entry_invoice_move_guard
   before update on time_entries
   when old.invoice_id is not null and new.invoice_id is not old.invoice_id
+   and exists (select 1 from invoices i where i.id = old.invoice_id and i.invoice_uuid is not null)
   begin
     select raise(ABORT, 'entry_invoice_immutable: a billed entry may not be moved to another invoice');
   end;
 
 create trigger if not exists time_entry_billed_figures_guard
   before update on time_entries
-  when old.status = 'billed' and (
+  when old.status = 'billed'
+   and exists (select 1 from invoices i where i.id = old.invoice_id and i.invoice_uuid is not null)
+   and (
        new.minutes is not old.minutes
     or new.amount_sar is not old.amount_sar
     or new.hourly_rate_sar is not old.hourly_rate_sar
@@ -1373,6 +1423,7 @@ create trigger if not exists time_entry_billed_figures_guard
 create trigger if not exists expense_billed_immutable_guard
   before update on expenses
   when old.status = 'billed' and new.status <> 'billed'
+   and exists (select 1 from invoices i where i.id = old.invoice_id and i.invoice_uuid is not null)
   begin
     select raise(ABORT, 'entry_already_billed: this disbursement is on an issued invoice — correct it with a credit note, not by un-billing it');
   end;
@@ -1380,13 +1431,16 @@ create trigger if not exists expense_billed_immutable_guard
 create trigger if not exists expense_invoice_move_guard
   before update on expenses
   when old.invoice_id is not null and new.invoice_id is not old.invoice_id
+   and exists (select 1 from invoices i where i.id = old.invoice_id and i.invoice_uuid is not null)
   begin
     select raise(ABORT, 'entry_invoice_immutable: a billed disbursement may not be moved to another invoice');
   end;
 
 create trigger if not exists expense_billed_figures_guard
   before update on expenses
-  when old.status = 'billed' and (
+  when old.status = 'billed'
+   and exists (select 1 from invoices i where i.id = old.invoice_id and i.invoice_uuid is not null)
+   and (
        new.net_amount_sar is not old.net_amount_sar
     or new.vat_amount_sar is not old.vat_amount_sar
     or new.total_amount_sar is not old.total_amount_sar

@@ -45,6 +45,7 @@ import { Matters } from './pages/Matters.js';
 import { MyWork } from './pages/MyWork.js';
 import { MatterWorkspace } from './pages/MatterWorkspace.js';
 import { Intake } from './pages/Intake.js';
+import { Billing } from './pages/Billing.js';
 import './shell/shell.css';
 
 /** Sentinel the More sheet uses to request a sign-out through the shell. */
@@ -207,6 +208,17 @@ function Routed({ basePath, query, onNavigate }: {
       return <Clients onNavigate={onNavigate} />;
     case '/matters':
       return <Matters onNavigate={onNavigate} />;
+    /*
+      THE MONEY CONSOLE.
+      
+      A firm-wide destination, and the first one in this app that is not a view over
+      matters: it exists because the invoice is the firm's own document, not a property of
+      a file. The matter's Billing tab still owns what belongs to ONE engagement (its
+      terms, its unbilled work, its gates); this screen is where the firm sees what it has
+      billed, what has been released, and what has been paid.
+    */
+    case '/billing':
+      return <Billing onNavigate={onNavigate} />;
     case '/admin/users':
       return <Users />;
     case '/admin/audit':

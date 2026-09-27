@@ -217,13 +217,20 @@ describe('§50 · the nav only offers destinations the app can render', () => {
 
     Written down because the nav must not list them, and because the reason is
     not obvious from a missing row. Hearings, deadlines, documents, parties,
-    conflicts, judgments, time, expenses and billing ARE implemented — inside a
-    matter, on its workspace tabs. Contracts, POA, messages, licences, training
-    and complaints are implemented nowhere.
+    conflicts, judgments, time and expenses ARE implemented — inside a matter, on
+    its workspace tabs. Contracts, POA, messages, licences, training, complaints
+    and collections are implemented nowhere.
+
+    `/billing` WAS ON THIS LIST AND IS NOT ANY MORE. P2.3 built the firm's money
+    console: invoices are drafted, released and paid on `/billing`, gated on
+    `billing.read`. Removing it from the list is the honest edit — the list is a
+    statement about what this build has, and it now has one. The matter's Billing
+    tab keeps what belongs to one engagement (its terms, its unbilled work, the
+    gates that explain a refusal).
   */
   const NOT_FIRM_SCREENS = [
     '/hearings', '/deadlines', '/documents', '/contracts', '/poa',
-    '/billing', '/time', '/expenses', '/collections',
+    '/time', '/expenses', '/collections',
     '/conflicts', '/licences', '/training', '/complaints',
     '/messages', '/tasks', '/calendar', '/notifications', '/admin/teams',
   ];

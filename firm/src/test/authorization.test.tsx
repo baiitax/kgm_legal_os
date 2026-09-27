@@ -180,8 +180,20 @@ describe('§50 · navigation is generated from permissions, never hardcoded', ()
     */
     const nav = visibleNav(PERMISSIONS.partner);
     const ids = nav.groups.map((g) => g.group.id);
-    expect(ids).toEqual(expect.arrayContaining(['dashboard', 'workspace', 'clients', 'matters', 'admin']));
-    for (const absent of ['legal', 'finance', 'compliance', 'communication']) {
+    expect(ids).toEqual(expect.arrayContaining(['dashboard', 'workspace', 'clients', 'matters', 'finance', 'admin']));
+    /*
+      FINANCE MOVED OUT OF THE ABSENT LIST WHEN P2.3 BUILT IT. This test used to assert
+      that holding every permission in the catalogue still did not produce a Billing row,
+      because there was no firm-wide billing screen — a true statement about the build, and
+      the one the gap analysis quoted. `/billing` now exists, gated on `billing.read`, and
+      it is the only leaf in the group: a member who may read an invoice may read the list,
+      and the server narrows every row to the matters they can bill. Legal, compliance and
+      communication are still absent, for the same reason as before: there is still no
+      screen behind them.
+    */
+    const finance = nav.groups.find((g) => g.group.id === 'finance');
+    expect(finance?.leaves.map((l) => l.id)).toEqual(['billing']);
+    for (const absent of ['legal', 'compliance', 'communication']) {
       expect(ids, absent).not.toContain(absent);
     }
   });
@@ -221,10 +233,14 @@ describe('§50 · navigation is generated from permissions, never hardcoded', ()
     // group list — the difference is structural, not a second rule.
     expect(nav.groups.map((g) => g.group.id)).toContain('clients');
     expect(leafIds).toContain('audit');       // holds audit.read
-    // Holding `billing.read_all` no longer buys a Billing row, because there is
-    // no firm-wide billing screen. It buys the matter's Billing tab, which the
-    // matter workspace gates on the member's access level for THAT matter.
-    expect(leafIds).not.toContain('billing');
+    /*
+      AND BILLING, WHICH IS WHAT THE ROLE IS FOR. Holding `billing.read_all` bought
+      nothing but a matter tab until P2.3; the console's whole reason to exist is that the
+      finance role has three granted codes — `billing.create`, `billing.send`,
+      `billing.record_payment` — that no screen consulted.
+    */
+    expect(leafIds).toContain('billing');
+    expect(isPathAllowed(nav.allowedPaths, '/billing')).toBe(true);
     for (const absent of ['hearings', 'contracts', 'poa', 'licences', 'collections']) {
       expect(leafIds, absent).not.toContain(absent);
     }
@@ -312,8 +328,10 @@ describe('§50 · the resolved session drives the same nav at runtime', () => {
     expect(get().permissions.size).toBe(PERMISSIONS.partner.length);
     expect(get().can('billing.approve')).toBe(true);
     const ids = get().nav.groups.map((g) => g.group.id);
-    expect(ids).toEqual(expect.arrayContaining(['dashboard', 'workspace', 'clients', 'matters', 'admin']));
-    expect(ids).not.toContain('finance');
+    expect(ids).toEqual(expect.arrayContaining(['dashboard', 'workspace', 'clients', 'matters', 'finance', 'admin']));
+    /* The runtime resolution agrees with the pure function above — one nav, two entry
+       points, and the console is reachable from both. */
+    expect(isPathAllowed(get().nav.allowedPaths, '/billing')).toBe(true);
   });
 
   it('resolves a paralegal session with admin and the unbuilt modules absent', async () => {
@@ -327,7 +345,10 @@ describe('§50 · the resolved session drives the same nav at runtime', () => {
     expect(get().can('audit.read')).toBe(false);
     const ids = get().nav.groups.map((g) => g.group.id);
     expect(ids).not.toContain('admin');
+    /* Finance is closed to her for the PERMISSION reason alone now that the screen
+       exists: she holds no billing read code, so there is nothing to show her. */
     expect(ids).not.toContain('finance');
+    expect(isPathAllowed(get().nav.allowedPaths, '/billing')).toBe(false);
     expect(ids).not.toContain('legal');
   });
 

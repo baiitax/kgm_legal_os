@@ -266,6 +266,59 @@ const SERVER_WRITES: Array<{
       'issued_by_staff', 'issued_at', 'created_at'],
   },
 
+  /*
+    ── P2.3 · THE THREE WRITES THAT CLOSE THE MONEY LOOP ─────────────────────
+
+    The firm could approve, issue, discount and write off an invoice and could not CREATE
+    one. These entries are the statements that make the missing half checkable: a rebuild
+    of the database from `supabase/migrations` has to grant exactly these columns to
+    `firm_api`, or the console fails on a privilege the migration never mentioned.
+  */
+  {
+    table: 'invoices', command: 'INSERT', where: 'FirmRepo.createInvoiceDraft (the draft)',
+    columns: ['id', 'tenant_id', 'client_id', 'matter_id', 'invoice_number', 'issue_date',
+      'due_date', 'currency', 'subtotal', 'vat_rate', 'vat_amount', 'total', 'amount_paid',
+      'internal_status', 'client_status', 'notes_internal', 'created_at', 'updated_at'],
+  },
+  {
+    table: 'invoice_lines', command: 'INSERT', where: 'FirmRepo.createInvoiceDraft (its lines)',
+    columns: ['id', 'invoice_id', 'position', 'description', 'description_ar', 'quantity',
+      'unit_price', 'amount', 'discount_amount', 'vat_category', 'vat_rate', 'vat_amount',
+      /* The column the live database had and no file in this repository declared — see
+         0065's header. It is checked here because the statement writes it and a rebuilt
+         database without it would refuse every draft. */
+      'billing_source_key'],
+  },
+  {
+    // Two statements, one act: the hour is marked billed AND attached to the invoice, and
+    // both happened only if the WHERE clause matched a row that no other draft took.
+    table: 'time_entries', command: 'UPDATE', where: 'FirmRepo.createInvoiceDraft (the hours it bills)',
+    columns: ['status', 'invoice_id', 'updated_at'],
+    readColumns: ['id', 'tenant_id', 'billable', 'status', 'invoice_id'],
+  },
+  {
+    table: 'expenses', command: 'UPDATE', where: 'FirmRepo.createInvoiceDraft (the disbursements it passes on)',
+    columns: ['status', 'invoice_id', 'updated_at'],
+    readColumns: ['id', 'tenant_id', 'status', 'invoice_id'],
+  },
+  {
+    // The receipt. `provider_intent_id` and `receipt_number` both carry the reference the
+    // money arrived under, and both are NULL for cash — recorded as absent rather than
+    // invented, because a fabricated reference is indistinguishable from a real one.
+    table: 'payments', command: 'INSERT', where: 'FirmRepo.recordInvoicePayment (the receipt)',
+    columns: ['id', 'tenant_id', 'invoice_id', 'client_id', 'initiated_by_user_id', 'provider',
+      'provider_intent_id', 'amount', 'currency', 'status', 'receipt_number', 'completed_at',
+      'created_at'],
+  },
+  {
+    // The release: `internal_status` moves to sent and `client_status` is derived in the
+    // same write, so the portal's list and the firm's list cannot disagree about whether
+    // the client has this invoice. Guarded on `approved` and on a non-null `invoice_uuid`.
+    table: 'invoices', command: 'UPDATE', where: 'FirmRepo.markInvoiceSent (the release)',
+    columns: ['internal_status', 'client_status', 'updated_at'],
+    readColumns: ['id', 'tenant_id', 'internal_status', 'invoice_uuid', 'amount_paid', 'total', 'due_date'],
+  },
+
   // ── P1 · client money ───────────────────────────────────────────────────
   {
     table: 'client_ledgers', command: 'INSERT', where: 'FirmRepo.ensureClientLedger',

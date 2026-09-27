@@ -601,8 +601,25 @@ create table if not exists invoice_lines (
   vat_category text not null default 'standard',
   vat_rate real not null default 0.15,
   vat_amount real not null default 0,
-  discount_amount real not null default 0
+  discount_amount real not null default 0,
+  /*
+    WHICH RECORDED FACT THIS LINE BILLS · the live database has had this column and a
+    partial unique index over it since the invoice-drafting migration landed, and this
+    mirror did not. The mirror is what the entire test suite runs on, so a column the
+    server writes and the mirror does not have fails every test that drafts an invoice
+    — which is the failure that tells you the two schemas have drifted, and the only
+    reason it is safe to find it here rather than in production.
+  */
+  billing_source_key text
 );
+
+/*
+  ONE LINE PER SOURCE, ENFORCED BY THE DATABASE. The source key reads "time:<id>" or
+  "expense:<id>", and the index is partial because manual lines (a fixed fee, a stage
+  payment) have no source, and any number of those may share a NULL.
+*/
+create unique index if not exists invoice_lines_billing_source_key_uq
+  on invoice_lines(billing_source_key) where billing_source_key is not null;
 
 create table if not exists payments (
   id text primary key,

@@ -182,10 +182,26 @@ export async function seedDemoData(
       }
       const cols = Object.keys(row);
       const placeholders = cols.map(() => '?').join(', ');
+      /*
+        `matter_controls` IS AN UPSERT, EVERY OTHER TABLE IS AN IGNORE.
+
+        A matter now gets its control row from a trigger the moment the matter row is
+        written (schema.firm.sqlite.ts, and 0073 in the Postgres tree). The seeder then
+        writes the richer row it wants — department, owner, lead, supervising partner,
+        and the restriction on the Gulf matter that §27 exists to demonstrate. Under
+        `on conflict do nothing` that second write would be DISCARDED and the demo would
+        silently lose the restricted matter. Updating the existing row keeps both rules:
+        the row always exists, and the seed data still decides what is in it.
+      */
+      const conflict = table === 'matter_controls'
+        ? `on conflict (matter_id) do update set ${
+            cols.filter((c) => c !== 'matter_id').map((c) => `${c} = excluded.${c}`).join(', ')
+          }`
+        : 'on conflict do nothing';
       try {
         await q.run(
           `insert into ${table} (${cols.join(', ')}) values (${placeholders})
-           on conflict do nothing`,
+           ${conflict}`,
           cols.map((c) => normalize(row[c])) as never,
         );
         inserted++;

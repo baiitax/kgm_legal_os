@@ -798,6 +798,80 @@ export const firmApi = {
       body: { roleCode, revoke },
     });
   },
+
+  // ---- the money console (P2.3) -----------------------------------------
+
+  /**
+   * THE FIRM'S INVOICES.
+   *
+   * `?detail=1` is not a preference: without it the route answers the scope question it
+   * has always answered — which matters this member may bill — and returns no rows. The
+   * console asks for the rows; a caller that only wants the scope does not pay for them.
+   * `matterIds` still comes back either way, because screens use it to say "12 matters
+   * in scope" beside the table.
+   */
+  async invoices(params: InvoiceQuery = {}): Promise<InvoiceListResponse> {
+    const q = new URLSearchParams({ detail: '1' });
+    if (params.matterId) q.set('matterId', params.matterId);
+    if (params.clientId) q.set('clientId', params.clientId);
+    if (params.status) q.set('status', params.status);
+    if (params.limit !== undefined) q.set('limit', String(params.limit));
+    return request(`/billing/invoices?${q.toString()}`);
+  },
+
+  /*
+    NO SEPARATE SCOPE METHOD. `GET /billing/invoices` without `?detail` answers which
+    matters a member may bill, and the console's own call already receives `matterIds`
+    alongside the rows — so a second method for the same route would be a second caller of
+    one endpoint with nothing to do. The route keeps its two shapes because a scope check
+    that only wants the ids should not pay for the list; the CLIENT does not need both.
+  */
+
+  /** One invoice with its lines and the receipts against it. */
+  async invoice(id: string): Promise<FirmInvoiceDetail> {
+    return request(`/billing/invoices/${encodeURIComponent(id)}`);
+  },
+
+  /**
+   * DRAFT AN INVOICE.
+   *
+   * The number is omitted on purpose: the server suggests the next free one in the
+   * firm's own series and marks it `-DRAFT` until the invoice is issued. A firm that
+   * keeps its own numbering can pass `invoiceNumber`, and the server appends the marker.
+   */
+  async createInvoice(body: CreateInvoiceBody): Promise<CreatedInvoice> {
+    return request('/billing/invoices', { method: 'POST', body });
+  },
+
+  /**
+   * CANCEL A DRAFT, AND GET ITS SOURCES BACK.
+   *
+   * The way out of a mistake that has not been made official: nothing has been approved,
+   * the invoice has no fiscal identity and no client has seen it. The response says how
+   * many hours and disbursements returned to the unbilled list, because that is the
+   * question the member has after pressing the button.
+   *
+   * An ISSUED invoice cannot be cancelled — it is a tax document, and its remedy is a
+   * credit note. The screen does not offer the action on one.
+   */
+  async cancelInvoice(id: string, reason: string): Promise<{
+    id: string; internalStatus: string; releasedTime: number; releasedExpenses: number;
+  }> {
+    return request(`/billing/invoices/${encodeURIComponent(id)}/cancel`, {
+      method: 'POST',
+      body: { reason },
+    });
+  },
+
+  /** Release an approved, issued invoice to the client. */
+  async sendInvoice(id: string): Promise<{ id: string; internalStatus: string }> {
+    return request(`/billing/invoices/${encodeURIComponent(id)}/send`, { method: 'POST', body: {} });
+  },
+
+  /** Record money received against an issued invoice. */
+  async recordInvoicePayment(id: string, body: RecordPaymentBody): Promise<RecordedPayment> {
+    return request(`/billing/invoices/${encodeURIComponent(id)}/payments`, { method: 'POST', body });
+  },
 };
 
 // ==========================================================================
@@ -1463,4 +1537,156 @@ export interface ClientNameMatch {
   nameAr: string | null;
   status: string;
   matterCount: number;
+}
+
+/*
+  ── P2.3 · THE MONEY CONSOLE ───────────────────────────────────────────────────
+
+  Transcribed from the routes, not inferred. Three of these shapes are the answer to a
+  question the product could not previously answer: what an invoice IS, what it bills,
+  and what has been paid against it.
+*/
+
+export interface InvoiceQuery {
+  matterId?: string;
+  clientId?: string;
+  /** One of the internal states: draft, approved, sent, partially_paid, paid, … */
+  status?: string;
+  limit?: number;
+}
+
+/**
+ * A row in the firm's invoice list.
+ *
+ * `internalStatus` is what the FIRM has done to the document; `clientStatus` is whether
+ * the CLIENT can see it at all, and it is null until the invoice is sent. A console that
+ * showed only one of the two would either hide a sent invoice's progress or promise a
+ * client a document they cannot open.
+ */
+export interface FirmInvoiceRow {
+  id: string;
+  invoiceNumber: string;
+  issueDate: string;
+  dueDate: string;
+  currency: string;
+  subtotal: number;
+  vatAmount: number;
+  total: number;
+  amountPaid: number;
+  outstanding: number;
+  internalStatus: string;
+  clientStatus: string | null;
+  /** True once the invoice carries a UUID and a hash: it has been issued, not merely approved. */
+  issued: boolean;
+  fiscalStatus: string | null;
+  matterId: string | null;
+  matterNumber: string | null;
+  clientName: string | null;
+  clientNameAr: string | null;
+}
+
+export interface InvoiceListResponse {
+  count: number;
+  /** Every matter in this member's billing scope, whether or not it has invoices. */
+  matterIds: string[];
+  invoices: FirmInvoiceRow[];
+}
+
+/** The line an invoice bills, and where it came from. */
+export interface FirmInvoiceLine {
+  id: string;
+  position: number;
+  description: string;
+  descriptionAr: string | null;
+  quantity: number;
+  unitPrice: number;
+  amount: number;
+  discountAmount: number;
+  vatCategory: string;
+  vatRate: number;
+  vatAmount: number;
+  /** `time:<id>` or `expense:<id>` where the line bills recorded work, null for a manual line. */
+  billingSourceKey: string | null;
+}
+
+export interface FirmInvoicePayment {
+  id: string;
+  provider: string;
+  amount: number;
+  currency: string;
+  status: string;
+  /**
+   * The bank or SADAD reference the money arrived under, and NULL when it arrived under
+   * none — a cash payment at the counter has no reference, and the server records that
+   * honestly rather than inventing one that would look real during a reconciliation.
+   */
+  receiptNumber: string | null;
+  createdAt: string;
+  completedAt: string | null;
+}
+
+export interface FirmInvoiceDetail extends FirmInvoiceRow {
+  vatRate: number;
+  invoiceUuid: string | null;
+  invoiceType: string | null;
+  icv: number | null;
+  supplyAt: string | null;
+  notesInternal: string | null;
+  matterTitle: string | null;
+  matterTitleAr: string | null;
+  clientId: string;
+  clientVatNumber: string | null;
+  lines: FirmInvoiceLine[];
+  payments: FirmInvoicePayment[];
+}
+
+/** One line of a new invoice: either recorded work (by id) or a fee typed in. */
+export interface CreateInvoiceLine {
+  description: string;
+  descriptionAr?: string | null;
+  quantity: number;
+  unitPrice: number;
+  discountAmount?: number;
+  vatRate?: number;
+  vatCategory?: 'standard' | 'zero_rated' | 'exempt' | 'out_of_scope';
+}
+
+export interface CreateInvoiceBody {
+  matterId: string;
+  invoiceNumber?: string;
+  issueDate?: string;
+  dueDate?: string;
+  notesInternal?: string | null;
+  /** Time entries to bill, taken from the matter's unbilled list. */
+  timeEntryIds?: string[];
+  /** Approved disbursements to pass on. */
+  expenseIds?: string[];
+  lines?: CreateInvoiceLine[];
+}
+
+export interface CreatedInvoice {
+  id: string;
+  invoiceNumber: string;
+  subtotal: number;
+  vatAmount: number;
+  total: number;
+  timeEntriesBilled: number;
+  expensesBilled: number;
+  /** Selected sources that were taken by another draft between the read and the write. */
+  shortfall: number;
+}
+
+export interface RecordPaymentBody {
+  amount: number;
+  provider?: 'bank_transfer' | 'sadad' | 'manual';
+  reference?: string | null;
+  receivedOn?: string;
+}
+
+export interface RecordedPayment {
+  id: string;
+  amountPaid: number;
+  total: number;
+  outstanding: number;
+  internalStatus: string;
 }
