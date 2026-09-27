@@ -444,9 +444,24 @@ async function main() {
     'and the audit row names fields, never their values');
 
   /* ── another firm's client is not reachable through intake ──────────────── */
+  /*
+    THE FALLBACK IS GONE, AND THAT IS THE POINT.
+
+    This line used to be `?? { id: '<fabricated>' }`, and the comment beside it said the
+    other firm was being asked either way. It was not: when the second firm was purged,
+    the query returned nothing, the fabricated id was used, and the two assertions below
+    compared a 404 for a row that does not exist against a 404 for a row that does not
+    exist — a green test that proved nothing at all. A missing neighbour now FAILS, and
+    says how to restore it.
+  */
   const foreignClient = (await admin.query(
-    'select id from public.clients where tenant_id = $1 limit 1', [TENANT_NAJD])).rows[0]
-    ?? { id: '00000000-0000-4000-8000-0000000000ee' };   // asked of the other firm either way
+    'select id from public.clients where tenant_id = $1 limit 1', [TENANT_NAJD])).rows[0];
+  if (!foreignClient) {
+    console.error('\n  ✗ the neighbouring firm has no client row. The isolation checks below would\n' +
+      '    compare two fabricated 404s and pass for the wrong reason. Restore the fixture with:\n' +
+      '      node scripts/ops/clean-live-data.mjs --seed-neighbour\n');
+    process.exit(3);
+  }
   const foreign = await noura.call('/api/firm/matters', {
     method: 'POST',
     body: JSON.stringify({ clientId: foreignClient.id, title: 'Another firm\'s client' }),

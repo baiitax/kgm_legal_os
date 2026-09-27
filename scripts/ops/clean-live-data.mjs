@@ -338,6 +338,99 @@ async function purgeTenant(db, tenantId, opts = {}) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+/**
+ * THE ISOLATION FIXTURE · the neighbour row the negative tests reach for
+ * ══════════════════════════════════════════════════════════════════════════════
+ *
+ * WHY THIS EXISTS AT ALL, GIVEN THAT EVERYTHING ELSE HERE REMOVES DATA
+ *
+ *   `documents-live.mjs`, `intake-live.mjs` and `eligibility-live.mjs` each end with a
+ *   block that asks, as the KGM firm, for ANOTHER FIRM'S client, matter and document, and
+ *   asserts a 404 that is byte-identical to the answer for a matter that does not exist.
+ *   The second half of that claim — "the door is no oracle" — is provable with a made-up
+ *   uuid. The first half is not: to show that a REAL foreign row is refused, a real
+ *   foreign row has to exist.
+ *
+ *   That is what purging the second firm removed, and the failure mode is quiet. The
+ *   intake harness looked its neighbour up with `select … limit 1` and fell back to a
+ *   fabricated id when the query returned nothing, so after the purge it compared two
+ *   fabricated 404s and passed — the exact "negative test against an id that is not real
+ *   proves only that the server refuses things that are not there" that its own comment
+ *   warns about.
+ *
+ *   So the fixture is rebuilt here, deliberately, with the ids the harnesses already
+ *   name. It is NOT a demonstration firm: no staff, no memberships, no sessions, no
+ *   client user, nothing that can be signed into, and no client-visible document. It is
+ *   one client, one matter and one document, and their only purpose is to be on the wrong
+ *   side of a tenant boundary.
+ *
+ * The document is filed with `client_visibility = 'internal'` and a synthetic sha256:
+ * it is never rendered and never downloaded by anything, only counted.
+ */
+const NEIGHBOUR = {
+  tenantId: 'bbbbbbbb-0000-4000-8000-000000000002',
+  clientId: 'cccccccc-0000-4000-8000-000000000003',
+  matterId: 'eeeeeeee-0000-4000-8000-000000000005',
+  documentId: 'c1000000-0000-4000-8000-000000000006',
+};
+
+async function seedNeighbour(db) {
+  line('\n  THE ISOLATION FIXTURE — the row the negative tests must find');
+  await db.query('begin');
+  try {
+    /* The tenant stays ARCHIVED. It is not reopened for this: the fixture exists to be
+       invisible to every firm-facing surface, and an archived tenant is the state that
+       says so. */
+    await db.query(
+      `insert into public.clients
+         (id, tenant_id, client_type, name, country, identity_verified, status, created_at, updated_at)
+       values ($1, $2, 'organization', 'Isolation Fixture Client', 'SA', true, 'active', now(), now())
+       on conflict (id) do nothing`,
+      [NEIGHBOUR.clientId, NEIGHBOUR.tenantId]);
+
+    await db.query(
+      `insert into public.matters
+         (id, tenant_id, client_id, matter_number, title, title_ar, practice_area, practice_area_ar,
+          internal_status, client_status, opened_at, created_at, updated_at)
+       values ($1, $2, $3, 'ISO-FIX-0001', 'Isolation fixture matter', 'ملف اختبار العزل',
+               'commercial', 'تجاري', 'active', 'opened', now(), now(), now())
+       on conflict (id) do nothing`,
+      [NEIGHBOUR.matterId, NEIGHBOUR.tenantId, NEIGHBOUR.clientId]);
+
+    await db.query(
+      `insert into public.documents
+         (id, tenant_id, client_id, matter_id, storage_bucket, storage_key, original_filename,
+          stored_filename, title, document_type, category, origin, version, mime_type, size_bytes,
+          sha256, scan_status, status, client_visibility, requested, created_at, updated_at, privilege_class)
+       values ($1, $2, $3, $4, 'kgm-documents', $5, 'isolation-fixture.pdf', 'isolation-fixture.pdf',
+               'Isolation fixture document', 'contract', 'from_firm', 'firm', 1, 'application/pdf', 0,
+               repeat('0', 64), 'clean', 'available', 'internal', false, now(), now(), 'none')
+       on conflict (id) do nothing`,
+      [NEIGHBOUR.documentId, NEIGHBOUR.tenantId, NEIGHBOUR.clientId, NEIGHBOUR.matterId,
+        `${NEIGHBOUR.tenantId}/${NEIGHBOUR.matterId}/isolation-fixture.pdf`]);
+
+    const counts = await db.query(
+      `select (select count(*) from public.clients   where tenant_id = $1) clients,
+              (select count(*) from public.matters   where tenant_id = $1) matters,
+              (select count(*) from public.documents where tenant_id = $1) documents,
+              (select count(*) from public.firm_memberships where tenant_id = $1) memberships,
+              (select count(*) from public.client_users where tenant_id = $1) client_users`,
+      [NEIGHBOUR.tenantId]);
+    const c = counts.rows[0];
+    line(`      clients ${c.clients} · matters ${c.matters} · documents ${c.documents}`);
+    line(`      memberships ${c.memberships} · client users ${c.client_users}  (both must be 0)`);
+    if (Number(c.memberships) !== 0 || Number(c.client_users) !== 0) {
+      throw new Error('the fixture tenant must have NO credentials: it exists to be unreachable, not to be signed into');
+    }
+    await db.query('commit');
+    line('  ✓ the fixture is in place — the IDs the harnesses name now exist, in another firm.');
+    line('    Re-check isolation with: node scripts/verify/documents-live.mjs');
+  } catch (err) {
+    await db.query('rollback');
+    throw err;
+  }
+}
+
 async function main() {
   const db = connect();
   await db.connect();
@@ -368,6 +461,13 @@ async function main() {
       await purgeTenant(db, tenantId);
       return;
     }
+    /*
+      THE ONE WRITE HERE THAT ADDS RATHER THAN REMOVES, and it is deliberate — see the
+      comment on `seedNeighbour`. Purging the second firm removed the foreign row that
+      three live harnesses assert against, and one of them degraded from a real check to a
+      vacuous one without going red.
+    */
+    if (has('--seed-neighbour')) await seedNeighbour(db);
     if (has('--label-tests')) await labelTests(db);
     if (has('--drop-orphan-drafts')) {
       const r = await db.query(`
@@ -380,7 +480,7 @@ async function main() {
         returning id`);
       line(`\n  removed ${r.rowCount} empty draft(s) — none held recorded work`);
     }
-    if (!has('--label-tests') && !has('--drop-orphan-drafts')) await report(db);
+    if (!has('--label-tests') && !has('--drop-orphan-drafts') && !has('--seed-neighbour')) await report(db);
   } finally {
     await db.end();
   }
