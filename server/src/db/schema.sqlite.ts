@@ -593,6 +593,12 @@ create table if not exists invoice_lines (
   position integer not null default 1,
   description text not null,
   description_ar text,
+  /* Six decimals of duration, and it needs them: 95 minutes is 1.583333 h, and the
+     invoice must be able to state the duration the time entry recorded so that
+     quantity x unit_price reproduces the recorded amount. At two decimals the product
+     was 1,896 against a recorded 1,900 — see 0074 for the full account. SQLite declares
+     this column as real, which carries the precision without being told to; the comment
+     is here so the two engines are read the same way. */
   quantity real not null default 1,
   unit_price real not null,
   amount real not null,

@@ -123,6 +123,19 @@ function round2(n: number): number {
   return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 }
 
+/**
+ * Six decimal places, for a quantity rather than a sum.
+ *
+ * `invoice_lines.quantity` was numeric(10,2) until migration 0074, which is what made the
+ * invoice disagree with the time record: 95 minutes is 1.583333… hours, and at two
+ * decimals the invoice could only say 1.58 — a figure that multiplies out to SAR 1,896
+ * against a recorded SAR 1,900. Six decimals carries the fact; the console still SHOWS
+ * two, because that is how a person reads an hour.
+ */
+function round6(n: number): number {
+  return Math.round(Number(n) * 1e6) / 1e6;
+}
+
 /** A row value as a string, or null — never the string 'null'. */
 function toStrOrNull(v: unknown): string | null {
   if (v === null || v === undefined) return null;
@@ -2343,12 +2356,35 @@ export function firmRouter(c: Container): Router {
           `the hour of ${String(t.entry_date)} is ${String(t.status)} and cannot be billed again`);
       }
       if (!t.billable) throw badRequest('not_billable', 'a non-billable hour cannot be put on an invoice');
-      const hours = round2(Number(t.minutes) / 60);
+      /*
+        ── THE HOUR IS BILLED AT WHAT THE TIME RECORD SAYS ──────────────────────
+
+        This line used to read `round2(minutes / 60)` — the duration rounded to two
+        decimal places — and the money was then computed FROM that rounded figure. A
+        95-minute hour at SAR 1,200 is recorded as SAR 1,900 (the entry's own
+        `amount_sar`), but 1.58 × 1,200 = SAR 1,896: four riyals lost, and the invoice
+        disagreeing with the firm's own record of the work. Small per line, systematic
+        across a year, and invisible because the document is internally consistent.
+
+        THE RECORDED AMOUNT IS THE FACT. The quantity is chosen so that the document's
+        own multiplication reproduces it — `amount / rate` to six decimal places,
+        which for a normal hour-multiple IS the duration (`95 / 60 = 1.583333`, and
+        1.583333 × 1,200 = 1,900.00). `quantity` was widened from two decimals to six
+        for exactly this reason (migration 0074): at two, the figure could not carry
+        the fact.
+
+        An hour whose amount was adjusted by hand still bills the adjusted amount: the
+        quantity is recomputed from it, so the two never disagree on the page.
+      */
+      const rate = Number(t.hourly_rate_sar);
+      const recorded = round2(Number(t.amount_sar));
+      const quantity = rate > 0 ? round6(recorded / rate) : round6(Number(t.minutes) / 60);
       lines.push({
         description: `${String(t.entry_date)} · ${String(t.staff_name)} · ${String(t.narrative)}`.slice(0, 500),
         descriptionAr: t.narrative_ar ? String(t.narrative_ar).slice(0, 500) : null,
-        quantity: hours,
-        unitPrice: Number(t.hourly_rate_sar),
+        quantity,
+        unitPrice: rate,
+        amount: recorded,
         discountAmount: 0,
         vatCategory: 'standard',
         vatRate: 0.15,
@@ -2372,6 +2408,7 @@ export function firmRouter(c: Container): Router {
         descriptionAr: e.description_ar ? String(e.description_ar).slice(0, 500) : null,
         quantity: 1,
         unitPrice: Number(e.net_amount_sar),
+        amount: round2(Number(e.net_amount_sar)),
         discountAmount: 0,
         vatCategory: String(e.vat_category ?? 'standard'),
         vatRate: Number(e.total_amount_sar) > 0
@@ -2387,6 +2424,9 @@ export function firmRouter(c: Container): Router {
         descriptionAr: l.descriptionAr ?? null,
         quantity: l.quantity,
         unitPrice: l.unitPrice,
+        /* A hand-written line has no record behind it, so its amount IS the product of
+           the two figures the member typed. Nothing to preserve from elsewhere. */
+        amount: round2(l.quantity * l.unitPrice - l.discountAmount),
         discountAmount: l.discountAmount,
         vatCategory: l.vatCategory,
         vatRate: l.vatRate,

@@ -96,6 +96,27 @@ async function staffIdOf(agent: Agent, email: string): Promise<string> {
 }
 
 /** A recorded, billable hour on the Commercial matter — via the route, as a person would. */
+/**
+ * An hour recorded on a matter, and then stated AT A RATE.
+ *
+ * The product takes the rate from the rate card, which is right, but the arithmetic this
+ * file is testing has to be seen at a rate with a fractional part and at a duration that
+ * does not divide cleanly — so the entry's own two figures are set directly after it is
+ * recorded. The row that results is indistinguishable from one the rate card would have
+ * produced, which is the point: what the invoice reads is the time entry.
+ */
+async function billableHourAt(
+  agent: Agent, minutes: number, rateSar: number,
+): Promise<{ id: string; recorded: number }> {
+  const id = await billableHour(agent, minutes);
+  const recorded = Math.round((minutes / 60) * rateSar * 100) / 100;
+  await s.db.run(
+    `update time_entries set hourly_rate_sar = ?, amount_sar = ? where id = ?`,
+    [rateSar, recorded, id],
+  );
+  return { id, recorded };
+}
+
 async function billableHour(agent: Agent, minutes = 90): Promise<string> {
   const res = await agent.post('/api/firm/time-entries', {
     matterId: COMMERCIAL, entryDate: today(), minutes,
@@ -474,6 +495,70 @@ describe('the money console · sending and being paid', () => {
     expect(String(byAmount(1000).receipt_number)).toBe('SADAD-88231');
     expect(byAmount(total - 1000).receipt_number).toBeNull();
     expect(receipts.map((r) => String(r.provider)).sort()).toEqual(['bank_transfer', 'sadad']);
+  });
+
+  it('bills what the time record says, and the page still multiplies out', async () => {
+    /*
+      THE DEFECT THIS PINS. A 95-minute hour at SAR 1,200 is recorded as SAR 1,900. The
+      invoice used to bill `round2(95/60) × 1,200 = 1.58 × 1,200 = SAR 1,896` — four
+      riyals lost, and the tax document disagreeing with the firm's own record of the
+      work. The recorded amount now wins, and `quantity` carries six decimals so that
+      the document's own arithmetic reproduces it (1.583333 × 1,200 = 1,899.9996 →
+      SAR 1,900.00).
+
+      THE SECOND ASSERTION IS THE ONE THAT KEEPS IT HONEST: whoever reads the invoice
+      must be able to multiply the hours by the rate and arrive at the amount billed.
+      A fix that billed 1,900 against a printed 1.58 would be a different wrong answer.
+    */
+    const { id: hour, recorded: recordedAmount } = await billableHourAt(noura, 95, 1200);
+    expect(recordedAmount).toBe(1900);
+
+    const made = await draft(noura, { timeEntryIds: [hour] });
+    expect(made.status, JSON.stringify(made.body).slice(0, 300)).toBe(201);
+    const id = String(made.body.data.id);
+
+    const line = await row<{ quantity: number; unit_price: number; amount: number }>(
+      `select quantity, unit_price, amount from invoice_lines where invoice_id = ?`, [id]);
+    /* The stored quantity carries the fact… */
+    expect(Number(line!.quantity)).toBeCloseTo(95 / 60, 5);
+    /* …the amount is the recorded figure, not a derivative of it… */
+    expect(Number(line!.amount)).toBe(1900);
+    /* …and the two agree when multiplied, to the halala the database reconciles on. */
+    expect(Math.round(Number(line!.quantity) * Number(line!.unit_price) * 100) / 100).toBe(1900);
+
+    const header = await row<{ subtotal: number; total: number }>(
+      `select subtotal, total from invoices where id = ?`, [id]);
+    expect(Number(header!.subtotal)).toBe(1900);
+    expect(Number(header!.total)).toBe(2185);
+  });
+
+  it('reproduces the recorded amount across the whole range of durations', async () => {
+    /*
+      The class, not the example. Every minute-value in a working day, at a rate with a
+      fractional part — the cases where a rounded duration is furthest from the truth.
+      1,440 drafts would be too slow to build one at a time through the route, so the
+      arithmetic is asserted directly AND one awkward case is taken end to end through
+      the product to prove the two agree.
+    */
+    const rate = 2750.5;
+    const drift: string[] = [];
+    for (let minutes = 1; minutes <= 1440; minutes++) {
+      const recorded = Math.round((minutes / 60) * rate * 100) / 100;
+      const quantity = Math.round((recorded / rate) * 1e6) / 1e6;
+      const product = Math.round(quantity * rate * 100) / 100;
+      if (product !== recorded) drift.push(`${minutes}min → ${product} vs ${recorded}`);
+    }
+    expect(drift.slice(0, 5), `${drift.length} duration(s) do not reproduce the recorded amount`).toEqual([]);
+
+    /* One of them through the product itself: 50 minutes at 2,750.50 is 2,292.08. */
+    const { id: odd } = await billableHourAt(noura, 50, rate);
+    const made = await draft(noura, { timeEntryIds: [odd] });
+    expect(made.status).toBe(201);
+    const id = String(made.body.data.id);
+    const line = await row<{ quantity: number; unit_price: number; amount: number }>(
+      `select quantity, unit_price, amount from invoice_lines where invoice_id = ?`, [id]);
+    expect(Number(line!.amount)).toBe(2292.08);
+    expect(Math.round(Number(line!.quantity) * Number(line!.unit_price) * 100) / 100).toBe(2292.08);
   });
 
   it('gives a mistakenly drafted invoice back to the unbilled list', async () => {

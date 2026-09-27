@@ -4185,6 +4185,17 @@ export class FirmRepo {
     lines: Array<{
       description: string; descriptionAr: string | null;
       quantity: number; unitPrice: number; discountAmount: number;
+      /**
+       * THE FIGURE THE LINE BILLS, when the caller knows it from a record.
+       *
+       * Optional, and it exists because `quantity × unitPrice` is not always the fact:
+       * an hour's amount is stored on the time entry and must survive onto the invoice
+       * unchanged. When it is given and the document's own arithmetic reproduces it to
+       * within a halala, it wins; when it cannot (a caller passing a figure that does
+       * not reconcile at all) the product wins and the database's reconcile guard is
+       * left to refuse the document rather than be told a comfortable lie.
+       */
+      amount?: number;
       vatCategory: string; vatRate: number; billingSourceKey: string | null;
     }>;
     timeEntryIds: string[];
@@ -4204,7 +4215,10 @@ export class FirmRepo {
       let subtotal = 0;
       let vatAmount = 0;
       const computed = input.lines.map((l, i) => {
-        const net = round2(l.quantity * l.unitPrice - l.discountAmount);
+        const product = round2(l.quantity * l.unitPrice - l.discountAmount);
+        const net = l.amount !== undefined && Math.abs(round2(l.amount) - product) <= 0.01
+          ? round2(l.amount)
+          : product;
         const vat = round2(net * l.vatRate);
         subtotal = round2(subtotal + net);
         vatAmount = round2(vatAmount + vat);
