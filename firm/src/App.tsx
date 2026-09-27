@@ -47,6 +47,7 @@ import { MatterWorkspace } from './pages/MatterWorkspace.js';
 import { Intake } from './pages/Intake.js';
 import { Billing } from './pages/Billing.js';
 import { Fiscal } from './pages/Fiscal.js';
+import { Compliance } from './pages/Compliance.js';
 import './shell/shell.css';
 
 /** Sentinel the More sheet uses to request a sign-out through the shell. */
@@ -230,6 +231,14 @@ function Routed({ basePath, query, onNavigate }: {
     */
     case '/fiscal':
       return <Fiscal onNavigate={onNavigate} />;
+    /*
+      THE COMPLIANCE CONSOLE — the largest single group of routes the audit found with no
+      screen behind them, and the only one of those groups whose absence is a criminal
+      exposure rather than an inconvenience: client identification, sanctions screening,
+      the three-day suspicious-transaction clock, and the register of who may practise.
+    */
+    case '/compliance':
+      return <Compliance />;
     case '/admin/users':
       return <Users />;
     case '/admin/audit':

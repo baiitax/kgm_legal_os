@@ -48,7 +48,7 @@
  */
 import type { ComponentType } from 'react';
 import {
-  IconAdmin, IconAudit, IconBilling, IconClients, IconDashboard, IconLicences, IconMatters, IconMyWork,
+  IconAdmin, IconAudit, IconBilling, IconClients, IconCompliance, IconDashboard, IconLicences, IconMatters, IconMyWork,
   IconUsers, IconWorkspace, type IconProps,
 } from '@kgm/ui';
 
@@ -193,6 +193,23 @@ const GROUP_DEFS: ReadonlyArray<NavGroupDef> = [
         behave like a list of documents.
       */
       { id: 'fiscal', to: '/fiscal', labelKey: 'fiscal.nav', icon: IconLicences, permissions: ['billing.read', 'billing.read_all'] },
+    ],
+  },
+  {
+    /*
+      COMPLIANCE IS ITS OWN GROUP, NOT A LEAF OF THE LEGAL SECTIONS.
+
+      The obligations behind it are the firm's own — AML identification, screening, the
+      suspicious-transaction clock, who may practise — and none of them belongs to a single
+      matter or client. Putting it under Workspace would file the firm's criminal exposure
+      as a detail of an engagement.
+    */
+    id: 'compliance',
+    labelKey: 'nav.compliance',
+    icon: IconCompliance,
+    permissions: [],
+    leaves: [
+      { id: 'compliance-console', to: '/compliance', labelKey: 'compliance.title', icon: IconCompliance, permissions: ['compliance.read'] },
     ],
   },
   {

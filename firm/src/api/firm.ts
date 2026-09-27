@@ -974,6 +974,208 @@ export const firmApi = {
     });
   },
 
+  /* ── compliance · the AML record ─────────────────────────────────────────── */
+
+  /**
+   * THE COMPLIANCE CONSOLE IN ONE CALL.
+   *
+   * The census, the queue, the risk-country register and — the field this screen exists
+   * for — `refused`: every client the firm may not act for, with the reasons. A gate that
+   * silently rejects work is a gate nobody trusts; this is the same gate, said out loud.
+   */
+  async complianceConsole(): Promise<ComplianceConsoleResponse> {
+    return request('/compliance/due-diligence');
+  },
+
+  /** One client's identification record, its owners and its screening history. */
+  async clientDueDiligence(clientId: string): Promise<ClientDueDiligenceResponse> {
+    return request(`/clients/${encodeURIComponent(clientId)}/due-diligence`);
+  },
+
+  /** Open or refresh a client's record. `level` decides how much is required. */
+  async createClientDueDiligence(clientId: string, body: {
+    level?: 'simplified' | 'standard' | 'enhanced';
+  } = {}): Promise<{ id: string; level: string; status: string }> {
+    return request(`/clients/${encodeURIComponent(clientId)}/due-diligence`, { method: 'POST', body });
+  },
+
+  /** Amend the identification record — names, identity document, source of funds. */
+  async updateDueDiligence(id: string, body: Record<string, unknown>): Promise<{ id: string }> {
+    return request(`/due-diligence/${encodeURIComponent(id)}`, { method: 'PATCH', body });
+  },
+
+  /**
+   * SIGN THE RECORD OFF. A senior approval is required for enhanced due diligence, and
+   * the server refuses a completion that has one outstanding — `seniorApprovedByMembershipId`
+   * is who accepted the risk, by name.
+   */
+  async completeDueDiligence(id: string, body: {
+    seniorApprovedByMembershipId?: string | null;
+    seniorApprovalNote?: string | null;
+  } = {}): Promise<{ id: string; status: string }> {
+    return request(`/due-diligence/${encodeURIComponent(id)}/complete`, { method: 'POST', body });
+  },
+
+  /**
+   * "WE COULD NOT IDENTIFY THIS CLIENT." This is not a failure state to hide: not being
+   * able to complete identification is itself a reason the firm may not act, and it must
+   * be recorded with its reason rather than left as an empty checklist.
+   */
+  async unableToCompleteDueDiligence(id: string, reason: string): Promise<{ id: string; status: string }> {
+    return request(`/due-diligence/${encodeURIComponent(id)}/unable`, { method: 'POST', body: { reason } });
+  },
+
+  /**
+   * A BENEFICIAL OWNER. The 25% threshold comes from the law and the server applies it:
+   * an owner recorded below it is still recorded, and it is the OWNERSHIP figures that
+   * decide whether the identification is complete.
+   */
+  async addBeneficialOwner(dueDiligenceId: string, body: {
+    id?: string | null;
+    ownerKind?: 'natural_person' | 'legal_person';
+    fullName: string;
+    fullNameAr?: string | null;
+    dateOfBirth?: string | null;
+    nationality?: string | null;
+    residenceCountry?: string | null;
+    address?: string | null;
+    ownershipPct?: number;
+    controlRights?: number;
+    isPep?: boolean;
+    idType?: string | null;
+    idNumber?: string | null;
+    idCountry?: string | null;
+  }): Promise<{ id: string }> {
+    return request(`/due-diligence/${encodeURIComponent(dueDiligenceId)}/owners`, { method: 'POST', body });
+  },
+
+  /**
+   * RUN A SCREENING. It records the lists it was run against, the date of those lists and
+   * the provider — because a screening that cannot say which version of a list it used is
+   * not evidence of anything.
+   */
+  async runScreening(clientId: string, body: {
+    subjectKind: 'client' | 'party' | 'beneficial_owner' | 'staff';
+    subjectId: string;
+    subjectName: string;
+    listSets: Array<'un_consolidated' | 'eu_consolidated' | 'sama_designations' | 'ofac_sdn' | 'internal_register'>;
+    listAsOf?: string | null;
+    provider: 'internal_register' | 'manual_review' | 'external_provider' | 'regulator_feed';
+  }): Promise<{ id: string; status: string; matches: number }> {
+    return request(`/clients/${encodeURIComponent(clientId)}/screening-runs`, { method: 'POST', body });
+  },
+
+  /**
+   * DECIDE A MATCH. `false_positive`, `true_match` or `escalated`, with a reason of at
+   * least ten characters, and it can be decided ONCE: the server refuses a second
+   * disposition, because re-deciding a hit would erase the first decision's trail.
+   */
+  async dispositionScreeningMatch(matchId: string, body: {
+    disposition: 'false_positive' | 'true_match' | 'escalated';
+    reason: string;
+  }): Promise<{ id: string; disposition: string }> {
+    return request(`/screening-matches/${encodeURIComponent(matchId)}/disposition`, { method: 'POST', body });
+  },
+
+  /** Add a country to the firm's own risk list, or amend one already on it. */
+  async upsertRiskCountry(body: {
+    id?: string | null;
+    countryCode: string;
+    countryName: string;
+    countryNameAr?: string | null;
+    listSource: 'fatf_call_for_action' | 'fatf_grey' | 'un_sanctions' | 'eu_consolidated' | 'sama_circular' | 'internal';
+    riskLevel: 'high' | 'prohibited';
+    effectiveFrom: string;
+    note?: string | null;
+  }): Promise<{ id: string }> {
+    return request('/compliance/risk-countries', { method: 'POST', body });
+  },
+
+  /* ── compliance · the report, and the clock on it ────────────────────────── */
+
+  /**
+   * THE SUSPICIOUS TRANSACTION REPORTS, WITH THEIR DEADLINE COMPUTED.
+   *
+   * `late` is calculated by the server on every read — not stored — because a stored flag
+   * would be wrong by the next morning, and this is the one date in the whole system where
+   * being wrong is a criminal exposure rather than a clerical one.
+   */
+  async strReports(params: { status?: string; clientId?: string } = {}): Promise<StrReportsResponse> {
+    const q = new URLSearchParams();
+    if (params.status) q.set('status', params.status);
+    if (params.clientId) q.set('clientId', params.clientId);
+    const suffix = q.toString();
+    return request(`/str-reports${suffix ? `?${suffix}` : ''}`);
+  },
+
+  /**
+   * DRAFT THE REPORT. The narrative is Arabic and at least 40 characters: SA FIU receives
+   * Arabic, and a report too short to explain itself is a report that will be sent back.
+   */
+  async createStrReport(body: CreateStrReportBody): Promise<{ id: string; reportNumber: string }> {
+    return request('/str-reports', { method: 'POST', body });
+  },
+
+  /** Send a draft for review. Only a draft can be sent — the server says so. */
+  async reviewStrReport(id: string): Promise<{ id: string; status: string }> {
+    return request(`/str-reports/${encodeURIComponent(id)}/review`, { method: 'POST', body: {} });
+  },
+
+  /**
+   * FILE IT WITH SAFIU, and note what the acknowledgement says: filing requires the
+   * tipping-off acknowledgement to be explicitly true. Telling the client that a report
+   * has been made is itself an offence, and the form makes the member say they know that.
+   */
+  async fileStrReport(id: string, body: { fiuReference: string; tippingOffAcknowledged: true }): Promise<{
+    id: string; status: string; filedAt: string;
+  }> {
+    return request(`/str-reports/${encodeURIComponent(id)}/file`, { method: 'POST', body });
+  },
+
+  /** Record what the FIU answered — or that it rejected the report. */
+  async strReportResponse(id: string, body: {
+    status: 'acknowledged' | 'rejected_by_fiu';
+    response?: string | null;
+  }): Promise<{ id: string; status: string }> {
+    return request(`/str-reports/${encodeURIComponent(id)}/response`, { method: 'POST', body });
+  },
+
+  /* ── compliance · who may practise ──────────────────────────────────────── */
+
+  /**
+   * THE STANDING OF EVERY MEMBER — licence validity and any former-office bar.
+   *
+   * Article 14 of the نظام المحاماة bars a former judge or prosecutor from practice for
+   * five years, and the bar attaches to the FIRM as much as to the person: a matter
+   * staffed by someone still inside that window is a matter the firm may not run.
+   */
+  async eligibility(): Promise<EligibilityResponse> {
+    return request('/eligibility');
+  },
+
+  /** Record or renew a practising licence for a member. */
+  async addLicence(membershipId: string, body: {
+    licenceNumber: string;
+    issuedAt?: string | null;
+    expiresAt?: string | null;
+    status?: 'valid' | 'suspended' | 'expired' | 'revoked' | 'pending';
+    statusReference?: string | null;
+  }): Promise<{ id: string }> {
+    return request(`/eligibility/${encodeURIComponent(membershipId)}/licences`, { method: 'POST', body });
+  },
+
+  /** Record a member's previous public office, which is what starts the five-year bar. */
+  async addPriorOffice(membershipId: string, body: {
+    officeKind: 'judiciary' | 'public_prosecution' | 'bog' | 'committee' | 'government_body' | 'court_administration' | 'foreign_judiciary';
+    institution: string;
+    institutionAr?: string | null;
+    roleTitle?: string | null;
+    startedOn: string;
+    endedOn?: string | null;
+  }): Promise<{ id: string }> {
+    return request(`/eligibility/${encodeURIComponent(membershipId)}/prior-office`, { method: 'POST', body });
+  },
+
   /** Release an approved, issued invoice to the client. */
   async sendInvoice(id: string): Promise<{ id: string; internalStatus: string }> {
     return request(`/billing/invoices/${encodeURIComponent(id)}/send`, { method: 'POST', body: {} });
@@ -1893,6 +2095,200 @@ export interface ReportingQueueResponse {
   count: number;
   overdue: number;
   invoices: ReportingQueueRow[];
+}
+
+/**
+ * ── COMPLIANCE · the AML record, and the register of who may act ─────────────────
+ *
+ * The firm is a DNFBP under the Anti-Money Laundering Law (Royal Decree M/20 of 2017):
+ * it must identify its clients and their beneficial owners to a 25% threshold, screen
+ * them, and — if it suspects — report to SAFIU within about three working days. It must
+ * also not act through a lawyer who is barred, and the professional-conduct rules bar a
+ * former judge or prosecutor for five years.
+ *
+ * Every type below exists because one of those obligations has a screen behind it now.
+ * The one that matters most is `allowed`: a client for whom the firm may not act, with
+ * the reason, in the firm's own words — because the gate that refuses the work is worth
+ * nothing if nobody can see why.
+ */
+
+export interface DueDiligenceRow {
+  clientId: string;
+  clientName: string;
+  clientType: string;
+  ddId: string | null;
+  status: string | null;
+  level: string | null;
+  riskRating: string | null;
+  pepStatus: string | null;
+  /** When this client's file falls due for review again, by risk rating. */
+  reviewDueAt: string | null;
+  ownershipPct: number;
+  controlRights: number;
+  openMatches: number;
+  confirmedMatches: number;
+  failedRuns: number;
+  /** May the firm act? The answer the intake gate gives, stated once. */
+  allowed: boolean;
+  blockers: string[];
+}
+
+export interface RiskCountry {
+  id: string;
+  countryCode: string;
+  countryName: string;
+  countryNameAr: string | null;
+  listSource: string;
+  riskLevel: 'high' | 'prohibited';
+  effectiveFrom: string;
+  effectiveTo: string | null;
+  note: string | null;
+}
+
+export interface ComplianceCensus {
+  clients: number;
+  complete: number;
+  unable: number;
+  notStarted: number;
+  reviewOverdue: number;
+  openMatches: number;
+  failedRuns: number;
+  reportsOpen: number;
+  reportsFiled: number;
+  reportsLate: number;
+  activeMattersUnidentified: number;
+}
+
+export interface ComplianceConsoleResponse {
+  census: ComplianceCensus;
+  countries: RiskCountry[];
+  queue: DueDiligenceRow[];
+  /** The percentage that makes someone a beneficial owner. 25, from the law. */
+  thresholdPct: number;
+  /** The review cycle per risk rating, in months. */
+  reviewMonths: Record<string, number>;
+  /** Who the firm may NOT act for, and why. The first thing a compliance page owes. */
+  refused: Array<{ clientId: string; clientName: string; blockers: string[] }>;
+}
+
+export interface StrReport {
+  id: string;
+  reportNumber: string;
+  subjectKind: string;
+  subjectName: string | null;
+  clientId: string | null;
+  clientName: string | null;
+  matterId: string | null;
+  matterNumber: string | null;
+  grounds: string[];
+  status: string;
+  amountSar: number | null;
+  currency: string;
+  preparedAt: string;
+  /** The filing deadline. Past it and unfiled, the report is late. */
+  filedDueAt: string | null;
+  filedAt: string | null;
+  fiuReference: string | null;
+  fiuRespondedAt: string | null;
+  closureReason: string | null;
+  /** Computed by the server on every read — a stored flag would be stale by morning. */
+  late: boolean;
+}
+
+export interface StrReportsResponse {
+  reports: StrReport[];
+  indicators: Array<{ code: string; label: string; labelAr: string }>;
+}
+
+export interface CreateStrReportBody {
+  reportNumber: string;
+  subjectKind: 'client' | 'party' | 'beneficial_owner' | 'staff' | 'transaction';
+  subjectId?: string | null;
+  subjectName?: string | null;
+  clientId?: string | null;
+  matterId?: string | null;
+  grounds: string[];
+  narrativeAr: string;
+  narrativeEn?: string | null;
+  amountSar?: number | null;
+  transactionReference?: string | null;
+  transactionAt?: string | null;
+}
+
+/** One member's standing to practise: licence, and any former-office bar. */
+export interface EligibilityMember {
+  membershipId: string;
+  displayName: string;
+  displayNameAr: string | null;
+  email: string | null;
+  status: string;
+  requiresLicence: boolean;
+  entitled: boolean;
+  reason: string;
+  licences: Array<{
+    id: string;
+    licenceNumber: string;
+    issuedAt: string | null;
+    expiresAt: string | null;
+    status: string;
+    statusEffectiveFrom: string | null;
+    statusReference: string | null;
+    verifiedAt: string | null;
+  }>;
+  priorOffice: {
+    barred: boolean;
+    restrictionEndsOn: string | null;
+    stillInPost: boolean;
+    institution: string | null;
+  };
+}
+
+export interface EligibilityResponse {
+  count: number;
+  notEntitled: number;
+  barredByPriorOffice: number;
+  members: EligibilityMember[];
+}
+
+export interface ClientDueDiligenceResponse {
+  clientId: string;
+  clientName: string;
+  clientType: string;
+  dd: null | {
+    id: string;
+    status: string;
+    level: string;
+    riskRating: string;
+    pepStatus: string;
+    reviewDueAt: string | null;
+    legalName: string | null;
+    legalNameAr: string | null;
+    idType: string | null;
+    idNumber: string | null;
+    sourceOfFunds: string | null;
+    purposeOfRelationship: string | null;
+    unableReason: string | null;
+    completedAt: string | null;
+  };
+  owners: Array<{
+    id: string;
+    ownerKind: string;
+    fullName: string;
+    fullNameAr: string | null;
+    ownershipPct: number;
+    controlRights: number;
+    isPep: boolean;
+  }>;
+  screening: Array<{
+    id: string;
+    subjectKind: string;
+    subjectName: string;
+    provider: string;
+    status: string;
+    runAt: string;
+    listAsOf: string | null;
+    matches: Array<{ id: string; listName: string; matchScore: number; disposition: string | null; dispositionReason: string | null }>;
+  }>;
 }
 
 export interface FirmInvoiceDetail extends FirmInvoiceRow {

@@ -3194,3 +3194,171 @@
   .firm-fiscal__sectionHead { flex-wrap: wrap; }
   .firm-fiscal__actions > * { flex: 1 1 auto; }
 }
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   THE COMPLIANCE CONSOLE · /compliance
+
+   The one colour decision here: the REFUSAL list is the loudest thing on the page,
+   and it is loud in amber-red rather than in the brand's gold. Compliance failures
+   are not the firm's identity; they are the firm's exposure, and the visual system
+   should say so without dressing it up.
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+.firm-comp { display: grid; gap: var(--sp-5); }
+
+/* The tabs are buttons, not links: the console is one screen with four views, and a
+   URL that did not restore the view would be a lie about what the address means. */
+.firm-comp__tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+  border-block-end: 1px solid var(--line-soft);
+}
+.firm-comp__tab {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border: 0;
+  border-block-end: 2px solid transparent;
+  background: none;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: var(--fs-body-sm);
+  font-weight: var(--fw-medium);
+  cursor: pointer;
+}
+.firm-comp__tab:hover { color: var(--text-hi); }
+.firm-comp__tab--on { color: var(--text-hi); border-block-end-color: var(--text-gold); }
+.firm-comp__tab:focus-visible { outline: 2px solid var(--focus-ring-color, currentColor); outline-offset: 2px; }
+
+.firm-comp__metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: var(--sp-3);
+}
+.firm-comp__metric {
+  display: grid;
+  gap: 2px;
+  padding: var(--sp-3);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+}
+.firm-comp__metricValue { font-size: var(--text-md); font-weight: var(--fw-semibold); }
+.firm-comp__metricLabel { color: var(--text-faint); font-size: var(--fs-caption); }
+/* Only the tiles that carry a failure get a coloured value. A page where every number
+   shouts is a page where none of them does. */
+.firm-comp__metric--lime .firm-comp__metricValue { color: var(--text-lime); }
+.firm-comp__metric--warning .firm-comp__metricValue { color: var(--text-gold); }
+.firm-comp__metric--high .firm-comp__metricValue,
+.firm-comp__metric--critical .firm-comp__metricValue { color: var(--kgm-high); }
+
+.firm-comp__sectionHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin-block-end: var(--sp-2);
+}
+.firm-comp__h2 { margin: 0; font-size: var(--text-md); font-weight: var(--fw-semibold); }
+.firm-comp__note { margin: 0 0 var(--sp-3); color: var(--text-dim); font-size: var(--fs-caption); line-height: 1.5; max-inline-size: 82ch; }
+.firm-comp__note--warn {
+  margin: var(--sp-2) 0 0;
+  padding: var(--sp-2) var(--sp-3);
+  border-inline-start: 2px solid var(--text-gold);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text-hi);
+  font-size: var(--fs-caption);
+  line-height: 1.5;
+}
+.firm-comp__sub { display: block; font-size: var(--fs-caption); color: var(--text-faint); }
+.firm-comp__stack { display: grid; gap: 2px; }
+.firm-comp__client { font-weight: var(--fw-medium); }
+.firm-comp__err { color: var(--kgm-high); }
+
+/* The refusals. A list, not a table: each row is a sentence about a client. */
+.firm-comp__refused {
+  display: grid;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.firm-comp__refused li {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--line-soft);
+  border-inline-start: 3px solid var(--kgm-high);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.firm-comp__refusedName { font-weight: var(--fw-medium); }
+.firm-comp__refusedWhy { flex: 1 1 auto; color: var(--text-dim); font-size: var(--fs-caption); }
+
+.firm-comp__countries,
+.firm-comp__owners,
+.firm-comp__runs,
+.firm-comp__matches {
+  display: grid;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.firm-comp__countries li {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) 0;
+  border-block-end: 1px solid var(--line-soft);
+  font-size: var(--fs-body-sm);
+}
+.firm-comp__owners li,
+.firm-comp__matches li {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) 0;
+  border-block-end: 1px solid var(--line-soft);
+  font-size: var(--fs-body-sm);
+}
+.firm-comp__owners li > :first-child { flex: 1 1 auto; }
+.firm-comp__pct { font-weight: var(--fw-semibold); }
+.firm-comp__score { color: var(--text-faint); }
+
+.firm-comp__runs > li { display: grid; gap: var(--sp-2); padding: var(--sp-3) 0; border-block-end: 1px solid var(--line-soft); }
+.firm-comp__runHead { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); font-size: var(--fs-body-sm); }
+.firm-comp__matches { padding-inline-start: var(--sp-4); }
+
+.firm-comp__rowactions { display: flex; gap: var(--sp-1); justify-content: flex-end; }
+
+/* The indicator chips: the law's own vocabulary, offered as a multi-select because a
+   free-text reason produces reports the unit cannot tally. */
+.firm-comp__grounds { border: 0; padding: 0; margin: 0; }
+.firm-comp__grounds legend { font-size: var(--fs-caption); color: var(--text-dim); padding: 0; }
+.firm-comp__chips { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-block-start: var(--sp-2); }
+.firm-comp__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: var(--sp-1) var(--sp-2);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-full);
+  background: var(--surface-2);
+  font-size: var(--fs-caption);
+  cursor: pointer;
+}
+.firm-comp__chip--on { border-color: var(--text-gold); color: var(--text-hi); }
+.firm-comp__chip input { margin: 0; }
+
+.firm-comp__narrative { display: grid; gap: var(--sp-2); }
+
+@media (max-width: 640px) {
+  .firm-comp__refused li { flex-wrap: wrap; }
+  .firm-comp__refusedWhy { flex-basis: 100%; }
+  .firm-comp__metrics { grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr)); }
+}

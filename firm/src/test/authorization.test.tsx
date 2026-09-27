@@ -201,7 +201,19 @@ describe('§50 · navigation is generated from permissions, never hardcoded', ()
     */
     const finance = nav.groups.find((g) => g.group.id === 'finance');
     expect(finance?.leaves.map((l) => l.id)).toEqual(['billing', 'fiscal']);
-    for (const absent of ['legal', 'compliance', 'communication']) {
+
+    /*
+      AND COMPLIANCE LEFT THE ABSENT LIST WHEN IT WAS BUILT (audit recommendation 6).
+
+      This assertion used to name 'compliance' among the groups that must be absent for
+      EVERY persona, including the one holding every permission — a true statement about a
+      build with no compliance screen, and the one the gap analysis quoted. The group now
+      exists, gated on `compliance.read`, with one leaf. Legal and communication are still
+      absent, for the same reason as before: there is still no screen behind them.
+    */
+    const compliance = nav.groups.find((g) => g.group.id === 'compliance');
+    expect(compliance?.leaves.map((l) => l.id)).toEqual(['compliance-console']);
+    for (const absent of ['legal', 'communication']) {
       expect(ids, absent).not.toContain(absent);
     }
   });
