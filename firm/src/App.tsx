@@ -46,6 +46,7 @@ import { MyWork } from './pages/MyWork.js';
 import { MatterWorkspace } from './pages/MatterWorkspace.js';
 import { Intake } from './pages/Intake.js';
 import { Billing } from './pages/Billing.js';
+import { Fiscal } from './pages/Fiscal.js';
 import './shell/shell.css';
 
 /** Sentinel the More sheet uses to request a sign-out through the shell. */
@@ -219,6 +220,16 @@ function Routed({ basePath, query, onNavigate }: {
     */
     case '/billing':
       return <Billing onNavigate={onNavigate} />;
+    /*
+      THE FIRM'S TAX IDENTITY, ITS DEVICES, AND THE 24-HOUR CLOCK.
+
+      A firm-wide destination beside Billing, and separate from it on purpose: this is
+      tax administration rather than a view over documents. It is also the screen that
+      answers the question the audit raised — whether this firm may legally send a tax
+      invoice at all — which until now could only be answered from a database prompt.
+    */
+    case '/fiscal':
+      return <Fiscal onNavigate={onNavigate} />;
     case '/admin/users':
       return <Users />;
     case '/admin/audit':

@@ -863,6 +863,117 @@ export const firmApi = {
     });
   },
 
+  /**
+   * THE FIRM'S TAX IDENTITY, ITS DEVICES, AND WHETHER IT MAY ISSUE AT ALL.
+   *
+   * `ready: false` is not an error and not an empty state: it is a firm that cannot
+   * legally send a tax invoice, and the response names each missing condition so the
+   * screen can say which part of onboarding is undone.
+   */
+  async fiscalIdentity(): Promise<FiscalIdentityResponse> {
+    return request('/billing/fiscal-identity');
+  },
+
+  /**
+   * Record the firm's tax registration. Needs `settings.manage` — a practising lawyer
+   * has no business editing the firm's VAT number, and the server says so.
+   */
+  async saveFiscalIdentity(body: SaveFiscalIdentityBody): Promise<{ id: string }> {
+    return request('/billing/fiscal-identity', { method: 'POST', body });
+  },
+
+  /** Register a device that may issue in the firm's name. It starts inactive. */
+  async addFiscalDevice(body: { deviceLabel: string; deviceSerial: string }): Promise<{ id: string }> {
+    return request('/billing/fiscal-devices', { method: 'POST', body });
+  },
+
+  /**
+   * ISSUE THE DOCUMENT — the moment a draft becomes a tax invoice.
+   *
+   * It allocates the next ICV, links the hash chain, builds the QR and the XML, and
+   * stamps the document with its UUID. It cannot be undone: an issued invoice is
+   * immutable and its only correction is a credit note. Needs `billing.approve` and
+   * financial authority over the amount.
+   */
+  async issueInvoice(id: string, body: {
+    subtype?: 'standard' | 'simplified';
+    deviceId?: string;
+    supplyAt?: string;
+  } = {}): Promise<IssuedInvoice> {
+    return request(`/billing/invoices/${encodeURIComponent(id)}/issue`, { method: 'POST', body });
+  },
+
+  /**
+   * RECORD WHAT THE AUTHORITY SAID.
+   *
+   * A separate call from issuing, deliberately: clearance is the authority's answer, and
+   * folding it into the issue would mean a network timeout could not be retried without
+   * reissuing the document — which is the one thing that must never happen, because the
+   * ICV and the hash would change.
+   */
+  async submitInvoice(id: string, body: {
+    submissionType: 'clearance' | 'reporting' | 'compliance';
+    status: 'pending' | 'submitted' | 'cleared' | 'reported' | 'rejected' | 'failed' | 'timed_out';
+    httpStatus?: number | null;
+    responseCode?: string | null;
+    responseBody?: string | null;
+    warnings?: string | null;
+    errors?: string | null;
+    nextRetryAt?: string | null;
+  }): Promise<{ id: string; fiscalStatus: string; nextAttempt: number; nextRetryAt: string | null }> {
+    return request(`/billing/invoices/${encodeURIComponent(id)}/submissions`, { method: 'POST', body });
+  },
+
+  /** The document's fiscal identity, its submissions and the credit notes against it. */
+  async invoiceFiscal(id: string): Promise<InvoiceFiscalResponse> {
+    return request(`/billing/invoices/${encodeURIComponent(id)}/fiscal`);
+  },
+
+  /** Simplified invoices whose 24-hour window is open, or has passed. */
+  async reportingQueue(): Promise<ReportingQueueResponse> {
+    return request('/billing/reporting-queue');
+  },
+
+  /**
+   * CORRECT AN ISSUED INVOICE. The credit note is the only remedy the tax rules leave:
+   * the document itself cannot be edited or deleted, so the correction is a second
+   * document that refers to the first.
+   */
+  async creditNote(id: string, body: {
+    reason: string;
+    amount: number;
+    vatAmount: number;
+    creditNumber: string;
+    deviceId?: string;
+  }): Promise<{ id: string; uuid: string; icv: number; total: number; xml: string; qrPayload: string; fiscalStatus: string }> {
+    return request(`/billing/invoices/${encodeURIComponent(id)}/credit-notes`, { method: 'POST', body });
+  },
+
+  /**
+   * A DISCOUNT ON AN UNAPPROVED DOCUMENT, which is a decision about the firm's own fee
+   * rather than a correction to the tax record — hence `billing.discount` and a ceiling
+   * on how much of it a member may give away without a partner.
+   */
+  async applyDiscount(id: string, body: { newSubtotal: number; reason: string }): Promise<{
+    id: string; subtotal: number; discountPct: number;
+  }> {
+    return request(`/billing/invoices/${encodeURIComponent(id)}/discount`, { method: 'POST', body });
+  },
+
+  /**
+   * WRITE THE RECEIVABLE OFF. The invoice stays — it is a tax document and it keeps its
+   * number and its place in the chain — and `taxAdjusted: false` is the server saying in
+   * as many words that the tax already reported is unaffected. A write-off is a decision
+   * about collecting, not about what was supplied.
+   */
+  async writeOff(id: string, reason: string): Promise<{
+    id: string; writtenOff: number; status: string; taxAdjusted: boolean;
+  }> {
+    return request(`/billing/invoices/${encodeURIComponent(id)}/write-off`, {
+      method: 'POST', body: { reason },
+    });
+  },
+
   /** Release an approved, issued invoice to the client. */
   async sendInvoice(id: string): Promise<{ id: string; internalStatus: string }> {
     return request(`/billing/invoices/${encodeURIComponent(id)}/send`, { method: 'POST', body: {} });
@@ -1623,6 +1734,165 @@ export interface FirmInvoicePayment {
   receiptNumber: string | null;
   createdAt: string;
   completedAt: string | null;
+}
+
+/**
+ * ── THE FIRM'S TAX IDENTITY, AND THE PATH OUT OF `draft` ──────────────────────────
+ *
+ * Everything below exists because the firm could DRAFT an invoice and stop: the issue,
+ * the submission to the authority, the credit note that corrects one, the discount and
+ * the write-off were all built on the server and reachable by no screen. `billing` was
+ * eleven routes wide in the audit's own numbers, and this is the half of it that turns a
+ * draft into a tax document.
+ */
+
+/**
+ * The firm's tax registration, exactly as the row is stored.
+ *
+ * SNAKE CASE, DELIBERATELY, AND IT WAS MEASURED RATHER THAN GUESSED. The devices are
+ * mapped by the route into camelCase, but the identity is the row itself — and the first
+ * version of this interface guessed camelCase for both. The screen then read `undefined`
+ * for every field and would have shown an empty registration under a firm that IS
+ * registered: a wrong answer, not a missing one. `scripts/verify/fiscal-live.mjs` caught
+ * it by comparing each field against the table.
+ */
+export interface FiscalIdentity {
+  id: string;
+  tenant_id: string;
+  registered_name: string;
+  registered_name_ar: string | null;
+  vat_registration_number: string;
+  commercial_registration: string;
+  registered_address: string;
+  registered_address_ar: string | null;
+  city: string | null;
+  postal_code: string | null;
+  country: string;
+  environment: 'sandbox' | 'simulation' | 'production';
+  onboarding_status: string;
+  certificate_expires_at: string | null;
+}
+
+export interface FiscalDevice {
+  id: string;
+  label: string;
+  serial: string;
+  /** The device's own invoice counter — the ICV the next document will carry. */
+  counterValue: number;
+  /** Whether a hash-chain head exists. The hash itself is asked for per invoice. */
+  hasChainHead: boolean;
+  isActive: boolean;
+}
+
+/**
+ * `ready` is the answer to one question: may this firm legally send a tax invoice? When
+ * it is false, `blockers` names each missing condition — a screen has to be able to say
+ * WHICH part of onboarding is undone, not merely that something is.
+ */
+export interface FiscalIdentityResponse {
+  identity: FiscalIdentity | null;
+  devices: FiscalDevice[];
+  ready: boolean;
+  blockers: Array<'no_fiscal_identity' | 'onboarding_incomplete' | 'no_active_device'>;
+}
+
+export interface SaveFiscalIdentityBody {
+  registeredName: string;
+  registeredNameAr?: string | null;
+  vatRegistrationNumber: string;
+  commercialRegistration: string;
+  registeredAddress: string;
+  registeredAddressAr?: string | null;
+  city?: string | null;
+  postalCode?: string | null;
+  country?: string;
+  environment: 'sandbox' | 'simulation' | 'production';
+  onboardingStatus: string;
+  certificateExpiresAt?: string | null;
+}
+
+/** What issuing produced: the document's identity and the XML that was hashed. */
+export interface IssuedInvoice {
+  id: string;
+  invoiceNumber: string;
+  uuid: string;
+  icv: number;
+  hash: string;
+  subtype: 'standard' | 'simplified';
+  total: number;
+  xml: string;
+  qrPayload: string;
+  fiscalStatus: string;
+  /** What the authority requires next, in the server's own words. */
+  nextStep: string;
+}
+
+/** A submitted attempt at clearance or reporting, and what came back. */
+export interface FiscalSubmission {
+  id: string;
+  type: 'clearance' | 'reporting' | 'compliance';
+  attempt: number;
+  status: string;
+  httpStatus: number | null;
+  responseCode: string | null;
+  warnings: string | null;
+  errors: string | null;
+  nextRetryAt: string | null;
+  submittedAt: string | null;
+  resolvedAt: string | null;
+}
+
+export interface FiscalCreditNote {
+  id: string;
+  number: string;
+  reason: string;
+  total: number;
+  uuid: string | null;
+  icv: number | null;
+  status: string | null;
+  issuedAt: string | null;
+}
+
+export interface InvoiceFiscalResponse {
+  id: string;
+  invoiceNumber: string;
+  fiscal: {
+    uuid: string | null;
+    subtype: string | null;
+    icv: number | null;
+    previousHash: string | null;
+    hash: string | null;
+    qrPayload: string | null;
+    xmlStorageKey: string | null;
+    supplyAt: string | null;
+    buyerName: string | null;
+    buyerVat: string | null;
+    status: string;
+    statusAt: string | null;
+    device: { label: string; serial: string } | null;
+  };
+  submissions: FiscalSubmission[];
+  creditNotes: FiscalCreditNote[];
+}
+
+/** A simplified invoice whose 24-hour reporting window is open, or has passed. */
+export interface ReportingQueueRow {
+  id: string;
+  number: string;
+  uuid: string | null;
+  supplyAt: string | null;
+  total: number;
+  icv: number | null;
+  status: string | null;
+  /** Past the deadline. The window is 24 hours from the time of supply. */
+  overdue: boolean;
+  reportBy: string | null;
+}
+
+export interface ReportingQueueResponse {
+  count: number;
+  overdue: number;
+  invoices: ReportingQueueRow[];
 }
 
 export interface FirmInvoiceDetail extends FirmInvoiceRow {

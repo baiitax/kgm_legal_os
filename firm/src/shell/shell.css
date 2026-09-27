@@ -3023,3 +3023,174 @@
   .firm-money__feerow { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
   .firm-money__feerow > :first-child { grid-column: 1 / -1; }
 }
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   THE FIRM'S TAX IDENTITY · /fiscal, and the fiscal panel inside an invoice
+
+   One colour decision runs through this block: the readiness banner is the only
+   place that turns GREEN, and it does so only when the server says the firm may
+   legally issue. Everything else here is neutral, because everything else is a
+   fact rather than a verdict — a device counter, a hash, a deadline. A screen
+   that dressed those in accent colours would make a firm under audit feel that
+   the software was worried, which is not the software's job.
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+.firm-fiscal { display: grid; gap: var(--sp-5); }
+
+.firm-fiscal__ready {
+  display: grid;
+  gap: var(--sp-3);
+  padding: var(--sp-4);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+.firm-fiscal__ready--ok { border-color: var(--text-lime); }
+.firm-fiscal__ready--blocked { border-inline-start: 3px solid var(--text-gold); }
+
+.firm-fiscal__readyHead {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--text-md);
+}
+.firm-fiscal__ready--ok .firm-fiscal__readyHead svg { color: var(--text-lime); }
+.firm-fiscal__ready--blocked .firm-fiscal__readyHead svg { color: var(--text-gold); }
+
+.firm-fiscal__readyBody {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: var(--fs-body-sm);
+}
+
+/* Each missing condition, named. A list rather than a sentence, because a firm
+   with two blockers needs to see two. */
+.firm-fiscal__blockers {
+  display: grid;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.firm-fiscal__blockers li {
+  display: grid;
+  gap: 2px;
+  padding-inline-start: var(--sp-3);
+  border-inline-start: 2px solid var(--line-soft);
+}
+.firm-fiscal__blockers strong { font-weight: var(--fw-semibold); font-size: var(--fs-body-sm); }
+.firm-fiscal__blockers span { color: var(--text-dim); font-size: var(--fs-caption); }
+
+.firm-fiscal__sectionHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin-block-end: var(--sp-3);
+}
+.firm-fiscal__h2 { margin: 0; font-size: var(--text-md); font-weight: var(--fw-semibold); }
+.firm-fiscal__h4 {
+  margin: var(--sp-5) 0 var(--sp-2);
+  font-size: var(--fs-body-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--text-dim);
+  text-transform: none;
+}
+
+/* The registration, as a definition list: label above value, two columns on a
+   wide screen and one on a phone. */
+.firm-fiscal__facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: var(--sp-3) var(--sp-5);
+  margin: 0;
+}
+.firm-fiscal__facts > div { display: grid; gap: 2px; }
+.firm-fiscal__facts dt { color: var(--text-faint); font-size: var(--fs-caption); }
+.firm-fiscal__facts dd { margin: 0; font-size: var(--fs-body-sm); }
+
+.firm-fiscal__note {
+  margin: var(--sp-2) 0 0;
+  color: var(--text-dim);
+  font-size: var(--fs-caption);
+  line-height: 1.5;
+  max-inline-size: 76ch;
+}
+/* The amber note is the honest one: manual onboarding, a write-off's tax, the
+   absence of an integration. It must be readable and must not look like an
+   error, because it is not one. */
+.firm-fiscal__note--warn {
+  padding: var(--sp-2) var(--sp-3);
+  border-inline-start: 2px solid var(--text-gold);
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+  color: var(--text-hi);
+}
+
+.firm-fiscal__device { display: grid; gap: 1px; }
+.firm-fiscal__serial { font-size: var(--fs-caption); color: var(--text-faint); }
+.firm-fiscal__hint { font-size: var(--fs-caption); color: var(--text-faint); }
+
+.firm-fiscal__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-block-start: var(--sp-3);
+}
+
+/* The hash, monospaced and complete. It is the one value on this page that a
+   support engineer will read character by character down a telephone. */
+.firm-fiscal__hash {
+  display: grid;
+  gap: 2px;
+  margin: var(--sp-3) 0 0;
+  font-size: var(--fs-caption);
+}
+.firm-fiscal__hash code {
+  font-family: var(--font-num, ui-monospace, monospace);
+  font-size: var(--fs-caption);
+  color: var(--text-hi);
+  word-break: break-all;
+}
+
+/* The submission log: the authority's own words, kept verbatim and never
+   paraphrased, so they get wrap and not truncation. */
+.firm-fiscal__said { display: grid; gap: 2px; }
+.firm-fiscal__errtxt { color: var(--kgm-high); font-size: var(--fs-caption); }
+
+.firm-fiscal__notes {
+  display: grid;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.firm-fiscal__notes li {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) 0;
+  border-block-end: 1px solid var(--line-soft);
+  font-size: var(--fs-body-sm);
+}
+.firm-fiscal__notes li > span:nth-child(2) { flex: 1 1 auto; color: var(--text-dim); }
+
+/* The irreversible-act confirmation. A native checkbox, deliberately: it is the
+   one control on this page whose browser behaviour must not be re-invented. */
+.firm-fiscal__check {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  font-size: var(--fs-caption);
+  color: var(--text-dim);
+  line-height: 1.45;
+}
+.firm-fiscal__check input { margin-block-start: 2px; flex: none; }
+
+.firm-fiscal__panel { border-color: var(--line-soft); }
+
+@media (max-width: 640px) {
+  .firm-fiscal__sectionHead { flex-wrap: wrap; }
+  .firm-fiscal__actions > * { flex: 1 1 auto; }
+}

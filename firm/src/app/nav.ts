@@ -48,7 +48,7 @@
  */
 import type { ComponentType } from 'react';
 import {
-  IconAdmin, IconAudit, IconBilling, IconClients, IconDashboard, IconMatters, IconMyWork,
+  IconAdmin, IconAudit, IconBilling, IconClients, IconDashboard, IconLicences, IconMatters, IconMyWork,
   IconUsers, IconWorkspace, type IconProps,
 } from '@kgm/ui';
 
@@ -185,6 +185,14 @@ const GROUP_DEFS: ReadonlyArray<NavGroupDef> = [
     permissions: [],
     leaves: [
       { id: 'billing', to: '/billing', labelKey: 'money.title', icon: IconBilling, permissions: ['billing.read', 'billing.read_all'] },
+      /*
+        THE FIRM'S TAX IDENTITY IS FISCAL ADMINISTRATION, NOT BILLING — which is why it is
+        a separate leaf rather than a tab inside the console. It is read by anyone with
+        `billing.read` (a member chasing an invoice needs to know whether the firm could
+        legally issue it at all) and written only with `settings.manage`, and it does not
+        behave like a list of documents.
+      */
+      { id: 'fiscal', to: '/fiscal', labelKey: 'fiscal.nav', icon: IconLicences, permissions: ['billing.read', 'billing.read_all'] },
     ],
   },
   {

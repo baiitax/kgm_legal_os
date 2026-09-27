@@ -55,6 +55,7 @@ import {
   type FirmInvoicePayment, type FirmInvoiceRow, type MatterBillingResponse,
 } from '../api/firm.js';
 import { useFirmSession } from '../auth/FirmSession.js';
+import { InvoiceFiscalPanel } from './InvoiceFiscalPanel.js';
 import '../shell/shell.css';
 
 interface BillingProps {
@@ -550,6 +551,21 @@ function InvoicePanel({
               ) : null}
             </CardBody>
           </Card>
+
+          {/*
+            THE FISCAL LIFECYCLE, between the header and the lines.
+
+            Placed high on purpose: an invoice that is approved but NOT ISSUED is the
+            commonest stuck state in this console, and the reader's question ("can I send
+            this?") is answered by the panel above the arithmetic, not below it.
+          */}
+          <InvoiceFiscalPanel
+            invoice={detail}
+            /* Reload THIS invoice and the list behind it: issuing changes the row's
+               fiscal identity, and the list's "issued / not issued" badge is how a member
+               finds the documents still waiting on this panel. */
+            onChanged={() => { load(); onChanged(); }}
+          />
 
           <section>
             <h3 className="firm-panel__subhead">{t('money.panel.lines')} · {detail.lines.length}</h3>

@@ -191,8 +191,16 @@ describe('§50 · navigation is generated from permissions, never hardcoded', ()
       communication are still absent, for the same reason as before: there is still no
       screen behind them.
     */
+    /*
+      AND THE GROUP GAINED ITS SECOND LEAF WHEN THE TAX IDENTITY WAS BUILT. `/fiscal` is
+      where the firm's registration, its issuing device and the 24-hour reporting queue
+      live — the half of the invoice lifecycle that the audit found reachable only by an
+      engineer. It is asserted here rather than merely allowed: a leaf that is added to a
+      group and not to this list means the navigation changed without anyone deciding it
+      should, which is the failure mode this whole test exists to catch.
+    */
     const finance = nav.groups.find((g) => g.group.id === 'finance');
-    expect(finance?.leaves.map((l) => l.id)).toEqual(['billing']);
+    expect(finance?.leaves.map((l) => l.id)).toEqual(['billing', 'fiscal']);
     for (const absent of ['legal', 'compliance', 'communication']) {
       expect(ids, absent).not.toContain(absent);
     }
